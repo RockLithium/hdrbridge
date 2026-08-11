@@ -2,17 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=850, user-scalable=yes">
   <meta name="description" content="Local, browser-based HDR image conversion.">
   <title>HDR Bridge</title>
-  <link rel="stylesheet" href="./src/styles.css">
+  <link href="https://fonts.googleapis.com/css2?family=Ubuntu+Condensed&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@300;400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./src/styles.css?v=4">
 </head>
 <body>
+  <a href="./tools" id="homeButton">← Go Back</a>
   <main class="container">
-    <header class="page-header">
-      <h1>HDR Bridge</h1>
-      <p>Convert HDR still images locally in your browser.</p>
-    </header>
+    <h1>HDR Bridge</h1>
+    <div class="subtitle">Convert HDR still images locally in your browser.</div>
 
     <section class="group" aria-labelledby="source-title">
       <h2 id="source-title">SELECT HDR IMAGE</h2>
@@ -39,12 +40,10 @@
         <button class="option-box" type="button" data-format="avif">HDR AVIF</button>
         <button class="option-box" type="button" data-format="tiff">HDR TIFF</button>
       </div>
-      <p class="availability" id="availability">HDR PNG is available now for direct PQ/HLG HEIF/HIF input.</p>
+      <div class="availability" id="availability">HDR PNG is available now for direct PQ/HLG HEIF/HIF input.</div>
     </section>
 
-    <section class="group parameters" aria-labelledby="parameters-title">
-      <h2 id="parameters-title">FORMAT PARAMETERS</h2>
-
+    <section class="group parameters" aria-label="Format parameters">
       <div class="parameter" id="color-space-row">
         <span class="parameter-label">Color Space</span>
         <div class="inline-options" data-setting="primaries">
@@ -78,6 +77,26 @@
         </div>
       </div>
 
+      <div class="parameter" id="peak-row" hidden>
+        <span class="parameter-label">Peak</span>
+        <div class="inline-options five-options" data-setting="peak">
+          <button class="mini-option active" type="button" data-value="0">Faithful / Auto</button>
+          <button class="mini-option" type="button" data-value="1000">1000 nits</button>
+          <button class="mini-option" type="button" data-value="2000">2000 nits</button>
+          <button class="mini-option" type="button" data-value="4000">4000 nits</button>
+          <button class="mini-option" type="button" data-value="10000">10000 nits</button>
+        </div>
+      </div>
+
+      <div class="parameter" id="preservation-row">
+        <span class="parameter-label">Preserve</span>
+        <div class="inline-options three-options">
+          <button class="mini-option active" id="lossless-option" type="button" data-toggle="lossless">Lossless</button>
+          <button class="mini-option active" type="button" data-toggle="copyExif">Exif</button>
+          <button class="mini-option active" type="button" data-toggle="copyXmp">XMP</button>
+        </div>
+      </div>
+
       <div class="parameter" id="encoding-row">
         <span class="parameter-label" id="slider-label">PNG Compression</span>
         <div class="slider-line">
@@ -87,27 +106,23 @@
       </div>
     </section>
 
-    <section class="action-area">
-      <button id="convert-button" class="main-button" type="button" disabled>CONVERT</button>
+    <section class="action-area process-btn-container">
+      <button id="convert-button" class="main-btn process-button" type="button" disabled>CONVERT</button>
       <div class="progress-track" id="progress-track" hidden><span></span></div>
-      <p class="status" id="status" role="status">Select a supported HDR image to begin.</p>
+      <div class="status-text status" id="status" role="status">Select a supported HDR image to begin.</div>
     </section>
 
     <section class="group" aria-labelledby="preview-title">
       <h2 id="preview-title">PREVIEW</h2>
-      <div class="preview" id="preview">
-        <span>Preview appears here when the browser supports the selected image.</span>
+      <div class="preview preview-box" id="preview">
+        <span class="preview-placeholder">No file loaded</span>
       </div>
     </section>
 
     <div class="download-area">
-      <a id="download-button" class="main-button download disabled" aria-disabled="true">DOWNLOAD</a>
+      <button id="download-button" class="main-btn download-button" type="button" disabled>DOWNLOAD</button>
     </div>
-
-    <footer>
-      Processing is local. Files are not uploaded. Browser HDR presentation is used as-is; no SDR simulation is applied.
-    </footer>
   </main>
-  <script type="module" src="./src/app.js"></script>
+  <script type="module" src="./src/app.js?v=4"></script>
 </body>
 </html>

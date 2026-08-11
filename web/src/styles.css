@@ -1,69 +1,90 @@
 :root {
   color-scheme: dark;
-  font-family: "Ubuntu Condensed", "Arial Narrow", "PingFang SC", sans-serif;
+  font-family: "Ubuntu Condensed", "PingFang SC", sans-serif;
   background: #121212;
   color: #e0e0e0;
-  font-synthesis: none;
 }
-
-* { box-sizing: border-box; }
 
 body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
-  padding: 56px 16px;
-  background:
-    radial-gradient(circle at 50% -20%, rgba(255, 126, 0, 0.08), transparent 36rem),
-    #121212;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: #e0e0e0;
+  background-color: #121212;
+  font-family: "Ubuntu Condensed", "PingFang SC", sans-serif;
   letter-spacing: 0.3px;
 }
 
-button, input, a { font: inherit; }
+#homeButton {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  z-index: 100;
+  padding: 10px 16px;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 30px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+  font-size: 0.9em;
+  text-decoration: none;
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+  transition: all 0.3s ease;
+}
+
+#homeButton:hover { background: rgba(255, 255, 255, 0.1); transform: scale(1.04); }
+#homeButton:active { transform: scale(0.96); transition: transform 0.05s; }
 
 .container {
-  width: min(800px, 100%);
-  margin: 0 auto;
-  padding: 28px clamp(20px, 5vw, 58px) 36px;
+  width: 90%;
+  max-width: 800px;
+  margin: 70px auto 0;
+  padding: 10px 0 40px;
   text-align: center;
-  background: rgba(30, 30, 30, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(30, 30, 30, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.05);
   border-radius: 28px;
   box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(15px);
 }
 
-.page-header { margin-bottom: 34px; }
-
 h1 {
-  margin: 0 0 8px;
-  font-size: clamp(42px, 7vw, 56px);
-  line-height: 1.08;
+  font-family: "Ubuntu Condensed", "PingFang SC", sans-serif;
+  font-size: 48px;
+  font-weight: bold;
   letter-spacing: 2px;
-  background: linear-gradient(45deg, #a52a2a, #ff7e00 50%, #daa520);
-  background-clip: text;
-  color: transparent;
+  margin-bottom: 10px;
+  background: linear-gradient(45deg, #a52a2a 0%, #ff7e00 50%, #daa520 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
-.page-header p {
-  margin: 0;
+.subtitle {
   color: #888;
-  font-size: 17px;
+  font-size: 18px;
+  margin-bottom: 40px;
 }
 
 .group {
-  max-width: 620px;
-  margin: 0 auto 24px;
+  width: calc(100% - 30px);
+  max-width: 600px;
+  margin: 0 auto 20px;
   text-align: left;
 }
 
 h2, .parameter-label {
   display: block;
-  margin: 0 0 7px;
+  margin: 0 0 5px;
   color: #e0e0e0;
-  font-size: 17px;
+  font-family: "Ubuntu Condensed", "PingFang SC", sans-serif;
+  font-size: 18px;
   font-weight: 400;
-  line-height: 1.25;
+  line-height: normal;
 }
 
 .file-drop {
@@ -80,19 +101,21 @@ h2, .parameter-label {
   background: rgba(42, 42, 42, 0.8);
   border: 2px solid transparent;
   border-radius: 10px;
-  transition: border-color 160ms, box-shadow 160ms, background-color 160ms;
+  transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
 }
 
 .file-drop:hover, .file-drop.drag-active {
+  z-index: 50;
+  background: rgba(50, 50, 50, 1);
   border-color: #ff7e00;
   border-style: dashed;
-  background: rgba(50, 50, 50, 0.95);
   box-shadow: 0 0 12px rgba(255, 126, 0, 0.2);
 }
 
 .file-drop input {
   position: absolute;
   inset: 0;
+  z-index: 100;
   width: 100%;
   height: 100%;
   opacity: 0;
@@ -101,10 +124,11 @@ h2, .parameter-label {
 
 .file-name {
   max-width: 100%;
+  padding: 0 20px;
   overflow: hidden;
-  color: #aaa;
-  font-family: Ubuntu, "Segoe UI", "PingFang SC", sans-serif;
-  font-size: 17px;
+  color: #888;
+  font-family: Ubuntu, "PingFang SC", sans-serif;
+  font-size: 18px;
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -130,7 +154,7 @@ h2, .parameter-label {
   margin-top: 2px;
   overflow: hidden;
   color: #cfcfcf;
-  font-family: Ubuntu, "Segoe UI", sans-serif;
+  font-family: Ubuntu, "PingFang SC", sans-serif;
   font-size: 13px;
   font-weight: 400;
   line-height: 1.35;
@@ -144,77 +168,97 @@ h2, .parameter-label {
 }
 
 .option-box, .mini-option {
+  box-sizing: border-box;
   min-width: 0;
+  height: 50px;
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   color: #888;
-  background: rgba(42, 42, 42, 0.55);
-  border: 1px solid rgba(88, 88, 88, 0.35);
+  background-color: rgba(42, 42, 42, 0.5);
+  border: 1px solid rgba(88, 88, 88, 0.3);
   border-radius: 10px;
-  font-family: Ubuntu, "Segoe UI", "PingFang SC", sans-serif;
+  font-family: Ubuntu, "PingFang SC", sans-serif;
+  font-size: 16px;
   font-weight: 700;
-  transition: border-color 150ms, color 150ms, box-shadow 150ms;
+  text-align: center;
+  user-select: none;
+  transition: border-color 0.2s, color 0.2s, box-shadow 0.2s;
 }
 
-.option-box { height: 52px; font-size: 16px; }
 .option-box:hover, .mini-option:hover { border-color: #ff7e00; color: #e0e0e0; }
-
 .option-box.active, .mini-option.active {
   color: transparent;
-  background: linear-gradient(45deg, #a52a2a, #ff7e00 50%, #daa520);
+  background: linear-gradient(45deg, #a52a2a 0%, #ff7e00 50%, #daa520 100%);
   border-color: #ff7e00;
-  box-shadow: 0 0 10px rgba(255, 126, 0, 0.24);
+  box-shadow: 0 0 10px rgba(255, 126, 0, 0.3);
   background-clip: text;
-  -webkit-text-fill-color: transparent;
   -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
-.availability {
-  min-height: 18px;
-  margin: 8px 2px 0;
-  color: #777;
-  font-size: 13px;
-  line-height: 1.35;
+.availability, .status-text {
+  min-height: 20px;
+  margin: 10px 0 0;
+  color: #888;
+  font-family: "Ubuntu Light", "PingFang SC", sans-serif;
+  font-size: 14px;
+  font-weight: bold;
+  line-height: normal;
 }
 
-.availability.unavailable { color: #bb765b; }
+.availability.unavailable, .status.error { color: #e27663; }
+.status.success { color: #c99537; }
 
-.parameters {
-  padding: 15px;
-  background: rgba(14, 14, 14, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.04);
-  border-radius: 12px;
-}
-
-.parameters h2 { margin-bottom: 13px; }
+.parameters { padding: 0; background: none; border: 0; }
 .parameter + .parameter { margin-top: 15px; }
-
-.inline-options { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; }
-.mini-option { min-height: 40px; padding: 7px 10px; font-size: 14px; }
+.inline-options { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 10px; }
 
 .slider-line { display: grid; grid-template-columns: 1fr 42px; align-items: center; gap: 12px; }
 input[type="range"] { width: 100%; accent-color: #ff7e00; }
-output { color: #ff9d42; font-family: Ubuntu, "Segoe UI", sans-serif; text-align: right; }
+output { color: #ff9d42; font-family: Ubuntu, "PingFang SC", sans-serif; text-align: right; }
 
-.action-area, .download-area { max-width: 620px; margin: 0 auto 24px; }
-.main-button {
+.process-btn-container, .download-area { width: calc(100% - 30px); max-width: 600px; margin: 0 auto 20px; }
+.main-btn {
   width: 100%;
-  min-height: 48px;
-  padding: 10px 32px;
+  padding: 10px 40px;
   color: #e0e0e0;
-  background: #a43e0b;
   border: 0;
   border-radius: 10px;
   cursor: pointer;
-  font-size: 23px;
-  font-weight: 700;
+  font-family: "Ubuntu Condensed", "PingFang SC", sans-serif;
+  font-size: 24px;
+  font-weight: bold;
+  text-transform: uppercase;
   text-decoration: none;
-  transition: background 160ms, transform 80ms, opacity 160ms;
+  text-shadow: none;
+  box-shadow: none;
+  transition: all 0.3s;
 }
 
-.main-button:hover:not(:disabled):not(.disabled) { background: #c84d0d; }
-.main-button:active:not(:disabled):not(.disabled) { transform: scale(0.992); }
-.main-button:disabled, .main-button.disabled { cursor: default; opacity: 0.3; pointer-events: none; }
-.download { display: flex; align-items: center; justify-content: center; background: #805509; }
+.process-button { background: linear-gradient(45deg, #2e8b57 0%, #3cb371 100%); }
+.process-button:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
+.process-button:disabled { color: #888; background: #444; cursor: not-allowed; }
+.process-button.is-processing {
+  background: linear-gradient(45deg, #8b0000 0%, #b22222 100%);
+  animation: pulse 2s infinite;
+}
+.process-button.is-complete { background: linear-gradient(45deg, #1e90ff 0%, #00bfff 100%); cursor: default; }
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(178, 34, 34, 0.7); }
+  70% { box-shadow: 0 0 0 10px rgba(178, 34, 34, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(178, 34, 34, 0); }
+}
+
+.download-button {
+  background: linear-gradient(45deg, #a52a2a 0%, #ff7e00 50%, #daa520 100%);
+}
+.download-button:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
+.download-button:disabled { color: #888; background: #444; cursor: not-allowed; }
+.download-button:active { transform: scale(0.98); }
 
 .progress-track {
   height: 3px;
@@ -232,38 +276,36 @@ output { color: #ff9d42; font-family: Ubuntu, "Segoe UI", sans-serif; text-align
 }
 @keyframes progress { from { transform: translateX(-105%); } to { transform: translateX(285%); } }
 
-.status { min-height: 20px; margin: 8px 0 0; color: #888; font-size: 14px; }
-.status.error { color: #e27663; }
-.status.success { color: #c99537; }
-
-.preview {
+.preview-box {
   min-height: 250px;
+  padding: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  color: #777;
-  background: rgba(8, 8, 8, 0.65);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  color: #555;
+  background-color: #2a2a2a;
+  border: 1px dashed #505050;
   border-radius: 10px;
-  font-family: Ubuntu, "Segoe UI", sans-serif;
-  font-size: 14px;
+  position: relative;
+}
+.preview-box img { display: block; max-width: 100%; max-height: 520px; object-fit: contain; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+.preview-placeholder {
+  color: #555;
+  font-family: Ubuntu, "PingFang SC", sans-serif;
+  font-weight: 700;
   text-align: center;
 }
-.preview img { display: block; max-width: 100%; max-height: 520px; object-fit: contain; }
-
-footer { max-width: 620px; margin: 6px auto 0; color: #626262; font-size: 12px; line-height: 1.5; }
 
 [hidden] { display: none !important; }
 
-@media (max-width: 560px) {
-  body { padding: 18px 8px; }
-  .container { padding: 25px 15px 30px; border-radius: 20px; }
+@media (max-width: 700px) {
+  #homeButton { position: relative; align-self: flex-start; top: 12px; left: 12px; }
+  .container { margin-top: 30px; }
   .inspector { grid-template-columns: 1fr; }
-  .option-box { height: 48px; font-size: 14px; }
-  .preview { min-height: 190px; }
+  .five-options { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation-duration: 0.01ms !important; }
+  *, *::before, *::after { transition: none !important; animation-duration: 0.01ms !important; }
 }
