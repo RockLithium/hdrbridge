@@ -66,8 +66,8 @@ jobs:
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/v1.0.0/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 
           ### SHA-256
-          - `HDRBridge-v1.0.0-Windows-x64.zip`: `$zipHash`
-          - `hdrbridge.exe`: `$exeHash`
+          - HDRBridge-v1.0.0-Windows-x64.zip: $zipHash
+          - hdrbridge.exe: $exeHash
           "@ | Set-Content -Encoding UTF8 "${{ github.workspace }}\release-notes.md"
 
       - name: Create GitHub Release
