@@ -19,9 +19,10 @@ conversion model through a narrow portable C/WASM boundary:
 Web UI -> Web Worker -> codec adapter -> canonical linear HDR master -> encoder
 ```
 
-Codec modules are loaded on demand. The GitHub Pages build remains
-single-thread compatible because cross-origin isolation headers are not
-available there; deployments with suitable headers may add threaded modules.
+The worker and WebAssembly core are loaded only after the user selects a file,
+so the codec bundle is not part of the initial page load. The GitHub Pages build
+is single-threaded because cross-origin isolation headers are not available
+there; deployments with suitable headers may add threaded modules.
 
 ## Core model
 
@@ -40,6 +41,6 @@ path. A failed or cancelled operation does not leave a partial final output.
 ## Platform boundaries
 
 HEIF/AVIF, JPEG/JPEG XL, PNG, TIFF, ICC and Ultra HDR processing use portable
-libraries where practical. Windows JPEG XR uses WIC and is isolated from the
-portable core. The Web build therefore requires a separate portable JPEG XR
-codec with equivalent FP16 scRGB semantics; it cannot compile the WIC adapter.
+libraries where practical. Windows JPEG XR uses WIC. The Web build substitutes
+jxrlib for the container codec while preserving the same FP16 linear scRGB
+output semantics; Windows WIC compatibility is covered by release regression.

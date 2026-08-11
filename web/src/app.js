@@ -1,11 +1,11 @@
-const availableFormats = new Set(["png"]);
+const availableFormats = new Set(["uhdr", "png", "jxl", "jxr", "avif", "tiff"]);
 const formatCopy = {
-  uhdr: "Ultra HDR JPEG codec is not part of this Web build yet.",
-  png: "HDR PNG is available now for direct PQ/HLG HEIF/HIF input.",
-  jxl: "JPEG XL Web codec is not part of this build yet.",
-  jxr: "Portable FP16 JPEG XR encoding remains under technical evaluation.",
-  avif: "HDR AVIF Web encoding is not part of this build yet.",
-  tiff: "HDR TIFF Web encoding is not part of this build yet.",
+  uhdr: "Ultra HDR JPEG with a faithful ISO gain map.",
+  png: "16-bit HDR PNG with standard cICP signaling.",
+  jxl: "JPEG XL edit/master output with HDR color signaling.",
+  jxr: "FP16 linear scRGB JPEG XR edit/master output.",
+  avif: "Direct 10-bit HDR AVIF output.",
+  tiff: "Direct 16-bit PQ HDR TIFF output.",
 };
 
 const state = {
@@ -172,7 +172,9 @@ async function inspectFile(file) {
   setStatus("Inspecting the HDR container locally...");
   try {
     const buffer = await file.arrayBuffer();
-    codecWorker().postMessage({ type: "inspect", requestId, buffer }, [buffer]);
+    codecWorker().postMessage({
+      type: "inspect", requestId, buffer, fileName: file.name,
+    }, [buffer]);
   } catch (error) {
     setStatus(error.message, "error");
   }
@@ -192,13 +194,18 @@ function selectFile(file) {
 }
 
 function showInspector(info) {
-  const source = info.input;
   elements.inspector.hidden = false;
-  elements.inspectKind.textContent = `${source.asset} · ${source.brand}`;
-  elements.inspectRaster.textContent = `${source.width}×${source.height} · ${source.bitDepth}-bit`;
-  elements.inspectSignal.textContent = `${source.primariesName} · ${source.transferName} · Matrix ${source.matrix} · ${source.fullRange ? "Full" : "Limited"}`;
-  const metadata = Object.entries(source.metadata)
-    .filter(([, present]) => present)
+  const kind = info.assetKind === "gain-map-hdr" ? "Gain-map HDR" : "Direct HDR";
+  elements.inspectKind.textContent = `${kind} · ${info.format || info.containerBrand}`;
+  elements.inspectRaster.textContent = `${info.width}×${info.height} · ${info.bitDepth || "?"}-bit · ${info.pixelFormat || info.chroma}`;
+  const primaries = info.color?.primaries === 9 ? "BT.2020" :
+    info.color?.primaries === 12 ? "Display P3" : `CICP ${info.color?.primaries ?? "?"}`;
+  const transfer = info.color?.transferName || `CICP ${info.color?.transfer ?? "?"}`;
+  elements.inspectSignal.textContent = info.gainMapPresent
+    ? `${info.gainMapFamily} · ${info.gainMapSize.width}×${info.gainMapSize.height} · ${info.gainMapLayout.channels} channel`
+    : `${primaries} · ${transfer} · Matrix ${info.color?.matrix ?? "?"} · ${info.range}`;
+  const metadata = Object.entries(info.metadata || {})
+    .filter(([, status]) => status === "present")
     .map(([name]) => name.toUpperCase());
   elements.inspectMetadata.textContent = metadata.length ? metadata.join(" · ") : "None reported";
 }
@@ -212,26 +219,31 @@ function handleWorkerMessage({ data }) {
   }
   if (data.type === "inspected") {
     showInspector(data.info);
-    state.sourceSupported = data.info.supported;
-    setStatus(data.info.supported
-      ? "Direct HDR signal detected. Ready to convert."
-      : "No supported direct PQ/HLG HDR signal was found.",
-    data.info.supported ? "" : "error");
-    elements.convert.disabled = !data.info.supported || !availableFormats.has(state.format);
+    state.sourceSupported = data.info.assetKind === "direct-hdr" ||
+      data.info.assetKind === "gain-map-hdr";
+    setStatus(state.sourceSupported
+      ? "HDR source detected. Ready to convert locally."
+      : "No supported HDR data was found.", state.sourceSupported ? "" : "error");
+    elements.convert.disabled = !state.sourceSupported || !availableFormats.has(state.format);
     return;
   }
   if (data.type === "converted") {
     setBusy(false);
-    const blob = new Blob([data.buffer], { type: "image/png" });
+    const blob = new Blob([data.buffer], { type: data.mime });
     state.outputUrl = URL.createObjectURL(blob);
-    const image = new Image();
-    image.alt = "Converted HDR output";
-    image.src = state.outputUrl;
-    elements.preview.replaceChildren(image);
+    if (["uhdr", "png", "avif"].includes(data.format)) {
+      const image = new Image();
+      image.alt = "Converted HDR output";
+      image.src = state.outputUrl;
+      elements.preview.replaceChildren(image);
+    } else {
+      elements.preview.innerHTML = '<span class="preview-placeholder">Preview unavailable in this browser</span>';
+    }
     const stem = state.file.name.replace(/\.[^.]+$/, "");
-    state.outputName = `${stem}-hdrbridge.png`;
+    state.outputName = `${stem}-hdrbridge.${data.extension}`;
     elements.download.disabled = false;
-    setStatus(`Converted ${data.info.output.bitDepth}-bit HDR PNG · ${humanBytes(blob.size)} · peak ${data.info.reconstructed.peakNits.toFixed(1)} nit`, "success");
+    const peak = data.info.verification?.hdrDiagnostics?.maxChannelNits;
+    setStatus(`Converted ${data.info.verification?.pixelFormat || state.format.toUpperCase()} · ${humanBytes(blob.size)}${Number.isFinite(peak) ? ` · peak ${peak.toFixed(1)} nit` : ""}`, "success");
     elements.convert.textContent = "PROCESSING COMPLETE";
     elements.convert.className = "main-btn process-button is-complete";
     elements.convert.disabled = true;
@@ -250,7 +262,7 @@ async function convert() {
   if (!state.file || !state.sourceSupported || !availableFormats.has(state.format)) return;
   clearOutput();
   setBusy(true);
-  setStatus("Loading the HEIF decoder and reconstructing the HDR raster locally...");
+  setStatus("Loading the required codecs and reconstructing the HDR raster locally...");
   const requestId = ++state.requestId;
   try {
     const buffer = await state.file.arrayBuffer();
@@ -258,10 +270,11 @@ async function convert() {
       type: "convert",
       requestId,
       buffer,
+      fileName: state.file.name,
+      format: state.format,
       primaries: state.primaries,
       transfer: state.transfer,
-      compression: state.encodingValues.png,
-      quality: state.encodingValues[state.format],
+      encodingValue: state.encodingValues[state.format],
       lossless: state.lossless,
       copyExif: state.copyExif,
       copyXmp: state.copyXmp,

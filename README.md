@@ -55,10 +55,10 @@ developer tools and are not included in the normal Windows release archive.
 ## Web application
 
 The browser version lives in [`web/`](web/) and is built independently from
-the desktop application. Its first verified WASM path converts direct PQ/HLG
-HEIF/HIF to 16-bit HDR PNG entirely in a Web Worker. Browser support is being
-added codec by codec; unavailable codecs are reported rather than silently
-substituted.
+the desktop application. It runs the portable HDR core in a Web Worker and
+supports the same principal direct-HDR and gain-map input families. Browser
+outputs are Ultra HDR JPEG, HDR PNG, JPEG XL, FP16 scRGB JPEG XR, direct HDR
+AVIF and direct HDR TIFF. Files remain on the device.
 
 ## Documentation
 

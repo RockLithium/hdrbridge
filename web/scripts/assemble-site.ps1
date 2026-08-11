@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $webRoot = Split-Path -Parent $PSScriptRoot
 $distRoot = Join-Path $webRoot "dist"
-$wasm = Join-Path $webRoot "public\codecs\heif-png\hdrbridge-core.wasm"
+$wasm = Join-Path $webRoot "public\codecs\hdrbridge\hdrbridge-core.wasm"
 if (-not (Test-Path -LiteralPath $wasm)) {
   throw "Run web/scripts/build-wasm.ps1 first"
 }

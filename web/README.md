@@ -1,41 +1,29 @@
 # HDR Bridge Web
 
-HDR Bridge Web is a static, one-file-at-a-time converter for GitHub Pages. The
-selected image and converted result stay in the browser. Codec modules load in
-a Web Worker only when needed.
+HDR Bridge Web is the static, one-file-at-a-time browser edition of HDR Bridge.
+Selected images and converted results stay on the device; the page has no upload
+or server-side conversion path.
 
-## Current conversion path
+The WebAssembly module compiles the desktop project's HDR core and portable codec
+libraries. It supports direct PQ/HLG HEIF/HIF, Apple Adaptive HDR HEIC/JPEG,
+Ultra HDR JPEG, Adobe gain-map AVIF/TIFF, direct HDR AVIF/PNG/TIFF, JPEG XL and
+FP16 scRGB JPEG XR input. Outputs are Ultra HDR JPEG, HDR PNG, JPEG XL, FP16
+scRGB JPEG XR, direct HDR AVIF and direct HDR TIFF.
 
-The first production module handles direct HDR HEIF/HIF:
-
-- HEVC decode through libheif 1.23.1 and libde265 1.0.16;
-- Rec.2020 or Display P3 output;
-- PQ/ST2084 or BT.2100 HLG output (HLG is Rec.2020 only);
-- lossless 16-bit RGB PNG with cICP and full-range signaling;
-- native browser preview and Blob download.
-
-PQ/HLG transfer math is compiled from `core/src/hdr_transfer.cpp`. Regression
-tests compare decoded 16-bit pixel CRCs against the Windows core for real Canon
-PQ and Nikon HLG fixtures. Private fixtures are not included in this repository.
-
-Other output cards remain visible because they define the product UI, but the
-page labels unavailable codec paths plainly and disables conversion for them.
-They are not substituted with another format.
+Native browser HDR presentation is used for JPEG, PNG and AVIF previews. If the
+browser cannot display an output format, conversion and download remain available
+and the preview reports that it is unavailable. No SDR simulation is generated.
 
 ## Build
 
-Activate Emscripten 4.0.21 and run:
+The Windows build uses the repository's pinned vcpkg setup and an active
+Emscripten SDK:
 
-```bash
-bash web/scripts/build-wasm.sh
-bash web/scripts/assemble-site.sh
+```powershell
+pwsh web/scripts/build-wasm.ps1
+pwsh web/scripts/assemble-site.ps1
 ```
 
-On the Windows development machine, `web/scripts/build-wasm.ps1` performs the
-same pinned build using the existing Emscripten and Ninja installations. Build
-caches, generated WASM, private images and `web/dist` are ignored by Git.
-
-The module is single-threaded so deployment does not require cross-origin
-isolation headers that GitHub Pages cannot configure. Large images can still
-reach a browser's WebAssembly memory limit; this is reported as a conversion
-error.
+The module is single-threaded so GitHub Pages does not need cross-origin
+isolation headers. Large images are processed in a worker, but browser and device
+WebAssembly memory limits still apply.

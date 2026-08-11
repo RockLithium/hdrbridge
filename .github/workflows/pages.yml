@@ -30,7 +30,7 @@ jobs:
           git clone --depth 1 --branch 4.0.21 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
           "$RUNNER_TEMP/emsdk/emsdk" install 4.0.21
           "$RUNNER_TEMP/emsdk/emsdk" activate 4.0.21
-      - name: Build the HEIF/PQ/HLG Web module
+      - name: Build the HDR Bridge Web module
         run: |
           source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           bash web/scripts/build-wasm.sh

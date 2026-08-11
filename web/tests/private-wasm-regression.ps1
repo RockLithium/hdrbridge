@@ -2,11 +2,11 @@ param(
   [string]$FixtureRoot = (Join-Path $PSScriptRoot "..\..\..\private-fixtures\golden-inputs"),
   [string]$OutputRoot = (Join-Path $PSScriptRoot "..\..\..\private-fixtures\test-output\web-regression"),
   [string]$Cli = (Join-Path $PSScriptRoot "..\..\build-vs\bin\Release\hdrbridge-cli.exe"),
-  [string]$CoreModule = (Join-Path $PSScriptRoot "..\public\codecs\heif-png\hdrbridge-core.mjs")
+  [string]$CoreModule = (Join-Path $PSScriptRoot "..\public\codecs\hdrbridge\hdrbridge-core.mjs")
 )
 
 $ErrorActionPreference = "Stop"
-$converter = Join-Path $PSScriptRoot "convert-heif.mjs"
+$converter = Join-Path $PSScriptRoot "convert-asset.mjs"
 $hasher = Join-Path $PSScriptRoot "png-pixel-hash.mjs"
 
 foreach ($required in @($Cli, $CoreModule, $converter, $hasher)) {
@@ -31,22 +31,22 @@ try {
     $created.Add($webOutput)
     $created.Add($desktopOutput)
 
-    & node $converter $CoreModule $input $webOutput $case.Primaries $case.Transfer 1
+    & node $converter $CoreModule $input $webOutput 1 $case.Primaries $case.Transfer 1
     if ($LASTEXITCODE -ne 0) { throw "$($case.Name) Web conversion failed" }
     & $Cli convert $input $desktopOutput --mode=png-pq16 "--gamut=$($case.Gamut)" `
       "--transfer=$($case.TransferName)" --no-icc --png-compression=1 --overwrite | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "$($case.Name) desktop reference failed" }
 
-    $hashLines = @(& node $hasher $CoreModule $webOutput $desktopOutput)
+    $hashLines = @(& node $hasher $webOutput $desktopOutput)
     if ($LASTEXITCODE -ne 0 -or $hashLines.Count -ne 2) {
       throw "$($case.Name) pixel hash failed"
     }
-    $webCrc = ($hashLines[0] -split "\s+")[0]
-    $desktopCrc = ($hashLines[1] -split "\s+")[0]
-    if ($webCrc -ne $desktopCrc) {
-      throw "$($case.Name) pixel mismatch: Web $webCrc, desktop $desktopCrc"
+    $webHash = ($hashLines[0] -split "\s+")[0]
+    $desktopHash = ($hashLines[1] -split "\s+")[0]
+    if ($webHash -ne $desktopHash) {
+      throw "$($case.Name) RGB16 pixel mismatch: Web $webHash, desktop $desktopHash"
     }
-    Write-Host "PASS $($case.Name) RGB16 CRC-32 $webCrc"
+    Write-Host "PASS $($case.Name) RGB16 SHA-256 $webHash"
   }
 } finally {
   foreach ($path in $created) {

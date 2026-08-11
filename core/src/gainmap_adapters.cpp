@@ -31,6 +31,14 @@ using Clock = std::chrono::steady_clock;
 constexpr char kAppleHdrGainMapUrn[] =
     "urn:com:apple:photo:2020:aux:hdrgainmap";
 
+uint32_t codec_worker_count() {
+#if defined(__EMSCRIPTEN__)
+  return 1u;
+#else
+  return std::clamp(std::thread::hardware_concurrency(), 1u, 32u);
+#endif
+}
+
 struct AvifDecoderDeleter {
   void operator()(avifDecoder* value) const { avifDecoderDestroy(value); }
 };
@@ -222,8 +230,7 @@ AvifDecoderPtr parse_avif(const std::vector<uint8_t>& bytes,
                           bool decode_pixels) {
   AvifDecoderPtr decoder(avifDecoderCreate());
   if (!decoder) throw std::bad_alloc();
-  decoder->maxThreads = static_cast<int>(std::clamp(
-      std::thread::hardware_concurrency(), 1u, 32u));
+  decoder->maxThreads = static_cast<int>(codec_worker_count());
   decoder->imageContentToDecode = AVIF_IMAGE_CONTENT_ALL;
   require_avif(avifDecoderSetIOMemory(decoder.get(), bytes.data(), bytes.size()),
                decoder->diag, "set AVIF input memory");
@@ -607,7 +614,11 @@ struct TiffGainMapData {
 };
 
 TiffPtr open_tiff_gain_map(const std::filesystem::path& path) {
+#ifdef _WIN32
   TiffPtr tiff(TIFFOpenW(path.c_str(), "r"));
+#else
+  TiffPtr tiff(TIFFOpen(path.string().c_str(), "r"));
+#endif
   if (!tiff) throw std::runtime_error("cannot open Adobe gain-map TIFF");
   if (TIFFMergeFieldInfo(tiff.get(), kGainMapFields,
                          static_cast<uint32_t>(std::size(kGainMapFields))) < 0) {
@@ -1406,11 +1417,14 @@ GainMapAsset extract_apple_heif_gainmap_asset(
     const std::filesystem::path& path, std::atomic_bool* cancel) {
   if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
   const auto parse_start = Clock::now();
-  const int worker_count = static_cast<int>(std::clamp(
-      std::thread::hardware_concurrency(), 1u, 32u));
+  const int worker_count = static_cast<int>(codec_worker_count());
   HeifContextPtr context(heif_context_alloc());
   if (!context) throw std::bad_alloc();
+#if defined(__EMSCRIPTEN__)
+  heif_context_set_max_decoding_threads(context.get(), 0);
+#else
   heif_context_set_max_decoding_threads(context.get(), worker_count);
+#endif
   require_heif(heif_context_read_from_file(context.get(), path.string().c_str(), nullptr),
                "read Apple HDR HEIC");
   heif_image_handle* raw_primary = nullptr;
@@ -1696,8 +1710,7 @@ ReconstructedHdr reconstruct_apple_heif_gainmap(
     double gain_cpu_ms = 0.0;
     double color_cpu_ms = 0.0;
   };
-  const uint32_t worker_count = std::min<uint32_t>(
-      std::clamp(std::thread::hardware_concurrency(), 1u, 32u), height);
+  const uint32_t worker_count = std::min<uint32_t>(codec_worker_count(), height);
   std::vector<WorkerState> states(worker_count);
   for (auto& state : states) {
     state.map_row.resize(width);
@@ -1928,8 +1941,7 @@ ReconstructedHdr reconstruct_apple_jpeg_gainmap(
     double maximum_nits = 0.0;
     long double sum_max_nits = 0.0;
   };
-  const uint32_t worker_count = std::min<uint32_t>(
-      std::clamp(std::thread::hardware_concurrency(), 1u, 32u), image->h);
+  const uint32_t worker_count = std::min<uint32_t>(codec_worker_count(), image->h);
   std::vector<JpegWorkerStats> worker_stats(worker_count);
   std::atomic<uint32_t> next_row{0};
   const auto convert_rows = [&](uint32_t worker_index) {

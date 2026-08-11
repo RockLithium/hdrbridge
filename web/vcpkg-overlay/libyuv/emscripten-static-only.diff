@@ -1,0 +1,33 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1111111..2222222 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -180,10 +180,12 @@ add_library( ${ly_lib_static} STATIC ${ly_lib_parts})
+ 
+ # this creates the shared library (.so)
++if (NOT EMSCRIPTEN)
+ add_library( ${ly_lib_shared} SHARED ${ly_lib_parts})
+ set_target_properties( ${ly_lib_shared} PROPERTIES OUTPUT_NAME "${ly_lib_name}" )
+ set_target_properties( ${ly_lib_shared} PROPERTIES PREFIX "lib" )
+ if(WIN32)
+   set_target_properties( ${ly_lib_shared} PROPERTIES IMPORT_PREFIX "lib" )
+ endif()
++endif()
+ 
+ if (BUILD_TOOLS)
+@@ -210,5 +212,7 @@ if (JPEG_FOUND)
+   include_directories( ${JPEG_INCLUDE_DIR} )
+   target_link_libraries( ${ly_lib_static} PRIVATE JPEG::JPEG )
++  if (NOT EMSCRIPTEN)
+   target_link_libraries( ${ly_lib_shared} PRIVATE JPEG::JPEG )
++  endif()
+   add_definitions( -DHAVE_JPEG )
+ endif()
+@@ -267,5 +271,7 @@ else()
+   target_include_directories(${ly_lib_static} PUBLIC $<INSTALL_INTERFACE:include>)
+   install(TARGETS ${ly_lib_static} EXPORT libyuv-targets)
++  if (NOT EMSCRIPTEN)
+   set_target_properties(${ly_lib_shared} PROPERTIES EXCLUDE_FROM_ALL 1)
++  endif()
+ endif()
+ install(EXPORT libyuv-targets DESTINATION share/libyuv)

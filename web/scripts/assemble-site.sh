@@ -4,7 +4,7 @@ set -euo pipefail
 web_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dist_root="${web_root}/dist"
 
-test -f "${web_root}/public/codecs/heif-png/hdrbridge-core.wasm" || {
+test -f "${web_root}/public/codecs/hdrbridge/hdrbridge-core.wasm" || {
   echo "Run web/scripts/build-wasm.sh first" >&2
   exit 1
 }
