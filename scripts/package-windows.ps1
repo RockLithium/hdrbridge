@@ -1,6 +1,7 @@
 param(
     [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build-vs\bin\Release"),
-    [string]$Destination = (Join-Path $PSScriptRoot "..\dist\HDRBridge-v1.0.0-Windows-x64")
+    [string]$Version = "1.0.0",
+    [string]$Destination = (Join-Path $PSScriptRoot "..\dist\HDRBridge-v$Version-Windows-x64")
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,7 +59,7 @@ if ($uhdrRoot) {
 }
 
 @"
-HDR Bridge v1.0.0 - portable Windows x64
+HDR Bridge v$Version - portable Windows x64
 
 Run hdrbridge.exe. Add or drop one or more supported HDR images, choose an
 output and select Convert. Processing is local and sequential. Output defaults

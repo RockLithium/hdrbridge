@@ -33,17 +33,19 @@ jobs:
 
       - name: Package portable application
         shell: pwsh
-        run: >-
-          .\scripts\package-windows.ps1
-          -BuildDirectory "${{ github.workspace }}\build\bin\Release"
-          -Destination "${{ github.workspace }}\dist\HDRBridge-v1.0.0-Windows-x64"
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          .\scripts\package-windows.ps1 `
+            -Version $version `
+            -BuildDirectory "${{ github.workspace }}\build\bin\Release" `
+            -Destination "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64"
 
       - name: Prepare release notes
         id: release
         shell: pwsh
         run: |
-          $zip = "${{ github.workspace }}\dist\HDRBridge-v1.0.0-Windows-x64.zip"
-          $exe = "${{ github.workspace }}\dist\HDRBridge-v1.0.0-Windows-x64\hdrbridge.exe"
+          $zip = "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64.zip"
+          $exe = "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64\hdrbridge.exe"
           $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
           $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
           @"
@@ -63,10 +65,10 @@ jobs:
           - 10-bit 4:4:4 PQ/HLG AVIF
           - RGB16 PQ TIFF
 
-          Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/v1.0.0/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
+          Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 
           ### SHA-256
-          - HDRBridge-v1.0.0-Windows-x64.zip: $zipHash
+          - HDRBridge-${{ github.ref_name }}-Windows-x64.zip: $zipHash
           - hdrbridge.exe: $exeHash
           "@ | Set-Content -Encoding UTF8 "${{ github.workspace }}\release-notes.md"
 
@@ -76,7 +78,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh release create "${{ github.ref_name }}"
-          "${{ github.workspace }}\dist\HDRBridge-v1.0.0-Windows-x64.zip"
+          "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64.zip"
           --repo "${{ github.repository }}"
-          --title "HDR Bridge v1.0.0"
+          --title "HDR Bridge ${{ github.ref_name }}"
           --notes-file "${{ github.workspace }}\release-notes.md"
