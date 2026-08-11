@@ -74,6 +74,7 @@ enum ControlId {
   ,IDC_ACTIVITY_LABEL
   ,IDC_TITLE
   ,IDC_RESET_LAYOUT
+  ,IDC_RESET_SETTINGS
   ,IDC_VERTICAL_SPLITTER
   ,IDC_HORIZONTAL_SPLITTER
 };
@@ -139,6 +140,7 @@ struct AppState {
   HWND activity_label = nullptr;
   HWND title = nullptr;
   HWND reset_layout = nullptr;
+  HWND reset_settings = nullptr;
   HWND vertical_splitter = nullptr;
   HWND horizontal_splitter = nullptr;
   HFONT font = nullptr;
@@ -166,6 +168,8 @@ struct AppState {
   int activity_panel_height = 230;
   int last_format_index = -1;
   int last_transfer_index = -1;
+  int last_encoding_format_index = -1;
+  std::array<int, 7> encoding_values{95, 4, 95, 95, 95, 6, 95};
 };
 
 std::wstring widen(const std::string& input) {
@@ -185,6 +189,7 @@ std::string narrow(const std::wstring& input) {
 }
 
 void layout(AppState* state, int width, int height);
+void update_mode_ui(AppState* state);
 
 bool font_available(const wchar_t* family) {
   LOGFONTW query{};
@@ -291,6 +296,59 @@ void load_split_layout(AppState* state) {
   }
 }
 
+int saved_index(const wchar_t* name, int fallback, int maximum) {
+  if (const auto value = read_layout_value(name)) {
+    return std::clamp(static_cast<int>(*value), 0, maximum);
+  }
+  return fallback;
+}
+
+void load_conversion_settings(AppState* state) {
+  SendMessageW(state->format, CB_SETCURSEL,
+               saved_index(L"OutputFormat", 0, 6), 0);
+  SendMessageW(state->gamut, CB_SETCURSEL,
+               saved_index(L"OutputGamut", 0, 1), 0);
+  SendMessageW(state->transfer, CB_SETCURSEL,
+               saved_index(L"OutputTransfer", 0, 1), 0);
+  SendMessageW(state->gainmap_resolution, CB_SETCURSEL,
+               saved_index(L"GainMapResolution", 1, 2), 0);
+  SendMessageW(state->gainmap_channels, CB_SETCURSEL,
+               saved_index(L"GainMapChannels", 0, 1), 0);
+  SendMessageW(state->peak, CB_SETCURSEL,
+               saved_index(L"TargetPeak", 0, 4), 0);
+  SendMessageW(state->lossless, BM_SETCHECK,
+               saved_index(L"Lossless", 1, 1) ? BST_CHECKED : BST_UNCHECKED, 0);
+  SendMessageW(state->copy_exif, BM_SETCHECK,
+               saved_index(L"CopyExif", 1, 1) ? BST_CHECKED : BST_UNCHECKED, 0);
+  SendMessageW(state->copy_xmp, BM_SETCHECK,
+               saved_index(L"CopyXmp", 1, 1) ? BST_CHECKED : BST_UNCHECKED, 0);
+  for (size_t index = 0; index < state->encoding_values.size(); ++index) {
+    const std::wstring name = L"EncodingValue" + std::to_wstring(index);
+    if (const auto value = read_layout_value(name.c_str())) {
+      const bool compression = index == 1 || index == 5;
+      state->encoding_values[index] = std::clamp(
+          static_cast<int>(*value), 1, compression ? 9 : 100);
+    }
+  }
+}
+
+void reset_conversion_settings(AppState* state) {
+  state->encoding_values = {95, 4, 95, 95, 95, 6, 95};
+  SendMessageW(state->format, CB_SETCURSEL, 0, 0);
+  SendMessageW(state->gamut, CB_SETCURSEL, 0, 0);
+  SendMessageW(state->transfer, CB_SETCURSEL, 0, 0);
+  SendMessageW(state->gainmap_resolution, CB_SETCURSEL, 1, 0);
+  SendMessageW(state->gainmap_channels, CB_SETCURSEL, 0, 0);
+  SendMessageW(state->peak, CB_SETCURSEL, 0, 0);
+  SendMessageW(state->lossless, BM_SETCHECK, BST_CHECKED, 0);
+  SendMessageW(state->copy_exif, BM_SETCHECK, BST_CHECKED, 0);
+  SendMessageW(state->copy_xmp, BM_SETCHECK, BST_CHECKED, 0);
+  state->last_format_index = -1;
+  state->last_transfer_index = -1;
+  state->last_encoding_format_index = -1;
+  update_mode_ui(state);
+}
+
 void save_layout(AppState* state) {
   HKEY key = nullptr;
   if (RegCreateKeyExW(HKEY_CURRENT_USER, kLayoutRegistryPath, 0, nullptr, 0,
@@ -299,6 +357,25 @@ void save_layout(AppState* state) {
   }
   write_layout_value(key, L"RightPanelWidth", static_cast<DWORD>(state->right_panel_width));
   write_layout_value(key, L"ActivityPanelHeight", static_cast<DWORD>(state->activity_panel_height));
+  const int format_index = static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0));
+  if (format_index >= 0 && format_index < static_cast<int>(state->encoding_values.size())) {
+    state->encoding_values[static_cast<size_t>(format_index)] =
+        static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0));
+  }
+  write_layout_value(key, L"OutputFormat", static_cast<DWORD>(std::max(format_index, 0)));
+  write_layout_value(key, L"OutputGamut", static_cast<DWORD>(SendMessageW(state->gamut, CB_GETCURSEL, 0, 0)));
+  write_layout_value(key, L"OutputTransfer", static_cast<DWORD>(SendMessageW(state->transfer, CB_GETCURSEL, 0, 0)));
+  write_layout_value(key, L"GainMapResolution", static_cast<DWORD>(SendMessageW(state->gainmap_resolution, CB_GETCURSEL, 0, 0)));
+  write_layout_value(key, L"GainMapChannels", static_cast<DWORD>(SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0)));
+  write_layout_value(key, L"TargetPeak", static_cast<DWORD>(SendMessageW(state->peak, CB_GETCURSEL, 0, 0)));
+  write_layout_value(key, L"Lossless", SendMessageW(state->lossless, BM_GETCHECK, 0, 0) == BST_CHECKED);
+  write_layout_value(key, L"CopyExif", SendMessageW(state->copy_exif, BM_GETCHECK, 0, 0) == BST_CHECKED);
+  write_layout_value(key, L"CopyXmp", SendMessageW(state->copy_xmp, BM_GETCHECK, 0, 0) == BST_CHECKED);
+  for (size_t index = 0; index < state->encoding_values.size(); ++index) {
+    const std::wstring name = L"EncodingValue" + std::to_wstring(index);
+    write_layout_value(key, name.c_str(),
+                       static_cast<DWORD>(state->encoding_values[index]));
+  }
   WINDOWPLACEMENT placement{sizeof(placement)};
   if (GetWindowPlacement(state->window, &placement)) {
     const RECT& rect = placement.rcNormalPosition;
@@ -588,10 +665,26 @@ void update_mode_ui(AppState* state) {
   EnableWindow(state->gainmap_resolution, ultrahdr_output);
   EnableWindow(state->gainmap_channels, ultrahdr_output);
   EnableWindow(state->lossless, index == 2 || index == 3 || index == 6);
+  if (state->last_encoding_format_index != index) {
+    if (state->last_encoding_format_index >= 0 && state->last_encoding_format_index <
+        static_cast<int>(state->encoding_values.size())) {
+      state->encoding_values[static_cast<size_t>(state->last_encoding_format_index)] =
+          static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0));
+    }
+    const bool compression = index == 1 || index == 5;
+    SendMessageW(state->quality, TBM_SETRANGE, TRUE,
+                 compression ? MAKELPARAM(1, 9) : MAKELPARAM(1, 100));
+    const int value = state->encoding_values[static_cast<size_t>(std::clamp(index, 0, 6))];
+    SendMessageW(state->quality, TBM_SETPOS, TRUE, value);
+    SetWindowTextW(state->quality_value,
+                   (std::to_wstring(value) + (compression ? L"" : L"%")).c_str());
+    state->last_encoding_format_index = index;
+  }
   const bool lossy = index == 0 || index == 4 ||
                      SendMessageW(state->lossless, BM_GETCHECK, 0, 0) != BST_CHECKED;
-  EnableWindow(state->quality, lossy);
-  EnableWindow(state->quality_value, lossy);
+  const bool compression = index == 1 || index == 5;
+  EnableWindow(state->quality, lossy || compression);
+  EnableWindow(state->quality_value, lossy || compression);
   if (state->last_format_index != index || state->last_transfer_index != transfer_index) {
     const auto mode = mode_for_index(index);
     const auto complete_suffix = suffix_for_mode(mode, hlg && transfer_output);
@@ -617,9 +710,13 @@ void layout(AppState* s, int width, int height) {
   const int left_width = width - margin * 2 - gap - right_width;
   const int right_x = margin + left_width + gap;
   MoveWindow(s->title, margin, 7, 180, 30, TRUE);
-  constexpr int reset_layout_width = 124;
-  MoveWindow(s->reset_layout, width - margin - reset_layout_width, 7,
-             reset_layout_width, 30, TRUE);
+  constexpr int reset_button_width = 144;
+  constexpr int reset_button_gap = 8;
+  MoveWindow(s->reset_settings, width - margin - reset_button_width, 7,
+             reset_button_width, 30, TRUE);
+  MoveWindow(s->reset_layout,
+             width - margin - reset_button_width * 2 - reset_button_gap, 7,
+             reset_button_width, 30, TRUE);
   MoveWindow(s->vertical_splitter, margin + left_width + 8, content_top,
              8, std::max(40, content_bottom - content_top), TRUE);
   MoveWindow(s->horizontal_splitter, margin, split_y, width - margin * 2, 6, TRUE);
@@ -994,6 +1091,7 @@ void set_running(AppState* state, bool running) {
   EnableWindow(state->base_name, !running);
   EnableWindow(state->name_suffix, !running);
   EnableWindow(state->collision, !running);
+  EnableWindow(state->reset_settings, !running);
   // Keep the queue scrollable/selectable while work runs; mutation controls
   // remain disabled, so Delete cannot alter worker indices.
   EnableWindow(state->queue, TRUE);
@@ -1038,7 +1136,9 @@ void start_conversion(AppState* state) {
   const int quality = static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0));
   options.image_quality = quality / 100.0f;
   options.base_quality = quality;
-  options.gainmap_quality = std::max(50, quality - 5);
+  options.gainmap_quality = std::max(1, quality - 5);
+  if (index == 1) options.png_compression_level = quality;
+  if (index == 5) options.tiff_compression_level = quality;
   const int gainmap_resolution_index = static_cast<int>(
       SendMessageW(state->gainmap_resolution, CB_GETCURSEL, 0, 0));
   constexpr int gainmap_scales[] = {4, 2, 1};
@@ -1153,6 +1253,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     owned->window = window;
     owned->title = add_control(window, L"STATIC", L"HDR Bridge", SS_LEFT, IDC_TITLE);
     owned->reset_layout = add_control(window, L"BUTTON", L"Reset layout", BS_PUSHBUTTON, IDC_RESET_LAYOUT);
+    owned->reset_settings = add_control(window, L"BUTTON", L"Reset settings", BS_PUSHBUTTON, IDC_RESET_SETTINGS);
     owned->vertical_splitter = add_control(window, L"STATIC", L"", SS_NOTIFY, IDC_VERTICAL_SPLITTER);
     owned->horizontal_splitter = add_control(window, L"STATIC", L"", SS_NOTIFY, IDC_HORIZONTAL_SPLITTER);
     owned->queue_label = add_control(window, L"STATIC", L"FILES", SS_LEFT, IDC_QUEUE_LABEL);
@@ -1211,7 +1312,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     SendMessageW(owned->copy_exif, BM_SETCHECK, BST_CHECKED, 0);
     SendMessageW(owned->copy_xmp, BM_SETCHECK, BST_CHECKED, 0);
     owned->quality = add_control(window, TRACKBAR_CLASSW, L"", TBS_AUTOTICKS, IDC_QUALITY);
-    SendMessageW(owned->quality, TBM_SETRANGE, TRUE, MAKELPARAM(50, 100));
+    SendMessageW(owned->quality, TBM_SETRANGE, TRUE, MAKELPARAM(1, 100));
     SendMessageW(owned->quality, TBM_SETPOS, TRUE, 95);
     owned->quality_value = add_control(window, L"STATIC", L"95%", SS_CENTER, IDC_QUALITY_VALUE);
     owned->source_folder = add_control(window, L"BUTTON", L"Source folder", BS_AUTOCHECKBOX, IDC_SOURCE_FOLDER);
@@ -1248,6 +1349,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(owned.release()));
     state = reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     load_split_layout(state);
+    load_conversion_settings(state);
     apply_fonts(state);
     apply_theme(state);
     update_mode_ui(state);
@@ -1326,7 +1428,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     case WM_HSCROLL:
       if (reinterpret_cast<HWND>(lparam) == state->quality) {
         const int value = static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0));
-        SetWindowTextW(state->quality_value, (std::to_wstring(value) + L"%").c_str());
+        const int format_index = static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0));
+        if (format_index >= 0 && format_index < static_cast<int>(state->encoding_values.size())) {
+          state->encoding_values[static_cast<size_t>(format_index)] = value;
+        }
+        const bool compression = format_index == 1 || format_index == 5;
+        SetWindowTextW(state->quality_value,
+                       (std::to_wstring(value) + (compression ? L"" : L"%")).c_str());
       }
       return 0;
     case WM_COMMAND:
@@ -1357,6 +1465,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           save_layout(state);
           break;
         }
+        case IDC_RESET_SETTINGS:
+          reset_conversion_settings(state);
+          save_layout(state);
+          break;
         case IDC_FORMAT: if (HIWORD(wparam) == CBN_SELCHANGE) update_mode_ui(state); break;
         case IDC_TRANSFER:
         case IDC_GAMUT:
