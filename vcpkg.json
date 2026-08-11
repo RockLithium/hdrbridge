@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "hdrbridge",
+  "version-string": "1.0.0",
+  "builtin-baseline": "ddd110b8a05cda14b8f1b0333a1d80c4fb6f16cd",
+  "dependencies": [
+    {
+      "name": "libheif",
+      "default-features": false,
+      "features": [
+        "aom"
+      ]
+    },
+    {
+      "name": "libavif",
+      "default-features": false,
+      "features": [
+        "aom"
+      ]
+    },
+    "libpng",
+    "tiff",
+    "lcms",
+    "libjxl",
+    "libjpeg-turbo",
+    "nlohmann-json"
+  ]
+}

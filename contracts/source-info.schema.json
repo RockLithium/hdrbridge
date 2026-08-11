@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SourceInfo",
+  "type": "object",
+  "required": [
+    "path",
+    "format",
+    "assetKind",
+    "width",
+    "height",
+    "bitDepth",
+    "chroma",
+    "color"
+  ],
+  "properties": {
+    "path": {
+      "type": "string"
+    },
+    "format": {
+      "type": "string"
+    },
+    "assetKind": {
+      "enum": ["direct-hdr", "gain-map-hdr", "non-PQ/unknown"]
+    },
+    "gainMapPresent": {
+      "type": "boolean"
+    },
+    "gainMapFamily": {
+      "type": "string"
+    },
+    "gainMapItems": {
+      "type": "object",
+      "properties": {
+        "base": { "type": "integer", "minimum": 0 },
+        "gainMap": { "type": "integer", "minimum": 0 },
+        "toneMap": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "gainMapSize": {
+      "type": "object",
+      "properties": {
+        "width": { "type": "integer", "minimum": 0 },
+        "height": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "baseRendition": {
+      "type": "object",
+      "properties": {
+        "width": { "type": "integer", "minimum": 0 },
+        "height": { "type": "integer", "minimum": 0 },
+        "bitDepth": { "type": "integer", "minimum": 0 },
+        "channels": { "type": "integer", "minimum": 0 },
+        "codec": { "type": "string" },
+        "colorSpace": { "type": "string" },
+        "transfer": { "type": "string" }
+      }
+    },
+    "gainMapLayout": {
+      "type": "object",
+      "properties": {
+        "channels": { "type": "integer", "minimum": 0, "maximum": 4 },
+        "scaleX": { "type": "number", "minimum": 0 },
+        "scaleY": { "type": "number", "minimum": 0 }
+      }
+    },
+    "gainMapMetadata": {
+      "type": "object",
+      "properties": {
+        "baseHdrHeadroom": { "type": "number" },
+        "alternateHdrHeadroom": { "type": "number" },
+        "hdrCapacityMin": { "type": "number" },
+        "hdrCapacityMax": { "type": "number" },
+        "gainMapMin": { "$ref": "#/$defs/rgbTriplet" },
+        "gainMapMax": { "$ref": "#/$defs/rgbTriplet" },
+        "gamma": { "$ref": "#/$defs/rgbTriplet" },
+        "baseOffset": { "$ref": "#/$defs/rgbTriplet" },
+        "alternateOffset": { "$ref": "#/$defs/rgbTriplet" },
+        "useBaseColorSpace": { "type": "boolean" }
+      }
+    },
+    "reconstructedHdr": {
+      "type": "object",
+      "properties": {
+        "width": { "type": "integer", "minimum": 0 },
+        "height": { "type": "integer", "minimum": 0 },
+        "colorSpace": { "type": "string" },
+        "transfer": { "type": "string" },
+        "precision": { "type": "string" }
+      }
+    },
+    "auxiliaryType": {
+      "type": "string"
+    },
+    "width": {
+      "type": "integer"
+    },
+    "height": {
+      "type": "integer"
+    },
+    "containerBrand": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pixelFormat": {
+      "type": "string"
+    },
+    "colorSignalKind": {
+      "type": "string"
+    },
+    "isGrid": {
+      "type": "boolean"
+    },
+    "gridColumns": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "gridRows": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "codec": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "profile": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "bitDepth": {
+      "type": "integer"
+    },
+    "chroma": {
+      "type": "string"
+    },
+    "range": {
+      "enum": [
+        "full",
+        "limited",
+        "unknown"
+      ]
+    },
+    "color": {
+      "type": "object",
+      "required": [
+        "primaries",
+        "transfer",
+        "matrix"
+      ],
+      "properties": {
+        "primaries": {
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ]
+        },
+        "transfer": {
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ]
+        },
+        "transferName": {
+          "type": "string"
+        },
+        "matrix": {
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ]
+        },
+        "iccPresent": {
+          "type": "boolean"
+        }
+      }
+    },
+    "exifPresent": {
+      "type": "boolean"
+    },
+    "xmpPresent": {
+      "type": "boolean"
+    },
+    "iccPresent": {
+      "type": "boolean"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "exif": { "$ref": "#/$defs/metadataStatus" },
+        "xmp": { "$ref": "#/$defs/metadataStatus" },
+        "icc": { "$ref": "#/$defs/metadataStatus" },
+        "orientation": { "$ref": "#/$defs/metadataStatus" }
+      }
+    }
+  },
+  "$defs": {
+    "metadataStatus": {
+      "enum": ["present", "absent", "unsupported", "read-error"]
+    },
+    "rgbTriplet": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3
+    }
+  }
+}

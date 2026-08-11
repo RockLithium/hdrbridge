@@ -1,0 +1,13 @@
+{
+  "name": "libjxl",
+  "version-semver": "0.12.0",
+  "description": "JPEG XL reference implementation, security-fixed v0.12.0 overlay",
+  "homepage": "https://github.com/libjxl/libjxl",
+  "license": "BSD-3-Clause",
+  "dependencies": [
+    "brotli",
+    "highway",
+    "lcms",
+    { "name": "vcpkg-cmake", "host": true }
+  ]
+}

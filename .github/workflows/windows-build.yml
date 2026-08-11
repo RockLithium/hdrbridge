@@ -1,0 +1,41 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject private image payloads
+        shell: pwsh
+        run: |
+          $extensions = '.hif','.heif','.heic','.jpg','.jpeg','.jpe','.png','.tif','.tiff','.avif','.jxl','.jxr','.wdp','.hdp'
+          $bad = Get-ChildItem -Recurse -File | Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() }
+          if ($bad) {
+            $bad | ForEach-Object { Write-Host "Unexpected image payload: $($_.FullName)" }
+            throw 'Camera fixtures and generated images are not allowed in the public repository.'
+          }
+
+      - name: Bootstrap pinned vcpkg
+        shell: pwsh
+        run: .\scripts\bootstrap-vcpkg-local.ps1
+
+      - name: Configure
+        shell: pwsh
+        run: >-
+          cmake -S . -B build -A x64
+          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\.tools\vcpkg\scripts\buildsystems\vcpkg.cmake"
+          -DVCPKG_INSTALLED_DIR="${{ github.workspace }}\vcpkg_installed"
+          -DVCPKG_OVERLAY_PORTS="${{ github.workspace }}\ports-overlay"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure

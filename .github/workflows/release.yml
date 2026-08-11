@@ -1,0 +1,82 @@
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bootstrap pinned vcpkg
+        shell: pwsh
+        run: .\scripts\bootstrap-vcpkg-local.ps1
+
+      - name: Configure
+        shell: pwsh
+        run: >-
+          cmake -S . -B build -A x64
+          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\.tools\vcpkg\scripts\buildsystems\vcpkg.cmake"
+          -DVCPKG_INSTALLED_DIR="${{ github.workspace }}\vcpkg_installed"
+          -DVCPKG_OVERLAY_PORTS="${{ github.workspace }}\ports-overlay"
+
+      - name: Build and test
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package portable application
+        shell: pwsh
+        run: >-
+          .\scripts\package-windows.ps1
+          -BuildDirectory "${{ github.workspace }}\build\bin\Release"
+          -Destination "${{ github.workspace }}\dist\HDRBridge-v1.0.0-Windows-x64"
+
+      - name: Prepare release notes
+        id: release
+        shell: pwsh
+        run: |
+          $zip = "${{ github.workspace }}\dist\HDRBridge-v1.0.0-Windows-x64.zip"
+          $exe = "${{ github.workspace }}\dist\HDRBridge-v1.0.0-Windows-x64\hdrbridge.exe"
+          $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          @"
+          Windows x64 portable release of HDR Bridge.
+
+          ### HDR input
+          - Direct PQ/HLG HEIF/HIF, AVIF, PNG, TIFF and JPEG XL
+          - Apple Adaptive HDR HEIC/JPEG
+          - ISO Ultra HDR JPEG, including mono and RGB gain maps
+          - Adobe gain-map AVIF/TIFF
+          - FP16 scRGB JPEG XR
+
+          ### HDR output
+          - Faithful/Auto Ultra HDR JPEG
+          - RGB16 PQ/HLG PNG and JPEG XL
+          - FP16 linear scRGB JPEG XR
+          - 10-bit 4:4:4 PQ/HLG AVIF
+          - RGB16 PQ TIFF
+
+          Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/v1.0.0/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
+
+          ### SHA-256
+          - `HDRBridge-v1.0.0-Windows-x64.zip`: `$zipHash`
+          - `hdrbridge.exe`: `$exeHash`
+          "@ | Set-Content -Encoding UTF8 "${{ github.workspace }}\release-notes.md"
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ github.ref_name }}"
+          "${{ github.workspace }}\dist\HDRBridge-v1.0.0-Windows-x64.zip"
+          --repo "${{ github.repository }}"
+          --title "HDR Bridge v1.0.0"
+          --notes-file "${{ github.workspace }}\release-notes.md"

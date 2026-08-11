@@ -1,0 +1,72 @@
+# Build output
+build/
+build-*/
+out/
+dist/
+target/
+desktop/dist/
+desktop/node_modules/
+node_modules/
+
+# Project-local tools and caches
+.tools/
+.cache/
+.vcpkg/
+vcpkg_installed/
+
+# IDE / OS
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+
+# Logs and temporary output
+*.log
+*.tmp
+*.partial
+*.part
+*.zip
+outputs/
+test-output/
+artifacts/local/
+
+# Private fixtures: never commit camera originals
+private-fixtures/
+private-inputs/
+manual-test-assets/
+tests/private/
+*.HIF
+*.hif
+*.HEIF
+*.heif
+*.HEIC
+*.heic
+*.JPG
+*.jpg
+*.JPEG
+*.jpeg
+*.JPE
+*.jpe
+*.PNG
+*.png
+*.TIF
+*.tif
+*.TIFF
+*.tiff
+*.AVIF
+*.avif
+*.JXL
+*.jxl
+*.JXR
+*.jxr
+*.WDP
+*.wdp
+*.HDP
+*.hdp
+
+# Optional local env
+.env
+.env.*
+!.env.example

@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConversionOptions",
+  "type": "object",
+  "required": [
+    "format",
+    "mode"
+  ],
+  "properties": {
+    "format": {
+      "enum": [
+        "ultrahdr-jpeg",
+        "png",
+        "tiff",
+        "avif",
+        "jxl",
+        "jxr"
+      ]
+    },
+    "mode": {
+      "enum": [
+        "ultrahdr",
+        "png-pq16",
+        "tiff-pq16",
+        "avif-pq10",
+        "jxl-pq16",
+        "jxr-scrgb-fp16",
+        "jxr-rgb10-experimental",
+        "jxr-pq16-experimental"
+      ]
+    },
+    "preset": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lossless": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "imageQuality": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "baseJpegQuality": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 100
+    },
+    "gainMapQuality": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 100
+    },
+    "gainMapScale": {
+      "type": "integer",
+      "enum": [1, 2, 4],
+      "default": 2
+    },
+    "multiChannelGainMap": {
+      "type": "boolean",
+      "default": false
+    },
+    "targetPeakNits": {
+      "description": "Zero means Faithful/Auto; otherwise an explicit libultrahdr target peak.",
+      "type": "number",
+      "anyOf": [
+        { "const": 0 },
+        { "minimum": 203, "maximum": 10000 }
+      ],
+      "default": 0
+    },
+    "outputGamut": {
+      "enum": ["rec2020", "p3"],
+      "default": "rec2020"
+    },
+    "outputTransfer": {
+      "description": "Direct HDR transfer. HLG is limited to BT.2100/Rec.2020 outputs.",
+      "enum": ["pq", "hlg"],
+      "default": "pq"
+    },
+    "jxlDistance": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "jxlEffort": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "copyExif": {
+      "type": "boolean",
+      "default": true
+    },
+    "copyXmp": {
+      "type": "boolean",
+      "default": true
+    },
+    "overwrite": {
+      "type": "boolean",
+      "default": false
+    }
+  }
+}

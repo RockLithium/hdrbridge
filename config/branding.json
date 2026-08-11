@@ -1,0 +1,11 @@
+{
+  "projectWorkingName": "HDR Bridge",
+  "desktopDisplayName": "HDR Bridge",
+  "desktopExecutableStem": "hdrbridge",
+  "webDisplayName": "HDR Bridge",
+  "repoName": "hdrbridge",
+  "githubPagesBase": "/hdrbridge/",
+  "packageIdentifier": "app.hdrbridge.desktop",
+  "brandingStatus": "public v1.0",
+  "instruction": "Keep product names and package identifiers centralized here."
+}
