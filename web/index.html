@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Local, browser-based HDR image conversion.">
+  <title>HDR Bridge</title>
+  <link rel="stylesheet" href="./src/styles.css">
+</head>
+<body>
+  <main class="container">
+    <header class="page-header">
+      <h1>HDR Bridge</h1>
+      <p>Convert HDR still images locally in your browser.</p>
+    </header>
+
+    <section class="group" aria-labelledby="source-title">
+      <h2 id="source-title">SELECT HDR IMAGE</h2>
+      <label class="file-drop" id="drop-zone">
+        <input id="file-input" type="file" accept=".hif,.heif,.heic,.avif,.jpg,.jpeg,.jpe,.jxl,.jxr,.wdp,.hdp,.png,.tif,.tiff">
+        <span class="file-name" id="file-name">Click or drop one HDR image here...</span>
+        <span class="file-state" id="file-state">Your image stays on this device.</span>
+      </label>
+      <div class="inspector" id="inspector" hidden>
+        <div><span>Representation</span><strong id="inspect-kind">—</strong></div>
+        <div><span>Raster</span><strong id="inspect-raster">—</strong></div>
+        <div><span>Signal</span><strong id="inspect-signal">—</strong></div>
+        <div><span>Metadata</span><strong id="inspect-metadata">—</strong></div>
+      </div>
+    </section>
+
+    <section class="group" aria-labelledby="format-title">
+      <h2 id="format-title">OUTPUT FORMAT</h2>
+      <div class="format-grid" id="format-grid">
+        <button class="option-box" type="button" data-format="uhdr">Ultra HDR JPEG</button>
+        <button class="option-box active" type="button" data-format="png">HDR PNG</button>
+        <button class="option-box" type="button" data-format="jxl">JPEG XL</button>
+        <button class="option-box" type="button" data-format="jxr">JPEG XR</button>
+        <button class="option-box" type="button" data-format="avif">HDR AVIF</button>
+        <button class="option-box" type="button" data-format="tiff">HDR TIFF</button>
+      </div>
+      <p class="availability" id="availability">HDR PNG is available now for direct PQ/HLG HEIF/HIF input.</p>
+    </section>
+
+    <section class="group parameters" aria-labelledby="parameters-title">
+      <h2 id="parameters-title">FORMAT PARAMETERS</h2>
+
+      <div class="parameter" id="color-space-row">
+        <span class="parameter-label">Color Space</span>
+        <div class="inline-options" data-setting="primaries">
+          <button class="mini-option active" type="button" data-value="9">Rec.2020</button>
+          <button class="mini-option" type="button" data-value="12">Display P3</button>
+        </div>
+      </div>
+
+      <div class="parameter" id="transfer-row">
+        <span class="parameter-label">Transfer</span>
+        <div class="inline-options" data-setting="transfer">
+          <button class="mini-option active" type="button" data-value="16">PQ / ST2084</button>
+          <button class="mini-option" type="button" data-value="18">HLG</button>
+        </div>
+      </div>
+
+      <div class="parameter" id="gain-resolution-row" hidden>
+        <span class="parameter-label">Gain Map Resolution</span>
+        <div class="inline-options" data-setting="gainResolution">
+          <button class="mini-option" type="button" data-value="4">1/4</button>
+          <button class="mini-option active" type="button" data-value="2">1/2</button>
+          <button class="mini-option" type="button" data-value="1">Full</button>
+        </div>
+      </div>
+
+      <div class="parameter" id="gain-channels-row" hidden>
+        <span class="parameter-label">Gain Map Channels</span>
+        <div class="inline-options" data-setting="gainChannels">
+          <button class="mini-option active" type="button" data-value="mono">Mono</button>
+          <button class="mini-option" type="button" data-value="rgb">RGB</button>
+        </div>
+      </div>
+
+      <div class="parameter" id="encoding-row">
+        <span class="parameter-label" id="slider-label">PNG Compression</span>
+        <div class="slider-line">
+          <input id="encoding-slider" type="range" min="1" max="9" value="4" step="1">
+          <output id="encoding-value" for="encoding-slider">4</output>
+        </div>
+      </div>
+    </section>
+
+    <section class="action-area">
+      <button id="convert-button" class="main-button" type="button" disabled>CONVERT</button>
+      <div class="progress-track" id="progress-track" hidden><span></span></div>
+      <p class="status" id="status" role="status">Select a supported HDR image to begin.</p>
+    </section>
+
+    <section class="group" aria-labelledby="preview-title">
+      <h2 id="preview-title">PREVIEW</h2>
+      <div class="preview" id="preview">
+        <span>Preview appears here when the browser supports the selected image.</span>
+      </div>
+    </section>
+
+    <div class="download-area">
+      <a id="download-button" class="main-button download disabled" aria-disabled="true">DOWNLOAD</a>
+    </div>
+
+    <footer>
+      Processing is local. Files are not uploaded. Browser HDR presentation is used as-is; no SDR simulation is applied.
+    </footer>
+  </main>
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>

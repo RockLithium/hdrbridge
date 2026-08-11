@@ -55,10 +55,10 @@ developer tools and are not included in the normal Windows release archive.
 ## Web application
 
 The browser version lives in [`web/`](web/) and is built independently from
-the desktop application. It is intended for static GitHub Pages deployment and
-performs conversion locally in a Web Worker/WASM pipeline. Browser support is
-being added codec by codec; unavailable codecs are reported rather than
-silently substituted.
+the desktop application. Its first verified WASM path converts direct PQ/HLG
+HEIF/HIF to 16-bit HDR PNG entirely in a Web Worker. Browser support is being
+added codec by codec; unavailable codecs are reported rather than silently
+substituted.
 
 ## Documentation
 

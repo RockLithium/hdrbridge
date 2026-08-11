@@ -7,6 +7,9 @@ target/
 desktop/dist/
 desktop/node_modules/
 node_modules/
+web/.cache/
+web/public/codecs/
+web/public/licenses/
 
 # Project-local tools and caches
 .tools/

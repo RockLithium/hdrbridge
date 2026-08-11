@@ -1,6 +1,6 @@
 # Third-party notices
 
-The portable demo bundles the exact license texts installed with the tested dependencies under `licenses/`. This summary is not a substitute for those texts.
+The Windows package bundles the exact license texts installed with the tested dependencies under `licenses/`. The Web build publishes the libheif and libde265 LGPL texts alongside its WASM module and keeps the complete reproducible source/build scripts in this repository. This summary is not a substitute for those texts.
 
 Primary dependencies:
 
@@ -21,4 +21,4 @@ Primary dependencies:
 
 Rules:
 
-`libheif` and `libde265` are shipped as replaceable DLLs rather than folded into the application executable. x265 is not present in the dependency graph. Exact tested versions are recorded in `docs/THIRD_PARTY_LOCK.md`.
+The Windows package ships `libheif` and `libde265` as replaceable DLLs rather than folding them into the application executable. The Web module is reproducibly built from the pinned upstream sources listed in `web/README.md`; users can rebuild the WASM with modified library sources. x265 is not present in either dependency graph.
