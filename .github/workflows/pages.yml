@@ -20,9 +20,11 @@ concurrency:
 
 jobs:
   build:
+    outputs:
+      pages-ready: ${{ steps.pages.outcome == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Emscripten 4.0.21
         run: |
           git clone --depth 1 --branch 4.0.21 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
@@ -33,11 +35,15 @@ jobs:
           source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           bash web/scripts/build-wasm.sh
           bash web/scripts/assemble-site.sh
-      - uses: actions/configure-pages@v5
+      - name: Detect GitHub Pages configuration
+        id: pages
+        continue-on-error: true
+        uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:
           path: web/dist
   deploy:
+    if: needs.build.outputs.pages-ready == 'true'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
