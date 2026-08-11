@@ -22,13 +22,23 @@ git -C "${vcpkg_root}" fetch --quiet origin "${vcpkg_ref}"
 git -C "${vcpkg_root}" checkout --quiet "${vcpkg_ref}"
 "${vcpkg_root}/bootstrap-vcpkg.sh" -disableMetrics
 
-"${vcpkg_root}/vcpkg" install \
-  'libheif[core,aom]:wasm32-emscripten' 'libavif[core,aom]:wasm32-emscripten' \
-  'libpng:wasm32-emscripten' 'tiff[core,jpeg,zip]:wasm32-emscripten' \
-  'lcms:wasm32-emscripten' 'liblzma:wasm32-emscripten' 'libjxl:wasm32-emscripten' \
-  'jxrlib:wasm32-emscripten' 'nlohmann-json:wasm32-emscripten' \
-  --classic "--x-install-root=${install_root}" \
-  "--overlay-ports=${web_root}/vcpkg-overlay"
+for attempt in 1 2 3; do
+  if "${vcpkg_root}/vcpkg" install \
+    'libheif[core,aom]:wasm32-emscripten' 'libavif[core,aom]:wasm32-emscripten' \
+    'libpng:wasm32-emscripten' 'tiff[core,jpeg,zip]:wasm32-emscripten' \
+    'lcms:wasm32-emscripten' 'liblzma:wasm32-emscripten' 'libjxl:wasm32-emscripten' \
+    'jxrlib:wasm32-emscripten' 'nlohmann-json:wasm32-emscripten' \
+    --classic "--x-install-root=${install_root}" \
+    "--overlay-ports=${web_root}/vcpkg-overlay"; then
+    break
+  fi
+  if [[ "${attempt}" == 3 ]]; then
+    echo "vcpkg dependency installation failed after ${attempt} attempts" >&2
+    exit 1
+  fi
+  echo "vcpkg download/build attempt ${attempt} failed; retrying" >&2
+  sleep 10
+done
 
 emcmake cmake -S "${web_root}/wasm" -B "${build_root}" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
