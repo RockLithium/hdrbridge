@@ -30,11 +30,30 @@ jobs:
           git clone --depth 1 --branch 4.0.21 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
           "$RUNNER_TEMP/emsdk/emsdk" install 4.0.21
           "$RUNNER_TEMP/emsdk/emsdk" activate 4.0.21
+      - name: Restore WASM build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            web/.cache/vcpkg/downloads
+            web/.cache/vcpkg_installed
+            web/.cache/build
+          key: wasm32-${{ hashFiles('web/scripts/build-wasm.sh', 'web/wasm/**', 'web/vcpkg-overlay/**') }}
       - name: Build the HDR Bridge Web module
+        id: web-build
+        continue-on-error: true
         run: |
           source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
-          bash web/scripts/build-wasm.sh
+          set -o pipefail
+          bash web/scripts/build-wasm.sh 2>&1 | tee web-build.log
           bash web/scripts/assemble-site.sh
+      - name: Report Web build failure
+        if: steps.web-build.outcome == 'failure'
+        run: |
+          echo '### Web build failure' >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 200 web-build.log >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit 1
       - name: Detect GitHub Pages configuration
         id: pages
         continue-on-error: true
