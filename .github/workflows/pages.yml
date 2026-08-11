@@ -53,6 +53,11 @@ jobs:
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
           tail -n 200 web-build.log >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          diagnostic="$(tail -n 80 web-build.log)"
+          diagnostic="${diagnostic//'%'/'%25'}"
+          diagnostic="${diagnostic//$'\r'/'%0D'}"
+          diagnostic="${diagnostic//$'\n'/'%0A'}"
+          echo "::error title=Web build log::$diagnostic"
           exit 1
       - name: Detect GitHub Pages configuration
         id: pages
