@@ -25,7 +25,7 @@ git -C "${vcpkg_root}" checkout --quiet "${vcpkg_ref}"
 "${vcpkg_root}/vcpkg" install \
   'libheif[core,aom]:wasm32-emscripten' 'libavif[core,aom]:wasm32-emscripten' \
   'libpng:wasm32-emscripten' 'tiff[core,jpeg,zip]:wasm32-emscripten' \
-  'lcms:wasm32-emscripten' 'libjxl:wasm32-emscripten' \
+  'lcms:wasm32-emscripten' 'liblzma:wasm32-emscripten' 'libjxl:wasm32-emscripten' \
   'jxrlib:wasm32-emscripten' 'nlohmann-json:wasm32-emscripten' \
   --classic "--x-install-root=${install_root}" \
   "--overlay-ports=${web_root}/vcpkg-overlay"
