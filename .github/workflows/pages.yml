@@ -34,7 +34,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            web/.cache/vcpkg/downloads
+            web/.cache/downloads
             web/.cache/vcpkg_installed
             web/.cache/build
           key: wasm32-v1-${{ hashFiles('web/vcpkg-overlay/**') }}

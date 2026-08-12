@@ -5,6 +5,7 @@ web_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 repo_root="$(cd "${web_root}/.." && pwd)"
 cache_root="${web_root}/.cache"
 vcpkg_root="${cache_root}/vcpkg"
+downloads_root="${cache_root}/downloads"
 install_root="${cache_root}/vcpkg_installed"
 prefix="${install_root}/wasm32-emscripten"
 build_root="${cache_root}/build/hdrbridge-full"
@@ -14,8 +15,11 @@ vcpkg_ref="ddd110b8a05cda14b8f1b0333a1d80c4fb6f16cd"
 command -v emcmake >/dev/null || { echo "Emscripten is not active" >&2; exit 1; }
 command -v ninja >/dev/null || { echo "Ninja is required" >&2; exit 1; }
 
-mkdir -p "${cache_root}" "${output_root}" "${web_root}/public/licenses"
+mkdir -p "${cache_root}" "${downloads_root}" "${output_root}" "${web_root}/public/licenses"
 if [[ ! -d "${vcpkg_root}/.git" ]]; then
+  # Older CI caches placed downloads inside this checkout path, leaving a
+  # non-empty directory that git clone cannot reuse.
+  rm -rf "${vcpkg_root}"
   git clone https://github.com/microsoft/vcpkg.git "${vcpkg_root}"
 fi
 git -C "${vcpkg_root}" fetch --quiet origin "${vcpkg_ref}"
@@ -23,7 +27,7 @@ git -C "${vcpkg_root}" checkout --quiet "${vcpkg_ref}"
 "${vcpkg_root}/bootstrap-vcpkg.sh" -disableMetrics
 
 for attempt in 1 2 3; do
-  if "${vcpkg_root}/vcpkg" install \
+  if VCPKG_DOWNLOADS="${downloads_root}" "${vcpkg_root}/vcpkg" install \
     'libheif[core,aom]:wasm32-emscripten' 'libavif[core,aom]:wasm32-emscripten' \
     'libpng:wasm32-emscripten' 'tiff[core,jpeg,zip]:wasm32-emscripten' \
     'lcms:wasm32-emscripten' 'liblzma:wasm32-emscripten' 'libjxl:wasm32-emscripten' \
