@@ -1,11 +1,89 @@
 const availableFormats = new Set(["uhdr", "png", "jxl", "jxr", "avif", "tiff"]);
-const formatCopy = {
-  uhdr: "Ultra HDR JPEG with a faithful ISO gain map.",
-  png: "16-bit HDR PNG with standard cICP signaling.",
-  jxl: "JPEG XL edit/master output with HDR color signaling.",
-  jxr: "FP16 linear scRGB JPEG XR edit/master output.",
-  avif: "Direct 10-bit HDR AVIF output.",
-  tiff: "Direct 16-bit PQ HDR TIFF output.",
+const translations = {
+  "en-US": {
+    goBack: "← Go Back", subtitle: "Convert HDR still images locally in your browser.",
+    selectHdr: "SELECT HDR IMAGE", dropText: "Click or drop one HDR image here...", localText: "Your image stays on this device.",
+    representation: "Representation", raster: "Raster", signal: "Signal", metadata: "Metadata", outputFormat: "OUTPUT FORMAT",
+    formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
+    colorSpace: "Color Space", displayP3: "Display P3", transfer: "Transfer", gainResolution: "Gain Map Resolution", gainChannels: "Gain Map Channels", mono: "Mono",
+    faithful: "Faithful / Auto", lossless: "Lossless",
+    peak: "Peak", preserve: "Preserve", convert: "Start Processing", stop: "Stop Processing", complete: "Processing Complete",
+    selectBegin: "Select a supported HDR image to begin.", preview: "PREVIEW", noFile: "No file loaded", download: "DOWNLOAD",
+    previewUnavailable: "Preview unavailable in this browser", inspecting: "Inspecting the HDR container locally...",
+    ready: "Ready to convert locally.", detected: "HDR source detected. Ready to convert locally.", noHdr: "No supported HDR data was found.",
+    unavailable: "This browser codec is not enabled yet.", processing: "Loading the required codecs and reconstructing the HDR raster locally...",
+    aborted: "Processing aborted.", noneReported: "None reported", directHdr: "Direct HDR", gainMapHdr: "Gain-map HDR", localFile: "local file",
+    compressionPng: "PNG Compression", compressionTiff: "TIFF Compression", jpegQuality: "JPEG Quality", quality: "Quality",
+    converted: "Converted {value}", peakNits: "peak {value} nit",
+    formatCopy: {
+      uhdr: "Ultra HDR JPEG with a faithful ISO gain map.", png: "16-bit HDR PNG with standard cICP signaling.",
+      jxl: "JPEG XL edit/master output with HDR color signaling.", jxr: "FP16 linear scRGB JPEG XR edit/master output.",
+      avif: "Direct 10-bit HDR AVIF output.", tiff: "Direct 16-bit PQ HDR TIFF output.",
+    },
+  },
+  "zh-Hans": {
+    goBack: "← 返回", subtitle: "在浏览器中本地转换 HDR 静态图像。",
+    selectHdr: "选择 HDR 图像", dropText: "点击或拖入一张 HDR 图像...", localText: "图像只在本设备上处理。",
+    representation: "源表示", raster: "图像", signal: "信号", metadata: "元数据", outputFormat: "输出格式",
+    formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
+    colorSpace: "色彩空间", displayP3: "Display P3", transfer: "传递函数", gainResolution: "增益图分辨率", gainChannels: "增益图通道", mono: "单通道",
+    faithful: "保真 / 自动", lossless: "无损",
+    peak: "峰值", preserve: "保留", convert: "开始转换", stop: "停止转换", complete: "转换完成",
+    selectBegin: "请选择受支持的 HDR 图像。", preview: "预览", noFile: "未加载文件", download: "下载",
+    previewUnavailable: "此浏览器无法预览该格式", inspecting: "正在本地检查 HDR 容器...",
+    ready: "可以开始本地转换。", detected: "已检测到 HDR 源，可以开始本地转换。", noHdr: "未找到受支持的 HDR 数据。",
+    unavailable: "此浏览器尚未启用该编解码器。", processing: "正在加载所需编解码器并在本地重建 HDR 图像...",
+    aborted: "处理已中止。", noneReported: "未报告", directHdr: "Direct HDR", gainMapHdr: "Gain-map HDR", localFile: "本地文件",
+    compressionPng: "PNG 压缩", compressionTiff: "TIFF 压缩", jpegQuality: "JPEG 质量", quality: "质量",
+    converted: "已转换 {value}", peakNits: "峰值 {value} nit",
+    formatCopy: {
+      uhdr: "带保真 ISO 增益图的 Ultra HDR JPEG。", png: "带标准 cICP 信号的 16-bit HDR PNG。",
+      jxl: "带 HDR 色彩信号的 JPEG XL 编辑/母版输出。", jxr: "FP16 线性 scRGB JPEG XR 编辑/母版输出。",
+      avif: "Direct 10-bit HDR AVIF 输出。", tiff: "Direct 16-bit PQ HDR TIFF 输出。",
+    },
+  },
+  "fr-FR": {
+    goBack: "← Retour", subtitle: "Convertissez localement des images HDR dans votre navigateur.",
+    selectHdr: "CHOISIR UNE IMAGE HDR", dropText: "Cliquez ou déposez une image HDR ici...", localText: "L’image reste sur cet appareil.",
+    representation: "Représentation", raster: "Image", signal: "Signal", metadata: "Métadonnées", outputFormat: "FORMAT DE SORTIE",
+    formatUhdr: "JPEG Ultra HDR", formatPng: "PNG HDR", formatAvif: "AVIF HDR", formatTiff: "TIFF HDR",
+    colorSpace: "Espace colorimétrique", displayP3: "Display P3", transfer: "Transfert", gainResolution: "Résolution de la gain map", gainChannels: "Canaux de la gain map", mono: "Mono",
+    faithful: "Fidèle / Auto", lossless: "Sans perte",
+    peak: "Pic", preserve: "Conserver", convert: "Lancer la conversion", stop: "Arrêter", complete: "Terminé",
+    selectBegin: "Choisissez une image HDR prise en charge.", preview: "APERÇU", noFile: "Aucun fichier", download: "TÉLÉCHARGER",
+    previewUnavailable: "Aperçu indisponible dans ce navigateur", inspecting: "Analyse locale du conteneur HDR...",
+    ready: "Prêt pour la conversion locale.", detected: "Source HDR détectée. Prêt pour la conversion locale.", noHdr: "Aucune donnée HDR prise en charge.",
+    unavailable: "Ce codec n’est pas encore activé dans ce navigateur.", processing: "Chargement des codecs et reconstruction locale de l’image HDR...",
+    aborted: "Annulé.", noneReported: "Non indiqué", directHdr: "HDR direct", gainMapHdr: "HDR avec gain map", localFile: "fichier local",
+    compressionPng: "Compression PNG", compressionTiff: "Compression TIFF", jpegQuality: "Qualité JPEG", quality: "Qualité",
+    converted: "Converti : {value}", peakNits: "pic {value} nit",
+    formatCopy: {
+      uhdr: "JPEG Ultra HDR avec gain map ISO fidèle.", png: "PNG HDR 16 bits avec signalisation cICP standard.",
+      jxl: "Sortie JPEG XL HDR pour édition/master.", jxr: "Sortie JPEG XR FP16 scRGB linéaire pour édition/master.",
+      avif: "Sortie AVIF HDR directe 10 bits.", tiff: "Sortie TIFF HDR PQ directe 16 bits.",
+    },
+  },
+  "ru-RU": {
+    goBack: "← Назад", subtitle: "Локальное преобразование HDR-изображений в браузере.",
+    selectHdr: "ВЫБЕРИТЕ HDR-ИЗОБРАЖЕНИЕ", dropText: "Нажмите или перетащите сюда HDR-изображение...", localText: "Изображение остаётся на этом устройстве.",
+    representation: "Представление", raster: "Растр", signal: "Сигнал", metadata: "Метаданные", outputFormat: "ФОРМАТ ВЫВОДА",
+    formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
+    colorSpace: "Цветовое пространство", displayP3: "Display P3", transfer: "Передаточная функция", gainResolution: "Разрешение карты усиления", gainChannels: "Каналы карты усиления", mono: "Моно",
+    faithful: "Точно / Авто", lossless: "Без потерь",
+    peak: "Пик", preserve: "Сохранить", convert: "Запустить", stop: "Остановить", complete: "Готово",
+    selectBegin: "Выберите поддерживаемое HDR-изображение.", preview: "ПРЕДПРОСМОТР", noFile: "Файл не выбран", download: "СКАЧАТЬ",
+    previewUnavailable: "Предпросмотр недоступен в этом браузере", inspecting: "Локальная проверка HDR-контейнера...",
+    ready: "Готово к локальному преобразованию.", detected: "Обнаружен HDR-источник. Можно преобразовывать.", noHdr: "Поддерживаемые HDR-данные не найдены.",
+    unavailable: "Этот кодек пока не включён в браузере.", processing: "Загрузка кодеков и локальная реконструкция HDR-растра...",
+    aborted: "Отменено.", noneReported: "Нет данных", directHdr: "Прямой HDR", gainMapHdr: "HDR с картой усиления", localFile: "локальный файл",
+    compressionPng: "Сжатие PNG", compressionTiff: "Сжатие TIFF", jpegQuality: "Качество JPEG", quality: "Качество",
+    converted: "Преобразовано: {value}", peakNits: "пик {value} нит",
+    formatCopy: {
+      uhdr: "Ultra HDR JPEG с точной ISO-картой усиления.", png: "16-битный HDR PNG со стандартной сигнализацией cICP.",
+      jxl: "JPEG XL HDR для редактирования и мастер-копий.", jxr: "FP16 linear scRGB JPEG XR для редактирования и мастер-копий.",
+      avif: "Прямой 10-битный HDR AVIF.", tiff: "Прямой 16-битный PQ HDR TIFF.",
+    },
+  },
 };
 
 const state = {
@@ -26,6 +104,9 @@ const state = {
   outputName: "",
   worker: null,
   busy: false,
+  language: "en-US",
+  statusMessage: { key: "selectBegin", kind: "", replacements: {} },
+  inspectInfo: null,
 };
 
 const elements = {
@@ -54,7 +135,33 @@ const elements = {
   status: document.querySelector("#status"),
   preview: document.querySelector("#preview"),
   download: document.querySelector("#download-button"),
+  language: document.querySelector("#language-select"),
 };
+
+function tr(key) {
+  return translations[state.language]?.[key] ?? translations["en-US"][key] ?? key;
+}
+
+function applyLanguage(language) {
+  state.language = translations[language] ? language : "en-US";
+  document.documentElement.lang = state.language;
+  document.querySelectorAll("[data-i18n]").forEach((element) => {
+    element.textContent = tr(element.dataset.i18n);
+  });
+  elements.language.value = state.language;
+  if (!state.file) {
+    elements.fileName.textContent = tr("dropText");
+    elements.fileState.textContent = tr("localText");
+  } else {
+    elements.fileState.textContent = `${humanBytes(state.file.size)} · ${tr("localFile")}`;
+  }
+  if (state.inspectInfo) showInspector(state.inspectInfo);
+  renderTranslatedStatus();
+  configureParameters();
+  elements.availability.textContent = translations[state.language].formatCopy[state.format];
+  if (state.busy) elements.convert.textContent = tr("stop");
+  else if (elements.convert.classList.contains("is-complete")) elements.convert.textContent = tr("complete");
+}
 
 function codecWorker() {
   if (!state.worker) {
@@ -78,8 +185,24 @@ function humanBytes(bytes) {
 }
 
 function setStatus(text, kind = "") {
+  state.statusMessage = null;
   elements.status.textContent = text;
   elements.status.className = `status-text status ${kind}`.trim();
+}
+
+function renderTranslatedStatus() {
+  if (!state.statusMessage) return;
+  let text = tr(state.statusMessage.key);
+  Object.entries(state.statusMessage.replacements).forEach(([key, value]) => {
+    text = text.replace(`{${key}}`, value);
+  });
+  elements.status.textContent = text;
+  elements.status.className = `status-text status ${state.statusMessage.kind}`.trim();
+}
+
+function setTranslatedStatus(key, kind = "", replacements = {}) {
+  state.statusMessage = { key, kind, replacements };
+  renderTranslatedStatus();
 }
 
 function refreshConvertAvailability() {
@@ -91,7 +214,7 @@ function setBusy(busy) {
   state.busy = busy;
   elements.progress.hidden = !busy;
   refreshConvertAvailability();
-  elements.convert.textContent = busy ? "STOP PROCESSING" : "CONVERT";
+  elements.convert.textContent = busy ? tr("stop") : tr("convert");
   elements.convert.className = busy
     ? "main-btn process-button is-processing"
     : "main-btn process-button";
@@ -104,7 +227,7 @@ function clearOutput() {
   elements.download.disabled = true;
   if (!state.busy) {
     elements.convert.className = "main-btn process-button";
-    elements.convert.textContent = "CONVERT";
+    elements.convert.textContent = tr("convert");
     refreshConvertAvailability();
   }
 }
@@ -136,12 +259,12 @@ function configureParameters() {
   elements.encodingRow.hidden = (isJxl || isJxr) && state.lossless;
 
   if (state.format === "png" || state.format === "tiff") {
-    elements.sliderLabel.textContent = `${state.format === "png" ? "PNG" : "TIFF"} Compression`;
+    elements.sliderLabel.textContent = tr(state.format === "png" ? "compressionPng" : "compressionTiff");
     elements.slider.min = "1";
     elements.slider.max = "9";
     elements.slider.step = "1";
   } else {
-    elements.sliderLabel.textContent = isUhdr ? "JPEG Quality" : "Quality";
+    elements.sliderLabel.textContent = tr(isUhdr ? "jpegQuality" : "quality");
     elements.slider.min = "1";
     elements.slider.max = "100";
     elements.slider.step = "1";
@@ -163,18 +286,18 @@ function selectFormat(format) {
     button.classList.toggle("active", button.dataset.format === format);
   });
   const available = availableFormats.has(format);
-  elements.availability.textContent = formatCopy[format];
+  elements.availability.textContent = translations[state.language].formatCopy[format];
   elements.availability.classList.toggle("unavailable", !available);
   configureParameters();
   clearOutput();
   setBusy(false);
-  if (!available) setStatus("This browser codec is not enabled yet.");
-  else if (state.file && state.sourceSupported) setStatus("Ready to convert locally.");
+  if (!available) setTranslatedStatus("unavailable");
+  else if (state.file && state.sourceSupported) setTranslatedStatus("ready");
 }
 
 async function inspectFile(file) {
   const requestId = ++state.requestId;
-  setStatus("Inspecting the HDR container locally...");
+  setTranslatedStatus("inspecting");
   try {
     const buffer = await file.arrayBuffer();
     codecWorker().postMessage({
@@ -191,16 +314,17 @@ function selectFile(file) {
   state.sourceSupported = false;
   clearOutput();
   elements.fileName.textContent = file.name;
-  elements.fileState.textContent = `${humanBytes(file.size)} · local file`;
+  elements.fileState.textContent = `${humanBytes(file.size)} · ${tr("localFile")}`;
   elements.inspector.hidden = true;
-  elements.preview.innerHTML = '<span class="preview-placeholder">Preview unavailable in this browser</span>';
+  elements.preview.innerHTML = `<span class="preview-placeholder">${tr("previewUnavailable")}</span>`;
   setBusy(false);
   inspectFile(file);
 }
 
 function showInspector(info) {
+  state.inspectInfo = info;
   elements.inspector.hidden = false;
-  const kind = info.assetKind === "gain-map-hdr" ? "Gain-map HDR" : "Direct HDR";
+  const kind = info.assetKind === "gain-map-hdr" ? tr("gainMapHdr") : tr("directHdr");
   elements.inspectKind.textContent = `${kind} · ${info.format || info.containerBrand}`;
   elements.inspectRaster.textContent = `${info.width}×${info.height} · ${info.bitDepth || "?"}-bit · ${info.pixelFormat || info.chroma}`;
   const primaries = info.color?.primaries === 9 ? "BT.2020" :
@@ -212,7 +336,7 @@ function showInspector(info) {
   const metadata = Object.entries(info.metadata || {})
     .filter(([, status]) => status === "present")
     .map(([name]) => name.toUpperCase());
-  elements.inspectMetadata.textContent = metadata.length ? metadata.join(" · ") : "None reported";
+  elements.inspectMetadata.textContent = metadata.length ? metadata.join(" · ") : tr("noneReported");
 }
 
 function handleWorkerMessage({ data }) {
@@ -226,9 +350,7 @@ function handleWorkerMessage({ data }) {
     showInspector(data.info);
     state.sourceSupported = data.info.assetKind === "direct-hdr" ||
       data.info.assetKind === "gain-map-hdr";
-    setStatus(state.sourceSupported
-      ? "HDR source detected. Ready to convert locally."
-      : "No supported HDR data was found.", state.sourceSupported ? "" : "error");
+    setTranslatedStatus(state.sourceSupported ? "detected" : "noHdr", state.sourceSupported ? "" : "error");
     refreshConvertAvailability();
     return;
   }
@@ -242,14 +364,15 @@ function handleWorkerMessage({ data }) {
       image.src = state.outputUrl;
       elements.preview.replaceChildren(image);
     } else {
-      elements.preview.innerHTML = '<span class="preview-placeholder">Preview unavailable in this browser</span>';
+      elements.preview.innerHTML = `<span class="preview-placeholder">${tr("previewUnavailable")}</span>`;
     }
     const stem = state.file.name.replace(/\.[^.]+$/, "");
     state.outputName = `${stem}-hdrbridge.${data.extension}`;
     elements.download.disabled = false;
     const peak = data.info.verification?.hdrDiagnostics?.maxChannelNits;
-    setStatus(`Converted ${data.info.verification?.pixelFormat || state.format.toUpperCase()} · ${humanBytes(blob.size)}${Number.isFinite(peak) ? ` · peak ${peak.toFixed(1)} nit` : ""}`, "success");
-    elements.convert.textContent = "PROCESSING COMPLETE";
+    const conversionSummary = `${data.info.verification?.pixelFormat || state.format.toUpperCase()} · ${humanBytes(blob.size)}${Number.isFinite(peak) ? ` · ${tr("peakNits").replace("{value}", peak.toFixed(1))}` : ""}`;
+    setTranslatedStatus("converted", "success", { value: conversionSummary });
+    elements.convert.textContent = tr("complete");
     elements.convert.className = "main-btn process-button is-complete";
     refreshConvertAvailability();
   }
@@ -261,13 +384,13 @@ async function convert() {
     if (state.worker) state.worker.terminate();
     state.worker = null;
     setBusy(false);
-    setStatus("Processing aborted.");
+    setTranslatedStatus("aborted");
     return;
   }
   if (!state.file || !state.sourceSupported || !availableFormats.has(state.format)) return;
   clearOutput();
   setBusy(true);
-  setStatus("Loading the required codecs and reconstructing the HDR raster locally...");
+  setTranslatedStatus("processing");
   const requestId = ++state.requestId;
   try {
     const buffer = await state.file.arrayBuffer();
@@ -344,5 +467,7 @@ elements.download.addEventListener("click", () => {
   link.download = state.outputName;
   link.click();
 });
+elements.language.addEventListener("change", () => applyLanguage(elements.language.value));
 
 configureParameters();
+applyLanguage("en-US");

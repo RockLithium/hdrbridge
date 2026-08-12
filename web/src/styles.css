@@ -40,6 +40,31 @@ body {
 #homeButton:hover { background: rgba(255, 255, 255, 0.1); transform: scale(1.04); }
 #homeButton:active { transform: scale(0.96); transition: transform 0.05s; }
 
+#langSelectorContainer {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 100;
+}
+
+.lang-select {
+  padding: 10px 16px;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  outline: none;
+  cursor: pointer;
+  font-family: "Ubuntu Condensed", "PingFang SC", sans-serif;
+  font-size: 0.9em;
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+  transition: all 0.3s ease;
+}
+
+.lang-select:hover { background: rgba(255, 255, 255, 0.1); }
+.lang-select option { color: #e0e0e0; background-color: #1a1a1a; }
+
 .container {
   width: 90%;
   max-width: 800px;

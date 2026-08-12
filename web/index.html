@@ -7,53 +7,61 @@
   <title>HDR Bridge</title>
   <link href="https://fonts.googleapis.com/css2?family=Ubuntu+Condensed&display=swap" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@300;400;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./src/styles.css?v=5">
+  <link rel="stylesheet" href="./src/styles.css?v=6">
 </head>
 <body>
-  <a href="../tools" id="homeButton">← Go Back</a>
+  <a href="../tools" id="homeButton" data-i18n="goBack">← Go Back</a>
+  <div id="langSelectorContainer">
+    <select class="lang-select" id="language-select" aria-label="Language">
+      <option value="en-US">English</option>
+      <option value="zh-Hans">简体中文</option>
+      <option value="fr-FR">Français</option>
+      <option value="ru-RU">Русский</option>
+    </select>
+  </div>
   <main class="container">
     <h1>HDR Bridge</h1>
-    <div class="subtitle">Convert HDR still images locally in your browser.</div>
+    <div class="subtitle" data-i18n="subtitle">Convert HDR still images locally in your browser.</div>
 
     <section class="group" aria-labelledby="source-title">
-      <h2 id="source-title">SELECT HDR IMAGE</h2>
+      <h2 id="source-title" data-i18n="selectHdr">SELECT HDR IMAGE</h2>
       <label class="file-drop" id="drop-zone">
         <input id="file-input" type="file" accept=".hif,.heif,.heic,.avif,.jpg,.jpeg,.jpe,.jxl,.jxr,.wdp,.hdp,.png,.tif,.tiff">
         <span class="file-name" id="file-name">Click or drop one HDR image here...</span>
         <span class="file-state" id="file-state">Your image stays on this device.</span>
       </label>
       <div class="inspector" id="inspector" hidden>
-        <div><span>Representation</span><strong id="inspect-kind">—</strong></div>
-        <div><span>Raster</span><strong id="inspect-raster">—</strong></div>
-        <div><span>Signal</span><strong id="inspect-signal">—</strong></div>
-        <div><span>Metadata</span><strong id="inspect-metadata">—</strong></div>
+        <div><span data-i18n="representation">Representation</span><strong id="inspect-kind">—</strong></div>
+        <div><span data-i18n="raster">Raster</span><strong id="inspect-raster">—</strong></div>
+        <div><span data-i18n="signal">Signal</span><strong id="inspect-signal">—</strong></div>
+        <div><span data-i18n="metadata">Metadata</span><strong id="inspect-metadata">—</strong></div>
       </div>
     </section>
 
     <section class="group" aria-labelledby="format-title">
-      <h2 id="format-title">OUTPUT FORMAT</h2>
+      <h2 id="format-title" data-i18n="outputFormat">OUTPUT FORMAT</h2>
       <div class="format-grid" id="format-grid">
-        <button class="option-box" type="button" data-format="uhdr">Ultra HDR JPEG</button>
-        <button class="option-box active" type="button" data-format="png">HDR PNG</button>
+        <button class="option-box" type="button" data-format="uhdr" data-i18n="formatUhdr">Ultra HDR JPEG</button>
+        <button class="option-box active" type="button" data-format="png" data-i18n="formatPng">HDR PNG</button>
         <button class="option-box" type="button" data-format="jxl">JPEG XL</button>
         <button class="option-box" type="button" data-format="jxr">JPEG XR</button>
-        <button class="option-box" type="button" data-format="avif">HDR AVIF</button>
-        <button class="option-box" type="button" data-format="tiff">HDR TIFF</button>
+        <button class="option-box" type="button" data-format="avif" data-i18n="formatAvif">HDR AVIF</button>
+        <button class="option-box" type="button" data-format="tiff" data-i18n="formatTiff">HDR TIFF</button>
       </div>
       <div class="availability" id="availability">HDR PNG is available now for direct PQ/HLG HEIF/HIF input.</div>
     </section>
 
     <section class="group parameters" aria-label="Format parameters">
       <div class="parameter" id="color-space-row">
-        <span class="parameter-label">Color Space</span>
+        <span class="parameter-label" data-i18n="colorSpace">Color Space</span>
         <div class="inline-options" data-setting="primaries">
           <button class="mini-option active" type="button" data-value="9">Rec.2020</button>
-          <button class="mini-option" type="button" data-value="12">Display P3</button>
+          <button class="mini-option" type="button" data-value="12" data-i18n="displayP3">Display P3</button>
         </div>
       </div>
 
       <div class="parameter" id="transfer-row">
-        <span class="parameter-label">Transfer</span>
+        <span class="parameter-label" data-i18n="transfer">Transfer</span>
         <div class="inline-options" data-setting="transfer">
           <button class="mini-option active" type="button" data-value="16">PQ / ST2084</button>
           <button class="mini-option" type="button" data-value="18">HLG</button>
@@ -61,7 +69,7 @@
       </div>
 
       <div class="parameter" id="gain-resolution-row" hidden>
-        <span class="parameter-label">Gain Map Resolution</span>
+        <span class="parameter-label" data-i18n="gainResolution">Gain Map Resolution</span>
         <div class="inline-options" data-setting="gainResolution">
           <button class="mini-option" type="button" data-value="4">1/4</button>
           <button class="mini-option active" type="button" data-value="2">1/2</button>
@@ -70,17 +78,17 @@
       </div>
 
       <div class="parameter" id="gain-channels-row" hidden>
-        <span class="parameter-label">Gain Map Channels</span>
+        <span class="parameter-label" data-i18n="gainChannels">Gain Map Channels</span>
         <div class="inline-options" data-setting="gainChannels">
-          <button class="mini-option active" type="button" data-value="mono">Mono</button>
+          <button class="mini-option active" type="button" data-value="mono" data-i18n="mono">Mono</button>
           <button class="mini-option" type="button" data-value="rgb">RGB</button>
         </div>
       </div>
 
       <div class="parameter" id="peak-row" hidden>
-        <span class="parameter-label">Peak</span>
+        <span class="parameter-label" data-i18n="peak">Peak</span>
         <div class="inline-options five-options" data-setting="peak">
-          <button class="mini-option active" type="button" data-value="0">Faithful / Auto</button>
+          <button class="mini-option active" type="button" data-value="0" data-i18n="faithful">Faithful / Auto</button>
           <button class="mini-option" type="button" data-value="1000">1000 nits</button>
           <button class="mini-option" type="button" data-value="2000">2000 nits</button>
           <button class="mini-option" type="button" data-value="4000">4000 nits</button>
@@ -89,9 +97,9 @@
       </div>
 
       <div class="parameter" id="preservation-row">
-        <span class="parameter-label">Preserve</span>
+        <span class="parameter-label" data-i18n="preserve">Preserve</span>
         <div class="inline-options three-options">
-          <button class="mini-option active" id="lossless-option" type="button" data-toggle="lossless">Lossless</button>
+          <button class="mini-option active" id="lossless-option" type="button" data-toggle="lossless" data-i18n="lossless">Lossless</button>
           <button class="mini-option active" type="button" data-toggle="copyExif">Exif</button>
           <button class="mini-option active" type="button" data-toggle="copyXmp">XMP</button>
         </div>
@@ -107,22 +115,22 @@
     </section>
 
     <section class="action-area process-btn-container">
-      <button id="convert-button" class="main-btn process-button" type="button" disabled>CONVERT</button>
+      <button id="convert-button" class="main-btn process-button" type="button" disabled data-i18n="convert">CONVERT</button>
       <div class="progress-track" id="progress-track" hidden><span></span></div>
       <div class="status-text status" id="status" role="status">Select a supported HDR image to begin.</div>
     </section>
 
     <section class="group" aria-labelledby="preview-title">
-      <h2 id="preview-title">PREVIEW</h2>
+      <h2 id="preview-title" data-i18n="preview">PREVIEW</h2>
       <div class="preview preview-box" id="preview">
-        <span class="preview-placeholder">No file loaded</span>
+        <span class="preview-placeholder" data-i18n="noFile">No file loaded</span>
       </div>
     </section>
 
     <div class="download-area">
-      <button id="download-button" class="main-btn download-button" type="button" disabled>DOWNLOAD</button>
+      <button id="download-button" class="main-btn download-button" type="button" disabled data-i18n="download">DOWNLOAD</button>
     </div>
   </main>
-  <script type="module" src="./src/app.js?v=5"></script>
+  <script type="module" src="./src/app.js?v=6"></script>
 </body>
 </html>
