@@ -31,8 +31,9 @@ decodes or reconstructs a canonical, correctly oriented, high-precision linear
 HDR master and sends it to the selected output adapter. `verify` reopens the
 result and checks its target representation.
 
-Direct PQ, direct HLG, ISO Ultra HDR, Apple Adaptive HDR and Adobe gain-map
-assets have separate input adapters. They share color and HDR mathematics only
+Direct PQ, direct HLG, ISO Ultra HDR, Apple Adaptive HDR, gain-map AVIF,
+Adobe gain-map TIFF and gain-map JPEG XL (`jhgm`) assets have separate input adapters. They share color
+and HDR mathematics only
 after reconstruction. Camera brand is not used as a transfer-function proxy.
 
 Outputs are written to a temporary file, verified, then renamed to the final

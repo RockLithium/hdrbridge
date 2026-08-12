@@ -15,7 +15,8 @@ Supported input families include:
 - direct PQ or HLG HEIF/HIF, AVIF, PNG, TIFF and JPEG XL;
 - Apple Adaptive HDR HEIC and JPEG;
 - ISO Ultra HDR JPEG, including mono and RGB gain maps;
-- Adobe gain-map AVIF and TIFF;
+- gain-map AVIF and Adobe gain-map TIFF;
+- gain-map JPEG XL (`jhgm`);
 - FP16 scRGB JPEG XR.
 
 Available outputs:
@@ -23,15 +24,18 @@ Available outputs:
 - Ultra HDR JPEG (Faithful/Auto);
 - 16-bit HDR PNG in PQ or HLG;
 - 16-bit JPEG XL in PQ or HLG;
+- RGB gain-map JPEG XL;
 - FP16 linear scRGB JPEG XR;
 - 10-bit 4:4:4 HDR AVIF in PQ or HLG;
+- RGB gain-map AVIF;
 - 16-bit PQ HDR TIFF;
 - packed RGB10 JPEG XR as an experimental option.
 
 The Inspector reports the encoded source representation, metadata, gain-map
-components and reconstructed HDR separately. Batch conversion is sequential so
-large images do not accumulate in memory; a bad or non-HDR file does not stop
-the rest of the queue.
+components and reconstructed HDR separately. The task queue is sequential so
+large images do not accumulate in memory; tasks retain independent settings,
+status and progress, and a bad or non-HDR file does not stop the rest of the
+queue.
 
 Download the unsigned portable Windows x64 build from
 [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases). Windows

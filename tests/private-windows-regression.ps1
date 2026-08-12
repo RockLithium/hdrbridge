@@ -1,6 +1,6 @@
 param(
     [string]$Cli = (Join-Path $PSScriptRoot "..\build-vs\bin\Release\hdrbridge-cli.exe"),
-    [string]$Fixture = (Join-Path $PSScriptRoot "..\..\private-fixtures\golden-inputs\0U2A0009.HIF"),
+    [string]$Fixture = (Join-Path $PSScriptRoot "..\..\private-fixtures\golden-inputs\PQ_HIF.HIF"),
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "..\..\private-fixtures\test-output")
 )
 
@@ -16,7 +16,7 @@ if (-not (Test-Path -LiteralPath $Fixture)) {
 }
 if (-not (Test-Path -LiteralPath $Cli)) { throw "CLI not found: $Cli" }
 
-$expectedHash = "B72ACD7E4908B8B1EE62942B084299C3A9AB9EBC57351A3D47852EBAD3042B60"
+$expectedHash = "2DFB921F90E60F51034ED01C63649076484F6E136B31EE3E4EF60F693075E22C"
 $actualHash = (Get-FileHash -LiteralPath $Fixture -Algorithm SHA256).Hash
 Assert-Equal $actualHash $expectedHash "fixture SHA-256"
 

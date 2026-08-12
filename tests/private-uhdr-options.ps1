@@ -11,8 +11,8 @@ function Assert-True($condition, [string]$name) {
 }
 
 if (-not (Test-Path -LiteralPath $Cli)) { throw "CLI not found: $Cli" }
-$vivo = Join-Path $Corpus "IMG_20260418_170733.jpg"
-$xiaomi = Join-Path $Corpus "IMG_20260811_190633.jpg"
+$vivo = Join-Path $Corpus "GM_JPEG_Android (2).jpg"
+$xiaomi = Join-Path $Corpus "GM_JPEG_Android.jpg"
 if (-not (Test-Path -LiteralPath $vivo)) {
     Write-Host "SKIPPED: private vivo Ultra HDR fixture unavailable"
     exit 0

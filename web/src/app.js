@@ -5,7 +5,7 @@ const translations = {
     selectHdr: "SELECT HDR IMAGE", dropText: "Click or drop one HDR image here...", localText: "Your image stays on this device.",
     representation: "Representation", raster: "Raster", signal: "Signal", metadata: "Metadata", outputFormat: "OUTPUT FORMAT",
     formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
-    colorSpace: "Color Space", displayP3: "Display P3", transfer: "Transfer", gainResolution: "Gain Map Resolution", gainChannels: "Gain Map Channels", mono: "Mono",
+    colorSpace: "Color Space", displayP3: "Display P3", transfer: "Transfer", gainMap: "Gain Map", gainResolution: "Gain Map Resolution", gainChannels: "Gain Map Channels", mono: "Mono",
     faithful: "Faithful / Auto", lossless: "Lossless",
     peak: "Peak", preserve: "Preserve", convert: "Start Processing", stop: "Stop Processing", complete: "Processing Complete",
     selectBegin: "Select a supported HDR image to begin.", preview: "PREVIEW", noFile: "No file loaded", download: "DOWNLOAD",
@@ -26,7 +26,7 @@ const translations = {
     selectHdr: "选择 HDR 图像", dropText: "点击或拖入一张 HDR 图像...", localText: "图像只在本设备上处理。",
     representation: "源表示", raster: "图像", signal: "信号", metadata: "元数据", outputFormat: "输出格式",
     formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
-    colorSpace: "色彩空间", displayP3: "Display P3", transfer: "传递函数", gainResolution: "增益图分辨率", gainChannels: "增益图通道", mono: "单通道",
+    colorSpace: "色彩空间", displayP3: "Display P3", transfer: "传递函数", gainMap: "增益图", gainResolution: "增益图分辨率", gainChannels: "增益图通道", mono: "单通道",
     faithful: "保真 / 自动", lossless: "无损",
     peak: "峰值", preserve: "保留", convert: "开始转换", stop: "停止转换", complete: "转换完成",
     selectBegin: "请选择受支持的 HDR 图像。", preview: "预览", noFile: "未加载文件", download: "下载",
@@ -47,7 +47,7 @@ const translations = {
     selectHdr: "CHOISIR UNE IMAGE HDR", dropText: "Cliquez ou déposez une image HDR ici...", localText: "L’image reste sur cet appareil.",
     representation: "Représentation", raster: "Image", signal: "Signal", metadata: "Métadonnées", outputFormat: "FORMAT DE SORTIE",
     formatUhdr: "JPEG Ultra HDR", formatPng: "PNG HDR", formatAvif: "AVIF HDR", formatTiff: "TIFF HDR",
-    colorSpace: "Espace colorimétrique", displayP3: "Display P3", transfer: "Transfert", gainResolution: "Résolution de la gain map", gainChannels: "Canaux de la gain map", mono: "Mono",
+    colorSpace: "Espace colorimétrique", displayP3: "Display P3", transfer: "Transfert", gainMap: "Gain map", gainResolution: "Résolution de la gain map", gainChannels: "Canaux de la gain map", mono: "Mono",
     faithful: "Fidèle / Auto", lossless: "Sans perte",
     peak: "Pic", preserve: "Conserver", convert: "Lancer la conversion", stop: "Arrêter", complete: "Terminé",
     selectBegin: "Choisissez une image HDR prise en charge.", preview: "APERÇU", noFile: "Aucun fichier", download: "TÉLÉCHARGER",
@@ -68,7 +68,7 @@ const translations = {
     selectHdr: "ВЫБЕРИТЕ HDR-ИЗОБРАЖЕНИЕ", dropText: "Нажмите или перетащите сюда HDR-изображение...", localText: "Изображение остаётся на этом устройстве.",
     representation: "Представление", raster: "Растр", signal: "Сигнал", metadata: "Метаданные", outputFormat: "ФОРМАТ ВЫВОДА",
     formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
-    colorSpace: "Цветовое пространство", displayP3: "Display P3", transfer: "Передаточная функция", gainResolution: "Разрешение карты усиления", gainChannels: "Каналы карты усиления", mono: "Моно",
+    colorSpace: "Цветовое пространство", displayP3: "Display P3", transfer: "Передаточная функция", gainMap: "Карта усиления", gainResolution: "Разрешение карты усиления", gainChannels: "Каналы карты усиления", mono: "Моно",
     faithful: "Точно / Авто", lossless: "Без потерь",
     peak: "Пик", preserve: "Сохранить", convert: "Запустить", stop: "Остановить", complete: "Готово",
     selectBegin: "Выберите поддерживаемое HDR-изображение.", preview: "ПРЕДПРОСМОТР", noFile: "Файл не выбран", download: "СКАЧАТЬ",
@@ -92,6 +92,7 @@ const state = {
   format: "png",
   primaries: 9,
   transfer: 16,
+  outputRepresentation: "direct",
   gainResolution: 2,
   gainChannels: "mono",
   peak: 0,
@@ -120,6 +121,7 @@ const elements = {
   inspectSignal: document.querySelector("#inspect-signal"),
   inspectMetadata: document.querySelector("#inspect-metadata"),
   availability: document.querySelector("#availability"),
+  gainmapTransferOption: document.querySelector("#gainmap-transfer-option"),
   colorRow: document.querySelector("#color-space-row"),
   transferRow: document.querySelector("#transfer-row"),
   gainResolutionRow: document.querySelector("#gain-resolution-row"),
@@ -233,8 +235,9 @@ function clearOutput() {
 }
 
 function optionValue(setting, rawValue) {
-  return ["primaries", "transfer", "gainResolution", "peak"].includes(setting)
+  return ["primaries", "gainResolution", "peak"].includes(setting)
     ? Number(rawValue)
+    : setting === "transfer" && rawValue !== "gainmap" ? Number(rawValue)
     : rawValue;
 }
 
@@ -248,15 +251,30 @@ function configureParameters() {
   const isUhdr = state.format === "uhdr";
   const isJxr = state.format === "jxr";
   const isJxl = state.format === "jxl";
-  const supportsColor = ["png", "jxl", "avif", "tiff"].includes(state.format);
+  const supportsRepresentation = isJxl || state.format === "avif";
+  const isGainMap = isUhdr || (supportsRepresentation && state.outputRepresentation === "gainmap");
+  const rgbOnlyGainMap = supportsRepresentation && state.outputRepresentation === "gainmap";
+  const supportsColor = ["uhdr", "png", "jxl", "avif", "tiff"].includes(state.format);
   const supportsTransfer = ["png", "jxl", "avif"].includes(state.format);
+  elements.gainmapTransferOption.hidden = !supportsRepresentation;
   elements.colorRow.hidden = !supportsColor;
   elements.transferRow.hidden = !supportsTransfer;
-  elements.gainResolutionRow.hidden = !isUhdr;
-  elements.gainChannelsRow.hidden = !isUhdr;
-  elements.peakRow.hidden = !isUhdr;
+  elements.gainResolutionRow.hidden = !isGainMap;
+  elements.gainChannelsRow.hidden = !isGainMap;
+  const monoChannel = elements.gainChannelsRow.querySelector('[data-value="mono"]');
+  monoChannel.hidden = rgbOnlyGainMap;
+  if (rgbOnlyGainMap) state.gainChannels = "rgb";
+  elements.peakRow.hidden = !isGainMap;
+  const parameters = elements.colorRow.parentElement;
+  const preservationRow = document.querySelector("#preservation-row");
+  if (isGainMap && supportsRepresentation) {
+    parameters.insertBefore(elements.transferRow, preservationRow);
+  } else {
+    parameters.insertBefore(elements.transferRow, elements.gainResolutionRow);
+  }
   elements.losslessOption.hidden = !(isJxl || isJxr);
   elements.encodingRow.hidden = (isJxl || isJxr) && state.lossless;
+  document.querySelector('[data-setting="primaries"] [data-value="1"]').hidden = !isGainMap;
 
   if (state.format === "png" || state.format === "tiff") {
     elements.sliderLabel.textContent = tr(state.format === "png" ? "compressionPng" : "compressionTiff");
@@ -272,16 +290,18 @@ function configureParameters() {
   elements.slider.value = String(state.encodingValues[state.format]);
   elements.sliderValue.value = elements.slider.value;
 
-  const p3Button = document.querySelector('[data-setting="primaries"] [data-value="12"]');
-  p3Button.hidden = state.transfer === 18;
-  if (state.transfer === 18 && state.primaries !== 9) state.primaries = 9;
   updateOptionButtons("primaries");
   updateOptionButtons("transfer");
   updateOptionButtons("peak");
+  updateOptionButtons("gainChannels");
 }
 
 function selectFormat(format) {
   state.format = format;
+  state.outputRepresentation = "direct";
+  state.transfer = 16;
+  state.primaries = format === "uhdr" ? 12 : 9;
+  if (format === "uhdr") state.gainChannels = "mono";
   document.querySelectorAll("[data-format]").forEach((button) => {
     button.classList.toggle("active", button.dataset.format === format);
   });
@@ -367,7 +387,17 @@ function handleWorkerMessage({ data }) {
       elements.preview.innerHTML = `<span class="preview-placeholder">${tr("previewUnavailable")}</span>`;
     }
     const stem = state.file.name.replace(/\.[^.]+$/, "");
-    state.outputName = `${stem}-hdrbridge.${data.extension}`;
+    const suffixes = {
+      uhdr: "_ultrahdr.jpg",
+      png: state.transfer === 18 ? "_hdr-hlg.png" : "_hdr-pq16.png",
+      jxl: state.outputRepresentation === "gainmap" ? "_gainmap.jxl" :
+        state.transfer === 18 ? "_hlg16.jxl" : "_pq16.jxl",
+      jxr: "_scrgb-fp16.jxr",
+      avif: state.outputRepresentation === "gainmap" ? "_gainmap.avif" :
+        state.transfer === 18 ? "_direct-hlg10.avif" : "_direct-pq10.avif",
+      tiff: "_hdr-pq16.tiff",
+    };
+    state.outputName = `${stem}${suffixes[data.format]}`;
     elements.download.disabled = false;
     const peak = data.info.verification?.hdrDiagnostics?.maxChannelNits;
     const conversionSummary = `${data.info.verification?.pixelFormat || state.format.toUpperCase()} · ${humanBytes(blob.size)}${Number.isFinite(peak) ? ` · ${tr("peakNits").replace("{value}", peak.toFixed(1))}` : ""}`;
@@ -402,6 +432,7 @@ async function convert() {
       format: state.format,
       primaries: state.primaries,
       transfer: state.transfer,
+      outputRepresentation: state.outputRepresentation,
       encodingValue: state.encodingValues[state.format],
       lossless: state.lossless,
       copyExif: state.copyExif,
@@ -439,7 +470,11 @@ document.querySelectorAll("[data-setting]").forEach((group) => {
     if (!button) return;
     const setting = group.dataset.setting;
     state[setting] = optionValue(setting, button.dataset.value);
-    if (setting === "transfer" && state.transfer === 18) state.primaries = 9;
+    if (setting === "transfer") {
+      state.outputRepresentation = state.transfer === "gainmap" ? "gainmap" : "direct";
+      state.primaries = state.outputRepresentation === "gainmap" ? 12 : 9;
+      if (state.outputRepresentation === "gainmap") state.gainChannels = "rgb";
+    }
     updateOptionButtons(setting);
     configureParameters();
     clearOutput();
@@ -460,8 +495,21 @@ elements.slider.addEventListener("input", () => {
   clearOutput();
 });
 elements.convert.addEventListener("click", convert);
-elements.download.addEventListener("click", () => {
+elements.download.addEventListener("click", async () => {
   if (!state.outputUrl || !state.outputName) return;
+  if (window.showSaveFilePicker) {
+    try {
+      const response = await fetch(state.outputUrl);
+      const blob = await response.blob();
+      const handle = await window.showSaveFilePicker({ suggestedName: state.outputName });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+    }
+  }
   const link = document.createElement("a");
   link.href = state.outputUrl;
   link.download = state.outputName;

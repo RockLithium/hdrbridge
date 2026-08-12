@@ -36,6 +36,7 @@
 #include <jxl/encode_cxx.h>
 #include <jxl/resizable_parallel_runner.h>
 #include <jxl/resizable_parallel_runner_cxx.h>
+#include <avif/avif.h>
 #include <libheif/heif.h>
 #include <libheif/heif_properties.h>
 #include <lcms2.h>
@@ -84,6 +85,13 @@ using NclxPtr = std::unique_ptr<heif_color_profile_nclx, NclxDeleter>;
 using HeifEncoderPtr = std::unique_ptr<heif_encoder, HeifEncoderDeleter>;
 using HeifEncodingOptionsPtr = std::unique_ptr<heif_encoding_options, HeifEncodingOptionsDeleter>;
 
+struct AvifImageDeleter { void operator()(avifImage* p) const { avifImageDestroy(p); } };
+struct AvifGainMapDeleter { void operator()(avifGainMap* p) const { avifGainMapDestroy(p); } };
+struct AvifEncoderDeleter { void operator()(avifEncoder* p) const { avifEncoderDestroy(p); } };
+using AvifImagePtr = std::unique_ptr<avifImage, AvifImageDeleter>;
+using AvifGainMapPtr = std::unique_ptr<avifGainMap, AvifGainMapDeleter>;
+using AvifEncoderPtr = std::unique_ptr<avifEncoder, AvifEncoderDeleter>;
+
 struct DecodedImage {
   SourceInfo info;
   std::vector<uint16_t> rgb;
@@ -104,6 +112,9 @@ double elapsed_ms(Clock::time_point start) {
 }
 
 void convert_p3_pq_to_rec2020_pq(std::vector<uint16_t>& pixels);
+void write_file(const std::filesystem::path& path, const std::vector<uint8_t>& data);
+std::vector<uint16_t> convert_rec2020_pq_to_p3_pq(const DecodedImage& decoded);
+std::vector<uint16_t> convert_rec2020_pq_to_rec709_pq(const DecodedImage& decoded);
 
 HdrTransfer public_transfer_kind(uint16_t cicp_transfer) {
   if (cicp_transfer == 16) return HdrTransfer::pq_st2084;
@@ -520,7 +531,8 @@ std::vector<uint8_t> encode_jxl(const DecodedImage& decoded, const ConversionOpt
   JxlColorEncoding color{};
   color.color_space = JXL_COLOR_SPACE_RGB;
   color.white_point = JXL_WHITE_POINT_D65;
-  color.primaries = options.output_gamut == "p3" ? JXL_PRIMARIES_P3 : JXL_PRIMARIES_2100;
+  color.primaries = options.output_gamut == "rec709" ? JXL_PRIMARIES_SRGB :
+                    options.output_gamut == "p3" ? JXL_PRIMARIES_P3 : JXL_PRIMARIES_2100;
   color.transfer_function = options.output_transfer == "hlg"
       ? JXL_TRANSFER_FUNCTION_HLG : JXL_TRANSFER_FUNCTION_PQ;
   color.rendering_intent = JXL_RENDERING_INTENT_RELATIVE;
@@ -575,6 +587,141 @@ std::vector<uint8_t> encode_jxl(const DecodedImage& decoded, const ConversionOpt
   return output;
 }
 
+std::vector<uint8_t> encode_jxl_gainmap_raster(uint32_t width, uint32_t height,
+                                               const std::vector<uint16_t>& pixels,
+                                               uint32_t channels,
+                                               const JxlColorEncoding& color,
+                                               bool use_container,
+                                               bool lossless, float quality) {
+  auto encoder = JxlEncoderMake(nullptr);
+  auto runner = JxlResizableParallelRunnerMake(nullptr);
+  if (!encoder || !runner) throw std::runtime_error("cannot create gain-map JPEG XL encoder");
+  if (JxlEncoderSetParallelRunner(encoder.get(), JxlResizableParallelRunner, runner.get()) != JXL_ENC_SUCCESS)
+    throw std::runtime_error("cannot attach gain-map JPEG XL runner");
+  JxlResizableParallelRunnerSetThreads(runner.get(),
+      JxlResizableParallelRunnerSuggestThreads(width, height));
+  if (use_container && JxlEncoderUseContainer(encoder.get(), JXL_TRUE) != JXL_ENC_SUCCESS)
+    throw std::runtime_error("cannot enable gain-map JPEG XL container");
+  JxlBasicInfo basic{};
+  JxlEncoderInitBasicInfo(&basic);
+  basic.xsize = width; basic.ysize = height; basic.bits_per_sample = 16;
+  basic.num_color_channels = channels; basic.num_extra_channels = 0;
+  basic.uses_original_profile = JXL_TRUE;
+  if (JxlEncoderSetBasicInfo(encoder.get(), &basic) != JXL_ENC_SUCCESS ||
+      JxlEncoderSetColorEncoding(encoder.get(), &color) != JXL_ENC_SUCCESS)
+    throw std::runtime_error("cannot configure gain-map JPEG XL raster");
+  auto* frame = JxlEncoderFrameSettingsCreate(encoder.get(), nullptr);
+  if (!frame) throw std::runtime_error("cannot create gain-map JPEG XL frame");
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, 7);
+  if (lossless) JxlEncoderSetFrameLossless(frame, JXL_TRUE);
+  else JxlEncoderSetFrameDistance(frame, std::max(0.01f, 1.0f - quality) * 4.0f);
+  const JxlPixelFormat format{channels, JXL_TYPE_UINT16, JXL_NATIVE_ENDIAN, 0};
+  if (JxlEncoderAddImageFrame(frame, &format, pixels.data(), pixels.size() * sizeof(uint16_t)) != JXL_ENC_SUCCESS)
+    throw std::runtime_error("cannot add gain-map JPEG XL raster");
+  JxlEncoderCloseInput(encoder.get());
+  std::vector<uint8_t> output(1u << 20);
+  uint8_t* next = output.data(); size_t available = output.size();
+  for (;;) {
+    const auto status = JxlEncoderProcessOutput(encoder.get(), &next, &available);
+    if (status == JXL_ENC_SUCCESS) break;
+    if (status != JXL_ENC_NEED_MORE_OUTPUT) throw std::runtime_error("gain-map JPEG XL encoding failed");
+    const size_t used = static_cast<size_t>(next - output.data());
+    output.resize(output.size() * 2u); next = output.data() + used; available = output.size() - used;
+  }
+  output.resize(static_cast<size_t>(next - output.data()));
+  return output;
+}
+
+void append_be16(std::vector<uint8_t>& out, uint16_t value) {
+  out.push_back(static_cast<uint8_t>(value >> 8)); out.push_back(static_cast<uint8_t>(value));
+}
+void append_be32(std::vector<uint8_t>& out, uint32_t value) {
+  out.push_back(static_cast<uint8_t>(value >> 24)); out.push_back(static_cast<uint8_t>(value >> 16));
+  out.push_back(static_cast<uint8_t>(value >> 8)); out.push_back(static_cast<uint8_t>(value));
+}
+void append_signed_fraction(std::vector<uint8_t>& out, double value, uint32_t denominator) {
+  append_be32(out, static_cast<uint32_t>(static_cast<int32_t>(std::llround(value * denominator))));
+}
+void append_unsigned_fraction(std::vector<uint8_t>& out, double value, uint32_t denominator) {
+  append_be32(out, static_cast<uint32_t>(std::llround(std::max(0.0, value) * denominator)));
+}
+
+std::vector<uint8_t> encode_gainmap_jxl(const DecodedImage& decoded,
+                                        const ConversionOptions& options) {
+  std::vector<uint16_t> hdr = decoded.rgb;
+  if (options.output_gamut == "p3") hdr = convert_rec2020_pq_to_p3_pq(decoded);
+  else if (options.output_gamut == "rec709") hdr = convert_rec2020_pq_to_rec709_pq(decoded);
+  const size_t pixel_count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
+  std::vector<uint16_t> base(pixel_count * 3u);
+  std::vector<double> channel_gain(pixel_count * 3u);
+  double maximum_gain = 1.0;
+  for (size_t i = 0; i < hdr.size(); ++i) {
+    const double linear = std::max(0.0, transfer::pq_to_nits(hdr[i] / 65535.0) / 203.0);
+    const double base_linear = std::min(linear, 1.0);
+    const double srgb = base_linear <= 0.0031308 ? 12.92 * base_linear
+        : 1.055 * std::pow(base_linear, 1.0 / 2.4) - 0.055;
+    base[i] = static_cast<uint16_t>(std::lround(std::clamp(srgb, 0.0, 1.0) * 65535.0));
+    channel_gain[i] = std::log2(std::max(linear, 1e-8) / std::max(base_linear, 1e-8));
+    maximum_gain = std::max(maximum_gain, channel_gain[i]);
+  }
+  const uint32_t scale = static_cast<uint32_t>(std::clamp(options.gainmap_scale, 1, 4));
+  const uint32_t map_width = std::max(1u, (decoded.info.width + scale - 1u) / scale);
+  const uint32_t map_height = std::max(1u, (decoded.info.height + scale - 1u) / scale);
+  const uint32_t channels = options.multi_channel_gainmap ? 3u : 1u;
+  std::vector<uint16_t> map(static_cast<size_t>(map_width) * map_height * channels);
+  for (uint32_t y = 0; y < map_height; ++y) for (uint32_t x = 0; x < map_width; ++x) {
+    const uint32_t sx = std::min(decoded.info.width - 1u, x * scale + scale / 2u);
+    const uint32_t sy = std::min(decoded.info.height - 1u, y * scale + scale / 2u);
+    const size_t source = (static_cast<size_t>(sy) * decoded.info.width + sx) * 3u;
+    if (channels == 1) {
+      const double gain = std::max({channel_gain[source], channel_gain[source + 1u], channel_gain[source + 2u]});
+      map[static_cast<size_t>(y) * map_width + x] = static_cast<uint16_t>(
+          std::lround(std::clamp(gain / maximum_gain, 0.0, 1.0) * 65535.0));
+    } else {
+      for (size_t c = 0; c < 3; ++c) map[(static_cast<size_t>(y) * map_width + x) * 3u + c] =
+          static_cast<uint16_t>(std::lround(std::clamp(channel_gain[source + c] / maximum_gain, 0.0, 1.0) * 65535.0));
+    }
+  }
+  JxlColorEncoding base_color{}; base_color.color_space = JXL_COLOR_SPACE_RGB;
+  base_color.white_point = JXL_WHITE_POINT_D65;
+  base_color.primaries = options.output_gamut == "rec709" ? JXL_PRIMARIES_SRGB :
+                         options.output_gamut == "p3" ? JXL_PRIMARIES_P3 : JXL_PRIMARIES_2100;
+  base_color.transfer_function = JXL_TRANSFER_FUNCTION_SRGB;
+  base_color.rendering_intent = JXL_RENDERING_INTENT_RELATIVE;
+  JxlColorEncoding map_color{}; map_color.color_space = channels == 1 ? JXL_COLOR_SPACE_GRAY : JXL_COLOR_SPACE_RGB;
+  map_color.white_point = JXL_WHITE_POINT_D65; map_color.primaries = JXL_PRIMARIES_SRGB;
+  map_color.transfer_function = JXL_TRANSFER_FUNCTION_LINEAR;
+  map_color.rendering_intent = JXL_RENDERING_INTENT_RELATIVE;
+  auto base_bytes = encode_jxl_gainmap_raster(decoded.info.width, decoded.info.height, base, 3,
+                                               base_color, true, options.lossless, options.image_quality);
+  auto map_bytes = encode_jxl_gainmap_raster(map_width, map_height, map, channels,
+                                              map_color, false, options.lossless,
+                                              options.gainmap_quality / 100.0f);
+  constexpr uint32_t denominator = 1000000u;
+  std::vector<uint8_t> metadata;
+  append_be16(metadata, 0); append_be16(metadata, 0);
+  metadata.push_back(static_cast<uint8_t>(0x40 | 0x08 | (channels == 3 ? 0x80 : 0)));
+  append_be32(metadata, denominator);
+  append_unsigned_fraction(metadata, 0.0, denominator);
+  append_unsigned_fraction(metadata, maximum_gain, denominator);
+  for (uint32_t c = 0; c < channels; ++c) {
+    append_signed_fraction(metadata, 0.0, denominator);
+    append_signed_fraction(metadata, maximum_gain, denominator);
+    append_unsigned_fraction(metadata, 1.0, denominator);
+    append_signed_fraction(metadata, 0.0, denominator);
+    append_signed_fraction(metadata, 0.0, denominator);
+  }
+  std::vector<uint8_t> payload;
+  payload.push_back(0); append_be16(payload, static_cast<uint16_t>(metadata.size()));
+  payload.insert(payload.end(), metadata.begin(), metadata.end());
+  payload.push_back(0); append_be32(payload, 0);
+  payload.insert(payload.end(), map_bytes.begin(), map_bytes.end());
+  append_be32(base_bytes, static_cast<uint32_t>(payload.size() + 8u));
+  base_bytes.insert(base_bytes.end(), {'j','h','g','m'});
+  base_bytes.insert(base_bytes.end(), payload.begin(), payload.end());
+  return base_bytes;
+}
+
 Verification decode_jxl(const std::vector<uint8_t>& data, const std::vector<uint16_t>* expected) {
   Verification verification;
   auto decoder = JxlDecoderMake(nullptr);
@@ -603,6 +750,8 @@ Verification decode_jxl(const std::vector<uint8_t>& data, const std::vector<uint
         verification.color_encoding =
             color.transfer_function == JXL_TRANSFER_FUNCTION_HLG &&
                     color.primaries == JXL_PRIMARIES_2100 ? "Rec.2020/HLG" :
+            color.transfer_function == JXL_TRANSFER_FUNCTION_HLG &&
+                    color.primaries == JXL_PRIMARIES_P3 ? "Display P3/HLG" :
             color.transfer_function == JXL_TRANSFER_FUNCTION_PQ &&
                     color.primaries == JXL_PRIMARIES_2100 ? "Rec.2020/PQ" :
             color.transfer_function == JXL_TRANSFER_FUNCTION_PQ &&
@@ -624,7 +773,8 @@ Verification decode_jxl(const std::vector<uint8_t>& data, const std::vector<uint
   verification.checks.push_back(verification.bit_depth == 16 ? "16-bit integer" : "unexpected bit depth");
   const bool pq_profile = verification.color_encoding == "Rec.2020/PQ" ||
                           verification.color_encoding == "Display P3/PQ";
-  const bool hlg_profile = verification.color_encoding == "Rec.2020/HLG";
+  const bool hlg_profile = verification.color_encoding == "Rec.2020/HLG" ||
+                           verification.color_encoding == "Display P3/HLG";
   verification.checks.push_back(pq_profile || hlg_profile
       ? verification.color_encoding + " profile" : "profile mismatch");
   if (expected) verification.checks.push_back(verification.exact_roundtrip ? "exact RGB16 encoder-buffer roundtrip" : "RGB16 roundtrip mismatch");
@@ -687,7 +837,8 @@ DecodedImage decode_jxl_input(const std::filesystem::path& path) {
                         (color.primaries == JXL_PRIMARIES_2100 ||
                          color.primaries == JXL_PRIMARIES_P3);
         const bool hlg = color.transfer_function == JXL_TRANSFER_FUNCTION_HLG &&
-                         color.primaries == JXL_PRIMARIES_2100;
+                         (color.primaries == JXL_PRIMARIES_2100 ||
+                          color.primaries == JXL_PRIMARIES_P3);
         color_ok = color.color_space == JXL_COLOR_SPACE_RGB && (pq || hlg);
       }
     } else if (status == JXL_DEC_BOX) {
@@ -991,15 +1142,47 @@ std::vector<uint16_t> convert_rec2020_pq_to_p3_pq(const DecodedImage& decoded) {
   return output;
 }
 
-std::vector<uint16_t> convert_rec2020_pq_to_hlg(const DecodedImage& decoded) {
+std::vector<uint16_t> convert_rec2020_pq_to_rec709_pq(const DecodedImage& decoded) {
   const auto& lut = pq_nits_lut();
   std::vector<uint16_t> output(decoded.rgb.size());
   const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
   for (size_t p = 0; p < count; ++p) {
-    const auto signal = transfer::linear_nits_to_hlg({
-        lut[decoded.rgb[p * 3u]],
-        lut[decoded.rgb[p * 3u + 1u]],
-        lut[decoded.rgb[p * 3u + 2u]]});
+    const double r = lut[decoded.rgb[p * 3u]];
+    const double g = lut[decoded.rgb[p * 3u + 1u]];
+    const double b = lut[decoded.rgb[p * 3u + 2u]];
+    const std::array<double, 3> rec709{
+        1.6604910 * r - 0.5876411 * g - 0.0728499 * b,
+       -0.1245505 * r + 1.1328999 * g - 0.0083494 * b,
+       -0.0181508 * r - 0.1005789 * g + 1.1187297 * b};
+    for (size_t c = 0; c < 3; ++c) {
+      output[p * 3u + c] = static_cast<uint16_t>(std::llround(
+          forward_pq(std::clamp(rec709[c], 0.0, 10000.0)) * 65535.0));
+    }
+  }
+  return output;
+}
+
+std::vector<uint16_t> convert_rec2020_pq_to_hlg(const DecodedImage& decoded,
+                                                 const std::string& gamut) {
+  const auto& lut = pq_nits_lut();
+  std::vector<uint16_t> output(decoded.rgb.size());
+  const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
+  for (size_t p = 0; p < count; ++p) {
+    const double r = lut[decoded.rgb[p * 3u]];
+    const double g = lut[decoded.rgb[p * 3u + 1u]];
+    const double b = lut[decoded.rgb[p * 3u + 2u]];
+    std::array<double, 3> linear{r, g, b};
+    if (gamut == "p3") {
+      linear = {1.3435783 * r - 0.2821797 * g - 0.0613986 * b,
+               -0.0652975 * r + 1.0757879 * g - 0.0104904 * b,
+                0.0028218 * r - 0.0195985 * g + 1.0167767 * b};
+    } else if (gamut == "rec709") {
+      linear = {1.6604910 * r - 0.5876411 * g - 0.0728499 * b,
+               -0.1245505 * r + 1.1328999 * g - 0.0083494 * b,
+               -0.0181508 * r - 0.1005789 * g + 1.1187297 * b};
+    }
+    for (double& value : linear) value = std::max(value, 0.0);
+    const auto signal = transfer::linear_nits_to_hlg(linear);
     for (size_t c = 0; c < 3; ++c) {
       output[p * 3u + c] = static_cast<uint16_t>(std::llround(signal[c] * 65535.0));
     }
@@ -1105,7 +1288,8 @@ std::vector<uint8_t> encode_png(const DecodedImage& decoded, const ConversionOpt
   png_set_compression_level(png, std::clamp(options.png_compression_level, 1, 9));
   const bool p3 = options.output_gamut == "p3";
   const bool hlg = options.output_transfer == "hlg";
-  std::array<png_byte, 4> cicp{static_cast<png_byte>(p3 ? 12 : 9),
+  const bool rec709 = options.output_gamut == "rec709";
+  std::array<png_byte, 4> cicp{static_cast<png_byte>(rec709 ? 1 : p3 ? 12 : 9),
                                static_cast<png_byte>(hlg ? 18 : 16), 0, 1};
   png_unknown_chunk chunk{};
   std::memcpy(chunk.name, "cICP", 4);
@@ -1220,10 +1404,12 @@ Verification decode_png(const std::vector<uint8_t>& bytes,
   const bool has_cicp = find_png_cicp(bytes, cicp);
   const bool rec2020 = has_cicp && cicp == std::array<uint8_t, 4>{9, 16, 0, 1};
   const bool p3 = has_cicp && cicp == std::array<uint8_t, 4>{12, 16, 0, 1};
-  const bool hlg = has_cicp && cicp == std::array<uint8_t, 4>{9, 18, 0, 1};
+  const bool hlg = has_cicp && (cicp == std::array<uint8_t, 4>{9, 18, 0, 1} ||
+                                cicp == std::array<uint8_t, 4>{12, 18, 0, 1});
   v.color_encoding = rec2020 ? "Rec.2020/PQ full-range cICP 9/16/0/1" :
                      p3 ? "Display P3/PQ full-range cICP 12/16/0/1" :
-                     hlg ? "Rec.2020/HLG full-range cICP 9/18/0/1" :
+                     hlg ? (cicp[0] == 12 ? "Display P3/HLG full-range cICP 12/18/0/1" :
+                                             "Rec.2020/HLG full-range cICP 9/18/0/1") :
                      "unexpected/missing PNG cICP";
   v.exact_roundtrip = expected && expected->size() == pixels.size() &&
                       std::memcmp(expected->data(), pixels.data(), pixels.size() * sizeof(uint16_t)) == 0;
@@ -1586,7 +1772,8 @@ void encode_avif(const std::filesystem::path& path, const DecodedImage& decoded,
   heif_color_profile_nclx* raw_profile = heif_nclx_color_profile_alloc();
   if (!raw_profile) throw std::bad_alloc();
   NclxPtr profile(raw_profile);
-  profile->color_primaries = static_cast<heif_color_primaries>(options.output_gamut == "p3" ? 12 : 9);
+  profile->color_primaries = static_cast<heif_color_primaries>(
+      options.output_gamut == "rec709" ? 1 : options.output_gamut == "p3" ? 12 : 9);
   profile->transfer_characteristics = static_cast<heif_transfer_characteristics>(
       options.output_transfer == "hlg" ? 18 : 16);
   profile->matrix_coefficients = static_cast<heif_matrix_coefficients>(9);
@@ -1640,6 +1827,120 @@ void encode_avif(const std::filesystem::path& path, const DecodedImage& decoded,
   require_heif(heif_context_write_to_file(context.get(), path.string().c_str()), "write direct PQ AVIF");
 }
 
+void require_avif_result(avifResult result, const avifDiagnostics& diagnostics,
+                         const char* operation) {
+  if (result == AVIF_RESULT_OK) return;
+  std::string message = std::string(operation) + ": " + avifResultToString(result);
+  if (diagnostics.error[0]) message += " (" + std::string(diagnostics.error) + ")";
+  throw std::runtime_error(message);
+}
+
+void assign_rgb16(avifRGBImage& rgb, const std::vector<uint16_t>& pixels,
+                  uint32_t width, uint32_t height) {
+  rgb.width = width;
+  rgb.height = height;
+  rgb.depth = 16;
+  rgb.format = AVIF_RGB_FORMAT_RGB;
+  rgb.pixels = reinterpret_cast<uint8_t*>(const_cast<uint16_t*>(pixels.data()));
+  rgb.rowBytes = width * 3u * sizeof(uint16_t);
+  rgb.avoidLibYUV = AVIF_TRUE;
+  rgb.chromaDownsampling = AVIF_CHROMA_DOWNSAMPLING_BEST_QUALITY;
+}
+
+void encode_gainmap_avif(const std::filesystem::path& path,
+                         const DecodedImage& decoded,
+                         const ConversionOptions& options) {
+  const avifColorPrimaries primaries = options.output_gamut == "rec709"
+      ? AVIF_COLOR_PRIMARIES_BT709
+      : options.output_gamut == "p3" ? AVIF_COLOR_PRIMARIES_SMPTE432
+                                      : AVIF_COLOR_PRIMARIES_BT2020;
+  std::vector<uint16_t> alternate_pixels = decoded.rgb;
+  if (options.output_gamut == "p3") {
+    alternate_pixels = convert_rec2020_pq_to_p3_pq(decoded);
+  } else if (options.output_gamut == "rec709") {
+    alternate_pixels = convert_rec2020_pq_to_rec709_pq(decoded);
+  }
+
+  // The base is an SDR rendition in the selected gamut. Its simple 203-nit
+  // reference mapping is only the backward-compatible presentation; the ISO
+  // gain map reconstructs the original high-precision PQ alternate rendition.
+  std::vector<uint16_t> base_pixels(alternate_pixels.size());
+  for (size_t i = 0; i < alternate_pixels.size(); ++i) {
+    const double linear = std::clamp(transfer::pq_to_nits(
+        static_cast<double>(alternate_pixels[i]) / 65535.0) / 203.0,
+        0.0, 1.0);
+    const double srgb = linear <= 0.0031308 ? 12.92 * linear
+        : 1.055 * std::pow(linear, 1.0 / 2.4) - 0.055;
+    base_pixels[i] = static_cast<uint16_t>(std::lround(std::clamp(srgb, 0.0, 1.0) * 65535.0));
+  }
+
+  AvifImagePtr base(avifImageCreate(decoded.info.width, decoded.info.height, 12,
+                                    AVIF_PIXEL_FORMAT_YUV444));
+  if (!base) throw std::bad_alloc();
+  base->colorPrimaries = primaries;
+  base->transferCharacteristics = AVIF_TRANSFER_CHARACTERISTICS_SRGB;
+  base->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT601;
+  base->yuvRange = AVIF_RANGE_FULL;
+  avifRGBImage base_rgb{};
+  avifRGBImageSetDefaults(&base_rgb, base.get());
+  assign_rgb16(base_rgb, base_pixels, decoded.info.width, decoded.info.height);
+  require_avif_result(avifImageRGBToYUV(base.get(), &base_rgb), {},
+                      "convert gain-map AVIF SDR base to YUV");
+
+  AvifImagePtr alternate(avifImageCreate(decoded.info.width, decoded.info.height, 12,
+                                         AVIF_PIXEL_FORMAT_YUV444));
+  if (!alternate) throw std::bad_alloc();
+  alternate->colorPrimaries = primaries;
+  alternate->transferCharacteristics = AVIF_TRANSFER_CHARACTERISTICS_SMPTE2084;
+  alternate->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT2020_NCL;
+  alternate->yuvRange = AVIF_RANGE_FULL;
+  avifRGBImage alternate_rgb{};
+  avifRGBImageSetDefaults(&alternate_rgb, alternate.get());
+  assign_rgb16(alternate_rgb, alternate_pixels, decoded.info.width, decoded.info.height);
+  require_avif_result(avifImageRGBToYUV(alternate.get(), &alternate_rgb), {},
+                      "convert gain-map AVIF HDR alternate to YUV");
+
+  AvifGainMapPtr gain(avifGainMapCreate());
+  if (!gain) throw std::bad_alloc();
+  const uint32_t scale = static_cast<uint32_t>(std::clamp(options.gainmap_scale, 1, 4));
+  const uint32_t map_width = std::max(1u, (decoded.info.width + scale - 1u) / scale);
+  const uint32_t map_height = std::max(1u, (decoded.info.height + scale - 1u) / scale);
+  gain->image = avifImageCreate(map_width, map_height, 10,
+      options.multi_channel_gainmap ? AVIF_PIXEL_FORMAT_YUV444 : AVIF_PIXEL_FORMAT_YUV400);
+  if (!gain->image) throw std::bad_alloc();
+  gain->image->matrixCoefficients = options.multi_channel_gainmap
+      ? AVIF_MATRIX_COEFFICIENTS_BT601 : AVIF_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL;
+  gain->image->yuvRange = AVIF_RANGE_FULL;
+  avifDiagnostics gain_diagnostics{};
+  require_avif_result(avifRGBImageComputeGainMap(&base_rgb, primaries,
+                                                AVIF_TRANSFER_CHARACTERISTICS_SRGB,
+                                                &alternate_rgb, primaries,
+                                                AVIF_TRANSFER_CHARACTERISTICS_SMPTE2084,
+                                                gain.get(), &gain_diagnostics), gain_diagnostics,
+                      "compute ISO gain map for AVIF");
+  base->gainMap = gain.release();
+
+  if (options.copy_exif && !decoded.exif.empty()) {
+    const auto exif = exif_tiff_payload(decoded.exif);
+    if (!exif.empty()) avifImageSetMetadataExif(base.get(), exif.data(), exif.size());
+  }
+  if (options.copy_xmp && !decoded.xmp.empty()) {
+    avifImageSetMetadataXMP(base.get(), decoded.xmp.data(), decoded.xmp.size());
+  }
+  AvifEncoderPtr encoder(avifEncoderCreate());
+  if (!encoder) throw std::bad_alloc();
+  encoder->maxThreads = static_cast<int>(std::clamp(std::thread::hardware_concurrency(), 1u, 32u));
+  encoder->quality = std::clamp(static_cast<int>(std::lround(options.image_quality * 100.0f)), 1, 100);
+  encoder->qualityGainMap = std::clamp(options.gainmap_quality, 1, 100);
+  encoder->autoTiling = AVIF_TRUE;
+  avifRWData encoded = AVIF_DATA_EMPTY;
+  require_avif_result(avifEncoderWrite(encoder.get(), base.get(), &encoded), encoder->diag,
+                      "encode ISO gain-map AVIF");
+  std::vector<uint8_t> bytes(encoded.data, encoded.data + encoded.size);
+  avifRWDataFree(&encoded);
+  write_file(path, bytes);
+}
+
 Verification decode_avif(const std::filesystem::path& path,
                          const std::vector<uint16_t>* expected = nullptr) {
   auto opened = open_heif(path);
@@ -1649,11 +1950,13 @@ Verification decode_avif(const std::filesystem::path& path,
   v.pixel_format = info.chroma == "4:4:4" ? "AV1 10-bit 4:4:4" : "AV1 " + info.chroma;
   const bool rec2020 = info.primaries == 9 && info.transfer == 16 && info.matrix == 9 && info.full_range;
   const bool p3 = info.primaries == 12 && info.transfer == 16 && info.matrix == 9 && info.full_range;
-  const bool hlg = info.primaries == 9 && info.transfer == 18 && info.matrix == 9 && info.full_range;
+  const bool hlg = (info.primaries == 9 || info.primaries == 12) &&
+                   info.transfer == 18 && info.matrix == 9 && info.full_range;
   const bool color_ok = rec2020 || p3 || hlg;
   v.color_encoding = rec2020 ? "direct Rec.2020/PQ full-range CICP 9/16/9" :
                      p3 ? "direct Display P3/PQ full-range CICP 12/16/9" :
-                     hlg ? "direct Rec.2020/HLG full-range CICP 9/18/9" :
+                     hlg ? (info.primaries == 12 ? "direct Display P3/HLG full-range CICP 12/18/9" :
+                                                  "direct Rec.2020/HLG full-range CICP 9/18/9") :
                      "unexpected AVIF CICP";
   OptionsPtr options(heif_decoding_options_alloc());
   if (!options) throw std::bad_alloc();
@@ -2317,10 +2620,17 @@ std::vector<uint8_t> jpeg_exif_from_heif(const std::vector<uint8_t>& heif_exif) 
 
 std::vector<uint8_t> encode_ultrahdr(const DecodedImage& decoded, const ConversionOptions& options,
                                      const HdrStats& stats) {
-  auto packed = pq16_to_rgba1010102(decoded);
+  DecodedImage gamut_source = decoded;
+  if (options.output_gamut == "p3") {
+    gamut_source.rgb = convert_rec2020_pq_to_p3_pq(decoded);
+  } else if (options.output_gamut == "rec709") {
+    gamut_source.rgb = convert_rec2020_pq_to_rec709_pq(decoded);
+  }
+  auto packed = pq16_to_rgba1010102(gamut_source);
   uhdr_raw_image_t hdr{};
   hdr.fmt = UHDR_IMG_FMT_32bppRGBA1010102;
-  hdr.cg = UHDR_CG_BT_2100;
+  hdr.cg = options.output_gamut == "rec709" ? UHDR_CG_BT_709 :
+           options.output_gamut == "p3" ? UHDR_CG_DISPLAY_P3 : UHDR_CG_BT_2100;
   hdr.ct = UHDR_CT_PQ;
   hdr.range = UHDR_CR_FULL_RANGE;
   hdr.w = decoded.info.width;
@@ -2813,6 +3123,18 @@ DecodedImage decode_input_uncached(const std::filesystem::path& path,
   report(progress, 8, "Inspecting high-dynamic-range input");
   check_cancel(cancel);
   DecodedImage decoded;
+  if (extension == ".jxl" && gainmap::is_iso_gainmap_jxl(path)) {
+    report(progress, 6, "Parsing JPEG XL jhgm base, gain-map codestream, and ISO metadata");
+    auto reconstructed = gainmap::reconstruct_iso_gainmap_jxl(path, cancel);
+    decoded.info = std::move(reconstructed.info);
+    decoded.rgb = std::move(reconstructed.rec2020_pq_rgb);
+    decoded.exif = std::move(reconstructed.exif);
+    decoded.xmp = std::move(reconstructed.xmp);
+    decoded.timings.decode_ms = reconstructed.decode_ms;
+    decoded.timings.gain_map_ms = reconstructed.reconstruction_ms;
+    report(progress, 42, "JPEG XL jhgm reconstructed to canonical high-precision HDR master");
+    return decoded;
+  }
   if (extension == ".jxl") decoded = decode_jxl_input(path);
   else if (extension == ".jxr" || extension == ".wdp" || extension == ".hdp") decoded = decode_jxr_input(path);
   else if (extension == ".png") decoded = decode_png_input(path);
@@ -2917,6 +3239,9 @@ SourceInfo inspect_any(const std::filesystem::path& path) {
     if (info.gain_map_present) return gainmap::inspect_adobe_gainmap_tiff(path);
     if (info.original_orientation >= 5) std::swap(info.width, info.height);
     return info;
+  }
+  if (extension == ".jxl" && gainmap::is_iso_gainmap_jxl(path)) {
+    return gainmap::inspect_iso_gainmap_jxl(path);
   }
   if (extension == ".jxl") return decode_jxl_input(path).info;
   if (extension == ".jxr" || extension == ".wdp" || extension == ".hdp") return decode_jxr_input(path).info;
@@ -3088,14 +3413,26 @@ ConversionResult convert(const std::filesystem::path& input,
       options.gainmap_scale != 2 && options.gainmap_scale != 4) {
     throw std::runtime_error("Ultra HDR gain-map scale must be 1 (full), 2 (half), or 4 (quarter)");
   }
-  if (options.output_gamut != "rec2020" && options.output_gamut != "p3") {
-    throw std::runtime_error("output gamut must be rec2020 or p3");
+  if (options.output_gamut != "rec2020" && options.output_gamut != "p3" &&
+      options.output_gamut != "rec709") {
+    throw std::runtime_error("output gamut must be rec2020, p3, or rec709");
   }
   if (options.output_transfer != "pq" && options.output_transfer != "hlg") {
     throw std::runtime_error("output transfer must be pq or hlg");
   }
-  if (options.output_transfer == "hlg" && options.output_gamut != "rec2020") {
-    throw std::runtime_error("HLG output is defined only for BT.2100/Rec.2020");
+  if (options.output_representation != "direct" &&
+      options.output_representation != "gainmap") {
+    throw std::runtime_error("output representation must be direct or gainmap");
+  }
+  if (options.output_representation == "gainmap" &&
+      options.mode != "jxl-pq16" && options.mode != "avif-pq10" &&
+      options.mode != "ultrahdr") {
+    throw std::runtime_error("gain-map output is supported only for JPEG, JPEG XL, and AVIF");
+  }
+  if (options.output_representation == "gainmap" &&
+      (options.mode == "jxl-pq16" || options.mode == "avif-pq10") &&
+      !options.multi_channel_gainmap) {
+    throw std::runtime_error("JPEG XL and AVIF gain-map output requires an RGB gain map");
   }
   if (!output.parent_path().empty()) std::filesystem::create_directories(output.parent_path());
   const auto temp = output.parent_path() / (output.filename().wstring() + L".partial");
@@ -3108,13 +3445,40 @@ ConversionResult convert(const std::filesystem::path& input,
     std::vector<uint8_t> bytes;
     Verification verification;
     if (options.mode == "jxl-pq16") {
+      if (options.output_representation == "gainmap") {
+        report(progress, 48, "Encoding SDR base and ISO 21496-1 jhgm JPEG XL gain map");
+        const auto encode_start = Clock::now();
+        bytes = encode_gainmap_jxl(decoded, options);
+        timings.encode_ms = elapsed_ms(encode_start);
+        timings.gain_map_ms += timings.encode_ms;
+        write_file(temp, bytes);
+        check_cancel(cancel);
+        report(progress, 88, "Verifying JPEG XL jhgm metadata and HDR reconstruction");
+        const auto verification_start = Clock::now();
+        const auto reconstructed = gainmap::reconstruct_iso_gainmap_jxl(temp, cancel);
+        verification.width = reconstructed.info.width;
+        verification.height = reconstructed.info.height;
+        verification.bit_depth = 16;
+        verification.pixel_format = "JPEG XL SDR base + jhgm gain map";
+        verification.color_encoding = "ISO 21496-1 gain-map HDR";
+        verification.gain_map_width = reconstructed.info.gain_map_width;
+        verification.gain_map_height = reconstructed.info.gain_map_height;
+        verification.gain_map_channels = reconstructed.info.gain_map_channels;
+        verification.passed = verification.width == decoded.info.width &&
+                              verification.height == decoded.info.height &&
+                              verification.gain_map_width > 0;
+        verification.checks.push_back("JPEG XL jhgm bundle and ISO metadata parsed");
+        verification.checks.push_back("gain-map HDR reconstruction completed");
+        timings.verification_ms = elapsed_ms(verification_start);
+      } else {
       report(progress, 48, options.output_transfer == "hlg"
           ? "Encoding JPEG XL BT.2100 HLG master"
           : "Encoding JPEG XL lossless PQ master");
       const auto color_start = Clock::now();
       auto converted = options.output_transfer == "hlg"
-          ? convert_rec2020_pq_to_hlg(decoded)
+          ? convert_rec2020_pq_to_hlg(decoded, options.output_gamut)
           : options.output_gamut == "p3" ? convert_rec2020_pq_to_p3_pq(decoded)
+          : options.output_gamut == "rec709" ? convert_rec2020_pq_to_rec709_pq(decoded)
                                         : std::vector<uint16_t>{};
       timings.color_conversion_ms += elapsed_ms(color_start);
       const auto& pixels = converted.empty() ? decoded.rgb : converted;
@@ -3127,6 +3491,7 @@ ConversionResult convert(const std::filesystem::path& input,
       const auto verification_start = Clock::now();
       verification = decode_jxl(bytes, options.lossless ? &pixels : nullptr);
       timings.verification_ms = elapsed_ms(verification_start);
+      }
     } else if (options.mode == "jxr-scrgb-fp16") {
       const auto color_start = Clock::now();
       auto half = pq2020_to_scrgb_half(decoded, progress, cancel);
@@ -3200,8 +3565,9 @@ ConversionResult convert(const std::filesystem::path& input,
           : "Encoding PNG A/B variant B with standard PQ cICP only");
       const auto color_start = Clock::now();
       auto converted = options.output_transfer == "hlg"
-          ? convert_rec2020_pq_to_hlg(decoded)
+          ? convert_rec2020_pq_to_hlg(decoded, options.output_gamut)
           : options.output_gamut == "p3" ? convert_rec2020_pq_to_p3_pq(decoded)
+          : options.output_gamut == "rec709" ? convert_rec2020_pq_to_rec709_pq(decoded)
                                         : std::vector<uint16_t>{};
       timings.color_conversion_ms += elapsed_ms(color_start);
       const auto& pixels = converted.empty() ? decoded.rgb : converted;
@@ -3222,7 +3588,9 @@ ConversionResult convert(const std::filesystem::path& input,
       }
       report(progress, 52, "Encoding direct HDR TIFF RGB16 with lossless compression and PQ ICC");
       const auto color_start = Clock::now();
-      auto converted = options.output_gamut == "p3" ? convert_rec2020_pq_to_p3_pq(decoded) : std::vector<uint16_t>{};
+      auto converted = options.output_gamut == "p3" ? convert_rec2020_pq_to_p3_pq(decoded) :
+                       options.output_gamut == "rec709" ? convert_rec2020_pq_to_rec709_pq(decoded) :
+                       std::vector<uint16_t>{};
       timings.color_conversion_ms += elapsed_ms(color_start);
       const auto& pixels = converted.empty() ? decoded.rgb : converted;
       const auto encode_start = Clock::now();
@@ -3236,13 +3604,40 @@ ConversionResult convert(const std::filesystem::path& input,
       bytes = read_file(temp);
       attach_hdr_stats(verification, stats);
     } else if (options.mode == "avif-pq10") {
+      if (options.output_representation == "gainmap") {
+        report(progress, 52, "Encoding SDR base and ISO 21496-1 gain map AVIF");
+        const auto encode_start = Clock::now();
+        encode_gainmap_avif(temp, decoded, options);
+        timings.encode_ms = elapsed_ms(encode_start);
+        timings.gain_map_ms += timings.encode_ms;
+        check_cancel(cancel);
+        bytes = read_file(temp);
+        report(progress, 88, "Verifying AVIF gain-map item graph and HDR reconstruction");
+        const auto verification_start = Clock::now();
+        const auto reconstructed = gainmap::reconstruct_adobe_tmap_avif(temp, cancel);
+        verification.width = reconstructed.info.width;
+        verification.height = reconstructed.info.height;
+        verification.bit_depth = 10;
+        verification.pixel_format = "AV1 base + ISO gain map";
+        verification.color_encoding = "ISO 21496-1 gain-map HDR";
+        verification.gain_map_width = reconstructed.info.gain_map_width;
+        verification.gain_map_height = reconstructed.info.gain_map_height;
+        verification.gain_map_channels = reconstructed.info.gain_map_channels;
+        verification.passed = verification.width == decoded.info.width &&
+                              verification.height == decoded.info.height &&
+                              verification.gain_map_width > 0;
+        verification.checks.push_back("AVIF tmap relationship and gain-map metadata parsed");
+        verification.checks.push_back("gain-map HDR reconstruction completed");
+        timings.verification_ms = elapsed_ms(verification_start);
+      } else {
       report(progress, 52, options.output_transfer == "hlg"
           ? "Encoding direct 10-bit 4:4:4 BT.2100 HLG AVIF"
           : "Encoding direct 10-bit 4:4:4 PQ AVIF compatibility candidate");
       const auto color_start = Clock::now();
       auto converted = options.output_transfer == "hlg"
-          ? convert_rec2020_pq_to_hlg(decoded)
+          ? convert_rec2020_pq_to_hlg(decoded, options.output_gamut)
           : options.output_gamut == "p3" ? convert_rec2020_pq_to_p3_pq(decoded)
+          : options.output_gamut == "rec709" ? convert_rec2020_pq_to_rec709_pq(decoded)
                                         : std::vector<uint16_t>{};
       timings.color_conversion_ms += elapsed_ms(color_start);
       const auto& pixels = converted.empty() ? decoded.rgb : converted;
@@ -3256,6 +3651,7 @@ ConversionResult convert(const std::filesystem::path& input,
       timings.verification_ms = elapsed_ms(verification_start);
       bytes = read_file(temp);
       attach_hdr_stats(verification, stats);
+      }
     } else {
       throw std::runtime_error("mode not implemented yet: " + options.mode);
     }

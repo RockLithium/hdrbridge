@@ -99,7 +99,9 @@ struct ConversionOptions {
   float target_peak_nits = 0.0f;
   // Direct video/NLE outputs default to Rec.2020/PQ. "p3" is optional.
   std::string output_gamut = "rec2020";
-  // Direct HDR outputs default to PQ. HLG always uses BT.2100/Rec.2020.
+  // JPEG XL and AVIF can additionally carry an ISO gain-map representation.
+  std::string output_representation = "direct";
+  // Direct HDR outputs default to PQ.
   std::string output_transfer = "pq";
   // PNG A/B validation keeps this true for preset A and disables it only for
   // the explicit cICP-only B artifact.

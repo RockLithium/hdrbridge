@@ -25,9 +25,10 @@ not treated as application compatibility. Untested combinations remain `NT`.
 | Direct HDR TIFF RGB16 PQ | OPEN / WRONG HDR | REJECT | NT | NT | OPEN / WRONG HDR | REJECT | REJECT | MANUAL HDR | INPUT OK |
 | Direct PQ AVIF 10-bit 4:4:4 | AUTO HDR | AUTO HDR | NT | OPEN / WRONG HDR — SDR/overexposed in tested Apple route | REJECT | CONFIG HDR | REJECT | REJECT | INPUT OK |
 | JPEG XL RGB16 PQ | AUTO HDR | REJECT | NT | NT | REJECT | CONFIG HDR | REJECT | REJECT | INPUT OK |
-| JPEG XR FP16 linear scRGB | AUTO HDR | REJECT | NT | REJECT | REJECT | CONFIG HDR | REJECT | REJECT | INPUT OK |
+| JPEG XL ISO gain map (RGB) | OPEN / WRONG HDR — opens but visibly underexposed | REJECT | NT | NT | REJECT | CONFIG HDR | REJECT | REJECT | INPUT OK |
+| FP16 scRGB JPEG XR | AUTO HDR | REJECT | NT | REJECT | REJECT | CONFIG HDR | REJECT | REJECT | INPUT OK |
 | JPEG XR packed RGB10 — Experimental | OPEN / WRONG HDR — gray/flat | REJECT | NT | REJECT | NT | OPEN / WRONG HDR — gray/flat | REJECT | REJECT | INPUT OK |
-| Adobe gain-map AVIF / `tmap` AVIF | SDR | AUTO HDR | NT | SDR | REJECT | CONFIG HDR | REJECT | REJECT | INPUT OK |
+| Gain-map AVIF / `tmap` AVIF | SDR | AUTO HDR | NT | SDR | REJECT | CONFIG HDR | REJECT | REJECT | INPUT OK |
 | Adobe gain-map TIFF | SDR | REJECT | NT | NT | OPEN / WRONG HDR | CONFIG HDR | REJECT | SDR | INPUT OK |
 | iPhone Apple HDR gain-map HEIC | NT | NT | NT | NT | NT | NT | NT | NT | INPUT OK |
 | iPhone Apple HDR gain-map JPEG | NT | NT | NT | NT | NT | NT | NT | NT | INPUT OK |
@@ -61,18 +62,19 @@ The desktop output order remains purpose-based:
 1. Share — Ultra HDR JPEG
 2. Video — HDR PNG
 3. Edit / Master — JPEG XL
-4. Edit / Master — JPEG XR FP16
-5. Compact — Direct HDR AVIF
+4. Edit / Master — FP16 scRGB JPEG XR
+5. Compact — HDR AVIF
 6. Advanced — Direct HDR TIFF
 7. Experimental — JPEG XR RGB10
 
-Rec.2020/PQ is the Video/NLE default. Display P3/PQ remains a normal option
-where implemented. HLG output is Rec.2020/HLG only. FP16 JXR remains linear
+Rec.2020/PQ is the Video/NLE default. Display P3 is a normal option for PQ and
+HLG where implemented. The HLG table records only the specifically tested
+Rec.2020 assets and does not imply results for P3/HLG. FP16 scRGB JXR remains linear
 scRGB and Ultra HDR remains SDR base plus gain map; neither uses the PQ/HLG
 selector.
 
 No listed format is universal. Ultra HDR is the strongest tested share/web
-route; PQ PNG is the strongest tested NLE still route; JXL and FP16 JXR are
+route; PQ PNG is the strongest tested NLE still route; JXL and FP16 scRGB JXR are
 co-equal edit/master choices with different decoder availability; PQ AVIF is a
 compact Windows/Chrome/ACR route; TIFF is an advanced fallback; packed RGB10
 JXR remains experimental.

@@ -127,7 +127,8 @@ EMSCRIPTEN_KEEPALIVE int hb_inspect_asset(const uint8_t* bytes,
 
 EMSCRIPTEN_KEEPALIVE int hb_convert_asset(
     const uint8_t* bytes, size_t byte_count, const char* extension,
-    int format, int primaries, int transfer, int encoding_value,
+    int format, int primaries, int transfer, int output_representation,
+    int encoding_value,
     int lossless, int copy_exif, int copy_xmp, int gain_scale,
     int gain_channels, float target_peak_nits) {
   output_bytes.clear();
@@ -140,12 +141,13 @@ EMSCRIPTEN_KEEPALIVE int hb_convert_asset(
 
     hdrbridge::ConversionOptions options;
     options.mode = mode_for_format(format);
-    options.output_gamut = primaries == 12 ? "p3" : "rec2020";
+    options.output_gamut = primaries == 1 ? "rec709" : primaries == 12 ? "p3" : "rec2020";
     options.output_transfer = transfer == 18 ? "hlg" : "pq";
+    options.output_representation = output_representation ? "gainmap" : "direct";
     options.lossless = lossless != 0;
     options.image_quality = std::clamp(encoding_value / 100.0f, 0.01f, 1.0f);
     options.base_quality = std::clamp(encoding_value, 1, 100);
-    options.gainmap_quality = std::max(1, options.base_quality - 5);
+    options.gainmap_quality = options.base_quality;
     options.gainmap_scale = gain_scale;
     options.multi_channel_gainmap = gain_channels != 0;
     options.target_peak_nits = target_peak_nits;

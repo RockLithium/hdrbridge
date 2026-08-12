@@ -78,7 +78,9 @@ self.addEventListener("message", async ({ data }) => {
         withCString(core, extension, (extensionPointer) => {
           const status = core._hb_convert_asset(
             pointer, size, extensionPointer, formatIds[data.format],
-            data.primaries, data.transfer, data.encodingValue,
+            data.primaries, data.transfer,
+            data.outputRepresentation === "gainmap" ? 1 : 0,
+            data.encodingValue,
             data.lossless ? 1 : 0, data.copyExif ? 1 : 0,
             data.copyXmp ? 1 : 0, data.gainResolution,
             data.gainChannels === "rgb" ? 1 : 0, data.peak);

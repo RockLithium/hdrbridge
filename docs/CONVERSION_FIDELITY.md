@@ -18,7 +18,9 @@ transfer conversion and quantization may occur first.
 | FP16 scRGB JXR | linear scRGB at 80 nit reference white to the canonical gamut | Preserves extended and negative values to FP16 precision |
 | Ultra HDR JPEG | SDR base plus ISO mono/RGB gain map reconstruction | Preserves HDR intent within JPEG, map resolution and metadata precision; not lossless |
 | Apple HDR HEIC/JPEG | Apple auxiliary or MPF gain map and metadata reconstructed in the correct base gamut | High-precision reconstruction, not a bit-exact recovery of an unavailable original master |
-| Adobe gain-map AVIF/TIFF | `tmap` items or TIFF SubIFD plus ISO metadata | High-precision metadata-defined reconstruction; source encoding limits remain |
+| Gain-map AVIF | `tmap` item graph plus ISO metadata | High-precision metadata-defined reconstruction; source encoding limits remain |
+| Gain-map JPEG XL (`jhgm`) | SDR base plus `jhgm` gain-map codestream and ISO metadata; this is not the AVIF `tmap` item graph | Metadata-defined HDR reconstruction; base/map codec loss and resampling remain |
+| Adobe gain-map TIFF | TIFF SubIFD plus ISO metadata | High-precision metadata-defined reconstruction; source encoding limits remain |
 
 An ordinary SDR file without gain-map, PQ or HLG data is rejected as an HDR
 source rather than silently promoted.
@@ -30,8 +32,10 @@ source rather than silently promoted.
 | Ultra HDR JPEG | Display-adaptive HDR reconstruction; map scale, channel choice and JPEG compression are approximations | Not lossless |
 | RGB16 PQ/HLG PNG | High precision within the selected gamut and transfer | Deflate is exact for the target RGB16 buffer |
 | RGB16 PQ/HLG JPEG XL | High precision; optional lossy modes affect it | Lossless mode is exact for the target RGB16 buffer |
+| RGB ISO gain-map JPEG XL | Display-adaptive HDR with an SDR base and half-resolution RGB map by default | Not lossless; RGB is required because the mono path is not offered as a validated output |
 | FP16 scRGB JPEG XR | High-fidelity linear edit/master representation within FP16 range | Lossless mode is exact for the target FP16 representation |
 | 10-bit PQ/HLG AVIF | Compact HDR with 10-bit quantization and AV1 compression | Not lossless |
+| RGB ISO gain-map AVIF | Display-adaptive HDR with an SDR base and half-resolution RGB map by default | Not lossless; RGB is required because the mono path is not offered as a validated output |
 | RGB16 PQ TIFF | High precision; downstream interpretation varies by application | Deflate is exact for the target RGB16 buffer |
 | packed RGB10 JPEG XR | Quantized and experimentally interpreted by applications | May preserve the packed target buffer; the full conversion is not lossless |
 

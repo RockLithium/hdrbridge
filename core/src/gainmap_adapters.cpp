@@ -8,6 +8,10 @@
 #include <libheif/heif_items.h>
 #include <libheif/heif_properties.h>
 #include <lcms2.h>
+#include <jxl/decode.h>
+#include <jxl/decode_cxx.h>
+#include <jxl/resizable_parallel_runner.h>
+#include <jxl/resizable_parallel_runner_cxx.h>
 #include <tiffio.h>
 #include <ultrahdr_api.h>
 
@@ -790,6 +794,26 @@ double sample_map_bilinear(const std::vector<uint16_t>& map, uint32_t map_width,
   const double fy = std::clamp(my - std::floor(my), 0.0, 1.0);
   const auto at = [&](int px, int py) {
     return map[(static_cast<size_t>(py) * map_width + static_cast<size_t>(px)) * 3u + channel] / 65535.0;
+  };
+  return (at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx) * (1.0 - fy) +
+         (at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx) * fy;
+}
+
+double sample_jxl_map_bilinear(const std::vector<uint16_t>& map, uint32_t map_width,
+                               uint32_t map_height, uint32_t map_channels,
+                               uint32_t base_width, uint32_t base_height,
+                               uint32_t x, uint32_t y, size_t channel) {
+  const size_t actual_channel = map_channels == 1 ? 0 : channel;
+  const double mx = (static_cast<double>(x) + 0.5) * map_width / base_width - 0.5;
+  const double my = (static_cast<double>(y) + 0.5) * map_height / base_height - 0.5;
+  const int x0 = std::clamp(static_cast<int>(std::floor(mx)), 0, static_cast<int>(map_width) - 1);
+  const int y0 = std::clamp(static_cast<int>(std::floor(my)), 0, static_cast<int>(map_height) - 1);
+  const int x1 = std::min(x0 + 1, static_cast<int>(map_width) - 1);
+  const int y1 = std::min(y0 + 1, static_cast<int>(map_height) - 1);
+  const double fx = std::clamp(mx - std::floor(mx), 0.0, 1.0);
+  const double fy = std::clamp(my - std::floor(my), 0.0, 1.0);
+  const auto at = [&](int px, int py) {
+    return map[(static_cast<size_t>(py) * map_width + static_cast<size_t>(px)) * map_channels + actual_channel] / 65535.0;
   };
   return (at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx) * (1.0 - fy) +
          (at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx) * fy;
@@ -2017,6 +2041,250 @@ ReconstructedHdr reconstruct_apple_jpeg_gainmap(
   info.range_known = true;
   orientation::set_exif_orientation_to_one(output.exif);
   output.orientation_ms = elapsed_ms(orientation_start);
+  return output;
+}
+
+namespace {
+
+struct JhgmView {
+  const uint8_t* metadata = nullptr;
+  size_t metadata_size = 0;
+  const uint8_t* gain_map = nullptr;
+  size_t gain_map_size = 0;
+};
+
+uint32_t read_u32_at(const uint8_t* value) {
+  return (static_cast<uint32_t>(value[0]) << 24) |
+         (static_cast<uint32_t>(value[1]) << 16) |
+         (static_cast<uint32_t>(value[2]) << 8) | value[3];
+}
+
+JhgmView find_jhgm(const std::vector<uint8_t>& file) {
+  if (file.size() < 12 || std::memcmp(file.data() + 4, "JXL ", 4) != 0) return {};
+  size_t offset = 12;
+  while (offset + 8 <= file.size()) {
+    uint64_t box_size = read_u32_at(file.data() + offset);
+    const uint8_t* type = file.data() + offset + 4;
+    size_t header = 8;
+    if (box_size == 1) {
+      if (offset + 16 > file.size()) throw std::runtime_error("truncated JPEG XL extended box");
+      box_size = (static_cast<uint64_t>(read_u32_at(file.data() + offset + 8)) << 32) |
+                 read_u32_at(file.data() + offset + 12);
+      header = 16;
+    } else if (box_size == 0) {
+      box_size = file.size() - offset;
+    }
+    if (box_size < header || box_size > file.size() - offset) {
+      throw std::runtime_error("invalid JPEG XL box size");
+    }
+    if (std::memcmp(type, "jhgm", 4) == 0) {
+      const uint8_t* payload = file.data() + offset + header;
+      const size_t payload_size = static_cast<size_t>(box_size - header);
+      if (payload_size < 8 || payload[0] != 0) {
+        throw std::runtime_error("unsupported JPEG XL gain-map bundle version");
+      }
+      const size_t metadata_size = (static_cast<size_t>(payload[1]) << 8) | payload[2];
+      size_t cursor = 3;
+      if (metadata_size > payload_size - cursor) throw std::runtime_error("truncated jhgm metadata");
+      const uint8_t* metadata = payload + cursor;
+      cursor += metadata_size;
+      if (cursor >= payload_size) throw std::runtime_error("truncated jhgm color encoding");
+      const size_t color_size = payload[cursor++];
+      if (color_size > payload_size - cursor) throw std::runtime_error("truncated jhgm color encoding");
+      cursor += color_size;
+      if (payload_size - cursor < 4) throw std::runtime_error("truncated jhgm ICC size");
+      const size_t icc_size = read_u32_at(payload + cursor);
+      cursor += 4;
+      if (icc_size > payload_size - cursor) throw std::runtime_error("truncated jhgm alternate ICC");
+      cursor += icc_size;
+      if (cursor >= payload_size) throw std::runtime_error("jhgm gain-map codestream is empty");
+      return {metadata, metadata_size, payload + cursor, payload_size - cursor};
+    }
+    offset += static_cast<size_t>(box_size);
+  }
+  return {};
+}
+
+struct JxlRaster {
+  uint32_t width = 0, height = 0, bits = 0, channels = 0;
+  uint8_t orientation = 1;
+  JxlColorEncoding color{};
+  bool color_valid = false;
+  std::vector<uint16_t> pixels;
+};
+
+JxlRaster decode_jxl_raster(const uint8_t* bytes, size_t size) {
+  auto decoder = JxlDecoderMake(nullptr);
+  auto runner = JxlResizableParallelRunnerMake(nullptr);
+  if (!decoder || !runner ||
+      JxlDecoderSetParallelRunner(decoder.get(), JxlResizableParallelRunner, runner.get()) != JXL_DEC_SUCCESS) {
+    throw std::runtime_error("cannot initialize gain-map JPEG XL decoder");
+  }
+  JxlResizableParallelRunnerSetThreads(runner.get(), 0);
+  if (JxlDecoderSubscribeEvents(decoder.get(), JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING |
+                                               JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS ||
+      JxlDecoderSetInput(decoder.get(), bytes, size) != JXL_DEC_SUCCESS) {
+    throw std::runtime_error("cannot initialize embedded JPEG XL decode");
+  }
+  JxlDecoderCloseInput(decoder.get());
+  JxlRaster output;
+  JxlPixelFormat format{};
+  for (;;) {
+    const auto status = JxlDecoderProcessInput(decoder.get());
+    if (status == JXL_DEC_ERROR || status == JXL_DEC_NEED_MORE_INPUT) {
+      throw std::runtime_error("embedded JPEG XL decode failed");
+    }
+    if (status == JXL_DEC_BASIC_INFO) {
+      JxlBasicInfo info{};
+      if (JxlDecoderGetBasicInfo(decoder.get(), &info) != JXL_DEC_SUCCESS) {
+        throw std::runtime_error("cannot read embedded JPEG XL info");
+      }
+      output.width = info.xsize; output.height = info.ysize; output.bits = info.bits_per_sample;
+      output.channels = info.num_color_channels == 1 ? 1u : 3u;
+      output.orientation = static_cast<uint8_t>(info.orientation);
+      format = {output.channels, JXL_TYPE_UINT16, JXL_NATIVE_ENDIAN, 0};
+    } else if (status == JXL_DEC_COLOR_ENCODING) {
+      output.color_valid = JxlDecoderGetColorAsEncodedProfile(
+          decoder.get(), JXL_COLOR_PROFILE_TARGET_ORIGINAL, &output.color) == JXL_DEC_SUCCESS;
+    } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
+      size_t byte_count = 0;
+      if (JxlDecoderImageOutBufferSize(decoder.get(), &format, &byte_count) != JXL_DEC_SUCCESS) {
+        throw std::runtime_error("cannot size embedded JPEG XL raster");
+      }
+      output.pixels.resize((byte_count + 1u) / 2u);
+      if (JxlDecoderSetImageOutBuffer(decoder.get(), &format, output.pixels.data(), byte_count) != JXL_DEC_SUCCESS) {
+        throw std::runtime_error("cannot set embedded JPEG XL raster buffer");
+      }
+    } else if (status == JXL_DEC_SUCCESS) break;
+  }
+  return output;
+}
+
+double srgb_to_linear(double value) {
+  return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
+}
+
+}  // namespace
+
+bool is_iso_gainmap_jxl(const std::filesystem::path& path) {
+  try { return find_jhgm(read_file(path)).gain_map != nullptr; }
+  catch (...) { return false; }
+}
+
+SourceInfo inspect_iso_gainmap_jxl(const std::filesystem::path& path) {
+  const auto file = read_file(path);
+  const auto bundle = find_jhgm(file);
+  if (!bundle.gain_map) throw std::runtime_error("JPEG XL does not contain a jhgm gain map");
+  const auto metadata = parse_iso_gain_map_metadata(bundle.metadata, bundle.metadata_size);
+  const auto base = decode_jxl_raster(file.data(), file.size());
+  const auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size);
+  if (!base.color_valid || base.color.transfer_function != JXL_TRANSFER_FUNCTION_SRGB ||
+      (base.color.primaries != JXL_PRIMARIES_P3 &&
+       base.color.primaries != JXL_PRIMARIES_SRGB &&
+       base.color.primaries != JXL_PRIMARIES_2100)) {
+    throw std::runtime_error("jhgm SDR base is not validated Rec.709, Display P3, or Rec.2020/sRGB");
+  }
+  SourceInfo info;
+  info.path = path; info.format = "JPEG XL"; info.container_brand = "JXL / jhgm";
+  info.asset_kind = "gain-map-hdr"; info.gain_map_present = true;
+  info.gain_map_family = "iso-jxl-jhgm";
+  info.codec = "JPEG XL SDR base + JPEG XL gain map + jhgm";
+  info.profile = "ISO 21496-1 gain-map HDR reconstruction";
+  info.color_signal_kind = "JPEG XL structured base color + jhgm ISO metadata";
+  info.width = info.base_width = base.width; info.height = info.base_height = base.height;
+  info.bit_depth = 16; info.base_bit_depth = base.bits; info.base_channels = base.channels;
+  info.base_codec = "JPEG XL";
+  info.base_color_space = base.color.primaries == JXL_PRIMARIES_SRGB ? "Rec.709" :
+                          base.color.primaries == JXL_PRIMARIES_2100 ? "Rec.2020" : "Display P3";
+  info.base_transfer = "sRGB";
+  info.gain_map_width = map.width; info.gain_map_height = map.height;
+  info.gain_map_channels = map.channels;
+  info.gain_map_scale_x = map.width ? base.width / static_cast<double>(map.width) : 0.0;
+  info.gain_map_scale_y = map.height ? base.height / static_cast<double>(map.height) : 0.0;
+  info.gain_map_uses_base_color_space = metadata.use_base_color_space;
+  info.base_hdr_headroom = metadata.base_hdr_headroom;
+  info.alternate_hdr_headroom = metadata.alternate_hdr_headroom;
+  info.hdr_capacity_min = std::exp2(metadata.base_hdr_headroom);
+  info.hdr_capacity_max = std::exp2(metadata.alternate_hdr_headroom);
+  info.gain_map_min = metadata.minimum; info.gain_map_max = metadata.maximum;
+  info.gain_map_gamma = metadata.gamma; info.base_offset = metadata.base_offset;
+  info.alternate_offset = metadata.alternate_offset;
+  info.pixel_format = "RGB16 SDR base + " + std::to_string(map.channels) + "-channel gain map";
+  info.original_orientation = base.orientation; info.orientation_status = "present";
+  info.exif_status = "absent"; info.xmp_status = "present"; info.icc_status = "container color encoding";
+  return info;
+}
+
+ReconstructedHdr reconstruct_iso_gainmap_jxl(const std::filesystem::path& path,
+                                              std::atomic_bool* cancel) {
+  const auto begin = Clock::now();
+  const auto file = read_file(path);
+  const auto bundle = find_jhgm(file);
+  if (!bundle.gain_map) throw std::runtime_error("JPEG XL does not contain a jhgm gain map");
+  const auto metadata = parse_iso_gain_map_metadata(bundle.metadata, bundle.metadata_size);
+  auto base = decode_jxl_raster(file.data(), file.size());
+  auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size);
+  ReconstructedHdr output;
+  output.info = inspect_iso_gainmap_jxl(path);
+  output.decode_ms = elapsed_ms(begin);
+  if (!metadata.use_base_color_space || base.width == 0 || base.height == 0 ||
+      base.pixels.size() != static_cast<size_t>(base.width) * base.height * 3u) {
+    throw std::runtime_error("unsupported jhgm base/color relationship");
+  }
+  output.rec2020_pq_rgb.resize(base.pixels.size());
+  const double full_headroom = std::max(metadata.base_hdr_headroom, metadata.alternate_hdr_headroom);
+  double weight = metadata.alternate_hdr_headroom == metadata.base_hdr_headroom ? 0.0 :
+      std::clamp((full_headroom - metadata.base_hdr_headroom) /
+                 (metadata.alternate_hdr_headroom - metadata.base_hdr_headroom), 0.0, 1.0);
+  if (metadata.alternate_hdr_headroom < metadata.base_hdr_headroom) weight = -weight;
+  double max_nits = 0.0; long double sum_nits = 0.0;
+  const auto reconstruction = Clock::now();
+  for (uint32_t y = 0; y < base.height; ++y) {
+    if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
+    for (uint32_t x = 0; x < base.width; ++x) {
+      const size_t pixel = static_cast<size_t>(y) * base.width + x;
+      std::array<double, 3> base_linear_rgb{};
+      for (size_t channel = 0; channel < 3; ++channel) {
+        const double base_linear = srgb_to_linear(base.pixels[pixel * 3u + channel] / 65535.0);
+        const double encoded_map = sample_jxl_map_bilinear(
+            map.pixels, map.width, map.height, map.channels,
+            base.width, base.height, x, y, channel);
+        const double log_gain = metadata.minimum[channel] +
+            (metadata.maximum[channel] - metadata.minimum[channel]) *
+            std::pow(encoded_map, 1.0 / metadata.gamma[channel]);
+        base_linear_rgb[channel] = (base_linear + metadata.base_offset[channel]) *
+                          std::exp2(log_gain * weight) - metadata.alternate_offset[channel];
+      }
+      std::array<double, 3> rec2020 = base_linear_rgb;
+      if (base.color.primaries == JXL_PRIMARIES_P3) {
+        rec2020 = {
+            0.7538330 * base_linear_rgb[0] + 0.1985974 * base_linear_rgb[1] + 0.0475696 * base_linear_rgb[2],
+            0.0457438 * base_linear_rgb[0] + 0.9417772 * base_linear_rgb[1] + 0.0124789 * base_linear_rgb[2],
+           -0.0012103 * base_linear_rgb[0] + 0.0176017 * base_linear_rgb[1] + 0.9836086 * base_linear_rgb[2]};
+      } else if (base.color.primaries == JXL_PRIMARIES_SRGB) {
+        rec2020 = {
+            0.6274040 * base_linear_rgb[0] + 0.3292820 * base_linear_rgb[1] + 0.0433136 * base_linear_rgb[2],
+            0.0690970 * base_linear_rgb[0] + 0.9195400 * base_linear_rgb[1] + 0.0113612 * base_linear_rgb[2],
+            0.0163916 * base_linear_rgb[0] + 0.0880132 * base_linear_rgb[1] + 0.8955950 * base_linear_rgb[2]};
+      }
+      const double pixel_max = std::max({rec2020[0], rec2020[1], rec2020[2], 0.0}) * 203.0;
+      max_nits = std::max(max_nits, pixel_max); sum_nits += pixel_max;
+      for (size_t channel = 0; channel < 3; ++channel) {
+        output.rec2020_pq_rgb[pixel * 3u + channel] = static_cast<uint16_t>(std::llround(
+            forward_pq(std::max(rec2020[channel], 0.0) * 203.0) * 65535.0));
+      }
+    }
+  }
+  output.reconstruction_ms = elapsed_ms(reconstruction);
+  output.max_cll = static_cast<uint16_t>(std::clamp(std::llround(max_nits), 0ll, 65535ll));
+  output.max_pall = static_cast<uint16_t>(std::clamp(std::llround(
+      static_cast<double>(sum_nits / (static_cast<uint64_t>(base.width) * base.height))), 0ll, 65535ll));
+  const auto oriented = orientation::normalize_rgb16(
+      output.rec2020_pq_rgb, base.width, base.height, base.orientation);
+  output.info.width = oriented.width; output.info.height = oriented.height;
+  output.info.orientation_normalized = true; output.info.primaries = 9;
+  output.info.transfer = 16; output.info.matrix = 0; output.info.full_range = true;
+  output.info.range_known = true;
   return output;
 }
 

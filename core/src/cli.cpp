@@ -57,6 +57,7 @@ int main(int argc, char** argv) {
         else if (flag.rfind("--mode=", 0) == 0) options.mode = flag.substr(7);
         else if (flag.rfind("--gamut=", 0) == 0) options.output_gamut = flag.substr(8);
         else if (flag.rfind("--transfer=", 0) == 0) options.output_transfer = flag.substr(11);
+        else if (flag.rfind("--representation=", 0) == 0) options.output_representation = flag.substr(17);
         else if (flag.rfind("--target-peak=", 0) == 0) {
           const auto value = flag.substr(14);
           options.target_peak_nits = value == "auto" ? 0.0f : std::stof(value);

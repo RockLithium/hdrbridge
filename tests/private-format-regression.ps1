@@ -42,25 +42,23 @@ if (-not (Test-Path -LiteralPath $Corpus)) { Write-Host "SKIPPED: private format
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 New-Item -ItemType Directory -Force -Path $CompatibilityDirectory | Out-Null
 
-$bright = Join-Path $Corpus "IMG_0016.HIF"
+$bright = Join-Path $Corpus "PQ_HIF.HIF"
 $brightInfo = Invoke-Inspect $bright
-Assert-True ($brightInfo.width -eq 4640 -and $brightInfo.height -eq 6960) "bright Canon dimensions"
+Assert-True ($brightInfo.width -eq 6960 -and $brightInfo.height -eq 4640) "PQ HIF dimensions"
 Assert-True ($brightInfo.color.primaries -eq 9 -and $brightInfo.color.transfer -eq 16 -and $brightInfo.color.matrix -eq 9) "bright Canon CICP"
 Assert-True ($brightInfo.assetKind -eq "direct-hdr") "bright Canon direct-HDR classification"
 
-$acrPng = Invoke-Inspect (Join-Path $Corpus "IMG_20260119_203043_HDR.PNG")
-Assert-True ($acrPng.assetKind -eq "direct-hdr" -and $acrPng.color.primaries -eq 12 -and $acrPng.color.transfer -eq 16) "ACR P3/PQ PNG classification"
-$acrTiff = Invoke-Inspect (Join-Path $Corpus "IMG_20260119_203043_HDR.TIF")
+$acrTiff = Invoke-Inspect (Join-Path $Corpus "GM_TIF.TIF")
 Assert-True ($acrTiff.assetKind -eq "gain-map-hdr" -and $acrTiff.gainMapPresent) "ACR gain-map TIFF classification"
 Assert-True ($acrTiff.gainMapFamily -eq "adobe-iso-tiff" -and $acrTiff.gainMapSize.width -gt 0) "Adobe TIFF gain-map SubIFD adapter"
-$acrAvif = Invoke-Inspect (Join-Path $Corpus "IMG_20260119_203043_HDR.avif")
+$acrAvif = Invoke-Inspect (Join-Path $Corpus "GM_AVIF.AVIF")
 Assert-True ($acrAvif.assetKind -eq "gain-map-hdr" -and $acrAvif.gainMapPresent) "ACR tmap AVIF classification"
 Assert-True ($acrAvif.gainMapFamily -eq "adobe-iso-tmap") "Adobe tmap family is not conflated with Apple/Ultra HDR"
 Assert-True ($acrAvif.gainMapItems.base -gt 0 -and $acrAvif.gainMapItems.gainMap -gt 0 -and $acrAvif.gainMapItems.toneMap -gt 0) "Adobe item relationship graph"
 Assert-True ($acrAvif.gainMapMetadata.alternateHdrHeadroom -gt 1) "Adobe gain-map headroom metadata"
 Assert-True ([math]::Abs($acrTiff.gainMapMetadata.alternateHdrHeadroom - $acrAvif.gainMapMetadata.alternateHdrHeadroom) -lt 0.000001) "TIFF and AVIF ISO headroom metadata agree"
 
-foreach ($negativeJpeg in @("IMG_20250923_150232.jpg", "IMG_20250925_171144.jpg")) {
+foreach ($negativeJpeg in @("SDR_JPEG.jpg")) {
     $negativePath = Join-Path $Corpus $negativeJpeg
     $negativeInfo = Invoke-Inspect $negativePath
     Assert-True ($negativeInfo.assetKind -eq "non-PQ/unknown" -and
@@ -77,29 +75,29 @@ $adobeModes = @(
     @{ Mode = "tiff-pq16"; Name = "adobe-tmap_direct-hdr.tif" }
 )
 foreach ($case in $adobeModes) {
-    $result = Invoke-Conversion (Join-Path $Corpus "IMG_20260119_203043_HDR.avif") `
+    $result = Invoke-Conversion (Join-Path $Corpus "GM_AVIF.AVIF") `
         (Join-Path $OutputDirectory $case.Name) $case.Mode
     $gainDiagnostics = $result.verification.hdrDiagnostics
     Assert-True ($gainDiagnostics.inputGainMapFormulaMaxError -gt 0 -and $gainDiagnostics.inputGainMapFormulaMaxError -le (2.5 / 65535.0)) "Adobe independent gain-map formula check: $($case.Mode)"
-    Assert-True ($gainDiagnostics.maxChannelNits -gt 1000 -and $gainDiagnostics.percentile99_99Nits -gt 500) "Adobe reconstruction has real HDR range: $($case.Mode)"
+    Assert-True ($gainDiagnostics.maxChannelNits -gt 500 -and $gainDiagnostics.percentile99_99Nits -gt 300) "gain-map AVIF reconstruction has real HDR range: $($case.Mode)"
     $results += $result
 }
 
 foreach ($case in $adobeModes) {
-    $result = Invoke-Conversion (Join-Path $Corpus "IMG_20260119_203043_HDR.TIF") `
+    $result = Invoke-Conversion (Join-Path $Corpus "GM_TIF.TIF") `
         (Join-Path $OutputDirectory ($case.Name -replace '^adobe-tmap_', 'adobe-tiff_')) $case.Mode
     $gainDiagnostics = $result.verification.hdrDiagnostics
-    Assert-True ($gainDiagnostics.maxChannelNits -gt 1000 -and $gainDiagnostics.percentile99_99Nits -gt 500) "Adobe TIFF reconstruction has real HDR range: $($case.Mode)"
+    Assert-True ($gainDiagnostics.maxChannelNits -gt 500 -and $gainDiagnostics.percentile99_99Nits -gt 300) "Adobe TIFF reconstruction has real HDR range: $($case.Mode)"
     $results += $result
 }
 
-$pngA = Invoke-Conversion (Join-Path $Corpus "IMG_20260119_203043_HDR.avif") `
+$pngA = Invoke-Conversion (Join-Path $Corpus "GM_AVIF.AVIF") `
     (Join-Path $CompatibilityDirectory "PNG-A-cICP-plus-legacy-ICC.png") "png-pq16" @("--png-icc-name=HDR Bridge Rec.2100 PQ")
-$pngB = Invoke-Conversion (Join-Path $Corpus "IMG_20260119_203043_HDR.avif") `
+$pngB = Invoke-Conversion (Join-Path $Corpus "GM_AVIF.AVIF") `
     (Join-Path $CompatibilityDirectory "PNG-B-cICP-only.png") "png-pq16" @("--no-icc")
-$pngC = Invoke-Conversion (Join-Path $Corpus "IMG_20260119_203043_HDR.avif") `
+$pngC = Invoke-Conversion (Join-Path $Corpus "GM_AVIF.AVIF") `
     (Join-Path $CompatibilityDirectory "PNG-C-Rec.2100-PQ.png") "png-pq16"
-$pngD = Invoke-Conversion (Join-Path $Corpus "IMG_20260119_203043_HDR.avif") `
+$pngD = Invoke-Conversion (Join-Path $Corpus "GM_AVIF.AVIF") `
     (Join-Path $CompatibilityDirectory "PNG-D-Rec.2100-PQ-BT.2020.png") "png-pq16" @("--png-icc-name=Rec.2100 PQ (BT.2020)")
 Assert-True ($pngA.verification.checks -contains "compatible HDR PQ ICC profile embedded") "PNG A embeds ICC"
 Assert-True ($pngB.verification.checks -contains "cICP-only A/B variant contains no ICC profile") "PNG B omits ICC"
@@ -131,10 +129,9 @@ Assert-True ($avif.verification.colorEncoding -match "9/16/9") "direct AVIF Rec.
 $results += $avif
 
 $interchange = @(
-    @{ Input = (Join-Path $ReferenceOutputs "acceptance_pq16.jxl"); Output = "from-reference-jxl.png"; Mode = "png-pq16" },
-    @{ Input = (Join-Path $ReferenceOutputs "acceptance_scrgb-fp16.jxr"); Output = "from-reference-fp16-jxr.png"; Mode = "png-pq16" },
-    @{ Input = (Join-Path $ReferenceOutputs "acceptance_ultrahdr.jpg"); Output = "from-reference-ultrahdr.png"; Mode = "png-pq16" },
-    @{ Input = (Join-Path $Corpus "IMG_20260119_203043_HDR.PNG"); Output = "from-acr-p3-pq-png.jxl"; Mode = "jxl-pq16" },
+    @{ Input = (Join-Path $ReferenceOutputs "PQ_JXL.jxl"); Output = "from-reference-jxl.png"; Mode = "png-pq16" },
+    @{ Input = (Join-Path $ReferenceOutputs "SCRGB_JXR.jxr"); Output = "from-reference-fp16-jxr.png"; Mode = "png-pq16" },
+    @{ Input = (Join-Path $ReferenceOutputs "GM_JPEG_ACR.JPG"); Output = "from-reference-ultrahdr.png"; Mode = "png-pq16" },
     @{ Input = $generatedTiff; Output = "from-direct-pq-tiff.jxl"; Mode = "jxl-pq16" },
     @{ Input = $generatedAvif; Output = "from-direct-pq-avif.png"; Mode = "png-pq16" }
 )

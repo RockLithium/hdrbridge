@@ -71,8 +71,8 @@ if (-not (Test-Path -LiteralPath $Exe)) { throw "GUI not found: $Exe" }
 if (-not (Test-Path -LiteralPath $Camera)) { Write-Host "SKIPPED: private Camera corpus unavailable"; exit 0 }
 
 $paths = @(
-    (Join-Path $Camera "IMG_9506.HEIC"),
-    (Join-Path $Camera "IMG_20260811_190649.HEIC"),
+    (Join-Path $Camera "GM_HEIC_Apple.HEIC"),
+    (Join-Path $Camera "SDR_HEIC.HEIC"),
     (Join-Path $Camera "corrupt-sample.jpg")
 )
 foreach ($path in $paths) { Assert-True (Test-Path -LiteralPath $path) "mixed queue input exists: $path" }
@@ -88,11 +88,13 @@ try {
     $window = [IntPtr]$process.MainWindowHandle
     Send-FileDrop $window $paths
 
-    $queue = [HdrBridgeUiNative]::GetDlgItem($window, 129)
+    $queue = [HdrBridgeUiNative]::GetDlgItem($window, 130)
     $convert = [HdrBridgeUiNative]::GetDlgItem($window, 109)
+    $startAll = [HdrBridgeUiNative]::GetDlgItem($window, 110)
     $status = [HdrBridgeUiNative]::GetDlgItem($window, 114)
     $activity = [HdrBridgeUiNative]::GetDlgItem($window, 116)
-    Assert-True ($queue -ne [IntPtr]::Zero -and $convert -ne [IntPtr]::Zero) "queue and Convert controls found"
+    Assert-True ($queue -ne [IntPtr]::Zero -and $convert -ne [IntPtr]::Zero -and
+        $startAll -ne [IntPtr]::Zero) "queue and task controls found"
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
         Start-Sleep -Milliseconds 100
@@ -100,18 +102,20 @@ try {
     } until ($count -eq 3 -or [DateTime]::UtcNow -gt $deadline)
     Assert-True ($count -eq 3) "three mixed queue items imported"
 
+    [void][HdrBridgeUiNative]::SendMessage($queue, 0x0185, [IntPtr]1, [IntPtr](-1))
     [void][HdrBridgeUiNative]::SendMessage($convert, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+    [void][HdrBridgeUiNative]::SendMessage($startAll, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
     $deadline = [DateTime]::UtcNow.AddMinutes(3)
     do {
         Start-Sleep -Milliseconds 250
         $statusText = Get-ControlText $status
-    } until ($statusText -like "Complete*" -or $statusText -eq "Cancelled" -or
-             $statusText -eq "Conversion failed" -or [DateTime]::UtcNow -gt $deadline)
+        $activityText = Get-ControlText $activity
+    } until ($activityText -match "BATCH SUMMARY" -or [DateTime]::UtcNow -gt $deadline)
     $activityText = Get-ControlText $activity
     Write-Host "STATUS: $statusText"
     Write-Host "ACTIVITY TAIL: $($activityText.Substring([Math]::Max(0, $activityText.Length - 2000)))"
     Assert-True ($statusText -match "1 succeeded / 1 skipped / 1 failed") "mixed queue final counts"
-    Assert-True ($activityText -match "SKIPPED.*No HDR gain map or direct HDR signal") "SDR item skipped and logged"
+    Assert-True ($activityText -match "SKIPPED.*No HDR data") "SDR item skipped and logged"
     Assert-True ($activityText -match "FAILED.*JPEG") "corrupt item failed and logged"
     Assert-True ($activityText -match "BATCH SUMMARY\s+1 succeeded / 1 skipped / 1 failed") "batch summary logged"
     Write-Host "PASS: real desktop mixed queue continued after SDR and corrupt inputs"

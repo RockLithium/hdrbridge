@@ -43,6 +43,12 @@ std::filesystem::path resolve_output_path(const NamingRequest& request) {
   const std::wstring suffix = validate_component(request.suffix, "suffix", true);
   const std::wstring extension = extension_for_mode(request.mode);
   auto candidate = folder / (base + suffix + extension);
+  const auto normalized_source = std::filesystem::absolute(request.source).lexically_normal();
+  const auto normalized_candidate = std::filesystem::absolute(candidate).lexically_normal();
+  if (request.collision == CollisionPolicy::overwrite &&
+      _wcsicmp(normalized_source.c_str(), normalized_candidate.c_str()) == 0) {
+    throw std::runtime_error("output path must not overwrite the source file");
+  }
   if (request.collision == CollisionPolicy::overwrite) return candidate;
   for (unsigned number = 2; std::filesystem::exists(candidate); ++number) {
     candidate = folder / (base + suffix + L" (" + std::to_wstring(number) + L")" + extension);

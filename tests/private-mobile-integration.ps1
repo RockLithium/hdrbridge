@@ -55,15 +55,15 @@ function Invoke-Conversion([string]$source, [string]$output, [string]$mode) {
 if (-not (Test-Path -LiteralPath $Cli)) { throw "CLI not found: $Cli" }
 if (-not (Test-Path -LiteralPath $Camera)) { Write-Host "SKIPPED: private Camera corpus unavailable"; exit 0 }
 
-$iphoneHeic = Join-Path $Camera "IMG_9506.HEIC"
-$iphoneJpeg = Join-Path $Camera "IMG_9507 2.JPG"
-$xiaomiHdrJpeg = Join-Path $Camera "IMG_20260811_190633.jpg"
-$xiaomiSdrHeic = Join-Path $Camera "IMG_20260811_190649.HEIC"
+$iphoneHeic = Join-Path $Camera "GM_HEIC_Apple.HEIC"
+$iphoneJpeg = Join-Path $Camera "GM_JPEG_Apple.JPG"
+$xiaomiHdrJpeg = Join-Path $Camera "GM_JPEG_Android.jpg"
+$xiaomiSdrHeic = Join-Path $Camera "SDR_HEIC.HEIC"
 
 $expectedHashes = @{
     $iphoneHeic = "639ED94EA6DEFD5F6A708CB85436B9407C09CACC8B5F73B72D4E7035CBB10FB2"
     $iphoneJpeg = "89DF075A4F03907AF24F1FAEA00C59484F39D2994FC6CEEF70E587CBBFE9E39E"
-    $xiaomiHdrJpeg = "E6A400C265DABF2AD8F9F2A77985C96D85B68BCB9320C4C53C6D5A34D618954F"
+    $xiaomiHdrJpeg = "DAE7029A624E4B7C73BED469E100B9B524FA3EB20D901894D0888870DBE283E4"
     $xiaomiSdrHeic = "BC416D59D293B3AA09771D212606ECC505FFA6A083BC9A6A6710F21146E2B963"
 }
 foreach ($entry in $expectedHashes.GetEnumerator()) {

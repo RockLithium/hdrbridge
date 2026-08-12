@@ -14,6 +14,7 @@ const format = Number(process.argv[5] ?? 1);
 const primaries = Number(process.argv[6] ?? 9);
 const transfer = Number(process.argv[7] ?? 16);
 const encoding = Number(process.argv[8] ?? 4);
+const representation = Number(process.argv[9] ?? 0);
 const createCore = (await import(pathToFileURL(modulePath))).default;
 const core = await createCore({ locateFile: (name) => resolve(dirname(modulePath), name) });
 const input = new Uint8Array(await readFile(inputPath));
@@ -33,7 +34,7 @@ try {
   core.stringToUTF8(extension, extensionPointer, extensionSize);
   const status = core._hb_convert_asset(
     pointer, input.byteLength, extensionPointer, format, primaries, transfer,
-    encoding, 1, 1, 1, 2, 0, 0);
+    representation, encoding, 1, 1, 1, 2, 0, 0);
   if (status !== 0) throw new Error(readCString(core._hb_last_error()));
   const outputSize = core._hb_output_size();
   const outputPointer = core._hb_output_data();

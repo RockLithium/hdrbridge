@@ -40,6 +40,12 @@ ReconstructedHdr reconstruct_adobe_gainmap_tiff(
     const std::filesystem::path& path,
     std::atomic_bool* cancel = nullptr);
 
+bool is_iso_gainmap_jxl(const std::filesystem::path& path);
+SourceInfo inspect_iso_gainmap_jxl(const std::filesystem::path& path);
+ReconstructedHdr reconstruct_iso_gainmap_jxl(
+    const std::filesystem::path& path,
+    std::atomic_bool* cancel = nullptr);
+
 struct AppleAuxiliaryProbe {
   bool detected = false;
   std::string container;

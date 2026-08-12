@@ -1,6 +1,6 @@
 param(
     [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build-vs\bin\Release"),
-    [string]$Version = "1.0.0",
+    [string]$Version = "1.1.0",
     [string]$Destination = (Join-Path $PSScriptRoot "..\dist\HDRBridge-v$Version-Windows-x64")
 )
 
@@ -62,7 +62,8 @@ if ($uhdrRoot) {
 HDR Bridge v$Version - portable Windows x64
 
 Run hdrbridge.exe. Add or drop one or more supported HDR images, choose an
-output and select Convert. Processing is local and sequential. Output defaults
+output, add tasks to the queue, then select Start all. Processing is local and
+sequential. Output defaults
 to the source directory; a custom directory, base name, suffix, auto-numbering
 and explicit overwrite are available.
 
@@ -74,8 +75,10 @@ Primary outputs:
 - Ultra HDR JPEG (Faithful/Auto)
 - RGB16 PQ/HLG PNG
 - RGB16 PQ/HLG JPEG XL
+- RGB gain-map JPEG XL
 - FP16 linear scRGB JPEG XR
 - 10-bit 4:4:4 PQ/HLG AVIF
+- RGB gain-map AVIF
 - RGB16 PQ TIFF
 
 The application is unsigned. Windows may show a SmartScreen or unknown-

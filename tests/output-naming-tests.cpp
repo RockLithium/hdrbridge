@@ -1,5 +1,7 @@
 #include "output_naming.h"
 
+#include <chrono>
+#include <fstream>
 #include <iostream>
 
 int main() {
@@ -59,6 +61,43 @@ int main() {
     std::cerr << "custom folder was not retained across ON/OFF toggle\n";
     return 1;
   }
+
+  const auto unique = std::to_wstring(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  const auto temp_root = std::filesystem::temp_directory_path() /
+      (L"hdrbridge-naming-" + unique);
+  std::filesystem::create_directories(temp_root);
+  request.source = temp_root / L"same.png";
+  request.selected_folder = temp_root;
+  request.use_source_folder = false;
+  request.base_name = L"same";
+  request.suffix.clear();
+  request.mode = L"png-pq16";
+  request.collision = CollisionPolicy::auto_number;
+  { std::ofstream(request.source, std::ios::binary).put('s'); }
+  const auto numbered_two = hdrbridge::desktop::resolve_output_path(request);
+  if (numbered_two != temp_root / L"same (2).png") {
+    std::cerr << "auto-number did not avoid the existing source/output name\n";
+    std::filesystem::remove_all(temp_root);
+    return 1;
+  }
+  { std::ofstream(numbered_two, std::ios::binary).put('2'); }
+  if (hdrbridge::desktop::resolve_output_path(request) !=
+      temp_root / L"same (3).png") {
+    std::cerr << "auto-number did not account for a prior queue output\n";
+    std::filesystem::remove_all(temp_root);
+    return 1;
+  }
+  request.collision = CollisionPolicy::overwrite;
+  try {
+    (void)hdrbridge::desktop::resolve_output_path(request);
+    std::cerr << "source overwrite was accepted\n";
+    std::filesystem::remove_all(temp_root);
+    return 1;
+  } catch (const std::exception&) {
+  }
+  std::filesystem::remove_all(temp_root);
+
   try {
     request.base_name = L"invalid:name";
     (void)hdrbridge::desktop::resolve_output_path(request);

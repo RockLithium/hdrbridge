@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 set(VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_LIST_DIR}/ports-overlay" CACHE STRING "HDR Bridge vcpkg overlay ports")
-project(hdrbridge VERSION 1.0.0 LANGUAGES CXX)
+project(hdrbridge VERSION 1.1.0 LANGUAGES CXX)
 include(CTest)
 
 set(CMAKE_CXX_STANDARD 20)

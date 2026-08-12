@@ -1,6 +1,6 @@
 param(
     [string]$Cli = (Join-Path $PSScriptRoot "..\build-vs\bin\Release\hdrbridge-cli.exe"),
-    [string]$Fixture = (Join-Path $PSScriptRoot "..\..\private-fixtures\golden-inputs\FGD_9511.HIF"),
+    [string]$Fixture = (Join-Path $PSScriptRoot "..\..\private-fixtures\golden-inputs\HLG_HIF.HIF"),
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "..\..\private-fixtures\test-output\nikon-hlg-current")
 )
 

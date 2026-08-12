@@ -11,11 +11,6 @@ HLG OETF and BT.2100 OOTF in Rec.2020 linear light. When a source does not carry
 a more specific display model, HLG uses the BT.2100 1000-nit reference display
 and system gamma 1.2.
 
-Gain-map inputs reconstruct HDR from an SDR base, gain map, item relationship
-and family-specific metadata. ISO Ultra HDR, Apple auxiliary/MPF and Adobe
-`tmap`/SubIFD metadata remain separate adapters. Mono and RGB gain maps are
-handled according to their actual channel layout.
-
 Color-gamut conversion is performed in linear light. The canonical raster is
 oriented once; base and gain map receive the same transform, and output
 Orientation is 1. Working precision is at least RGB16 or floating point. No
@@ -27,12 +22,27 @@ temporary file.
 PQ output encodes absolute luminance with ST 2084. HLG output applies the
 inverse BT.2100 OOTF and HLG OETF; it is not a metadata-only transfer change.
 Rec.2020 is the default video gamut. Display P3 is available for supported PQ
-outputs, while HLG is Rec.2020 only.
+and HLG outputs. HLG remains a BT.2100 transfer but may be encoded with either
+Rec.2020 or Display P3 primaries where the selected output exposes that option.
+
+## Ultra HDR and gain maps
+
+Gain-map inputs reconstruct HDR from an SDR base, gain map, item relationship
+and family-specific metadata. ISO Ultra HDR JPEG, Apple auxiliary/MPF,
+gain-map AVIF `tmap`, Adobe TIFF SubIFD and gain-map JPEG XL (`jhgm`) remain
+separate adapters. Mono and RGB input maps are decoded according to their
+actual channel layout; the SDR base is linearized in its own signaled gamut
+before gain application and conversion to the canonical master.
 
 Ultra HDR derives an SDR base and ISO gain map from the linear HDR master. Its
 Faithful/Auto mode uses the measured content peak instead of the 10000-nit PQ
-code-space ceiling. FP16 JPEG XR converts the master to linear scRGB using
-1.0 = 80 nits.
+code-space ceiling. It supports mono or true per-channel RGB maps and defaults
+to a half-resolution mono map. Gain-map JPEG XL and AVIF instead use a true
+per-channel RGB map only and default to half resolution; Rec.709, Display P3
+and Rec.2020 SDR base gamuts are available, with Display P3 as the default.
+These are reconstructed HDR representations, not PQ/HLG metadata aliases.
+
+FP16 JPEG XR converts the master to linear scRGB using 1.0 = 80 nits.
 
 ## Presentation
 

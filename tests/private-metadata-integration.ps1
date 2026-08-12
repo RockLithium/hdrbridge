@@ -35,19 +35,20 @@ function Convert-Pair([string]$source, [string]$firstName, [string]$firstMode,
 if (-not (Test-Path -LiteralPath $Cli)) { throw "CLI not found: $Cli" }
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
-$canon = Inspect (Join-Path $Corpus "0U2A0009.HIF")
-$nikon = Inspect (Join-Path $Corpus "FGD_9511.HIF")
-$p3png = Inspect (Join-Path $Corpus "IMG_20260119_203043_HDR.PNG")
-$jxl = Inspect (Join-Path $Corpus "acceptance_pq16.jxl")
-$jxr = Inspect (Join-Path $Corpus "acceptance_scrgb-fp16.jxr")
-$vivo = Inspect (Join-Path $Corpus "IMG_20260418_170733.jpg")
-$xiaomi = Inspect (Join-Path $Corpus "IMG_20260811_190633.jpg")
-$appleHeic = Inspect (Join-Path $Corpus "IMG_9506.HEIC")
-$appleJpeg = Inspect (Join-Path $Corpus "IMG_9507 2.JPG")
-$adobeTiff = Inspect (Join-Path $Corpus "IMG_20260119_203043_HDR.TIF")
+$canon = Inspect (Join-Path $Corpus "PQ_HIF.HIF")
+$nikon = Inspect (Join-Path $Corpus "HLG_HIF.HIF")
+$p3png = Inspect (Join-Path $Corpus "PQ_PNG.png")
+$jxl = Inspect (Join-Path $Corpus "PQ_JXL.jxl")
+$jxr = Inspect (Join-Path $Corpus "SCRGB_JXR.jxr")
+$vivo = Inspect (Join-Path $Corpus "GM_JPEG_Android (2).jpg")
+$xiaomi = Inspect (Join-Path $Corpus "GM_JPEG_Android.jpg")
+$appleHeic = Inspect (Join-Path $Corpus "GM_HEIC_Apple.HEIC")
+$appleJpeg = Inspect (Join-Path $Corpus "GM_JPEG_Apple.JPG")
+$adobeTiff = Inspect (Join-Path $Corpus "GM_TIF.TIF")
 Assert-True ($canon.color.transfer -eq 16 -and $canon.bitDepth -eq 10) "Canon source representation"
 Assert-True ($nikon.color.transfer -eq 18 -and $nikon.bitDepth -eq 10) "Nikon source representation"
-Assert-True ($p3png.color.primaries -eq 12 -and $p3png.metadata.icc -eq "present") "P3/PQ PNG metadata"
+Assert-True ($p3png.color.primaries -eq 9 -and $p3png.color.transfer -eq 16 -and
+             $p3png.metadata.icc -eq "present") "Rec.2020/PQ PNG metadata"
 Assert-True ($jxl.colorSignalKind -like "CICP equivalent*") "JXL equivalent signaling label"
 Assert-True ($jxl.metadata.exif -eq "present" -and $jxl.metadata.xmp -eq "present") "JXL metadata boxes"
 Assert-True ($jxr.pixelFormat -eq "GUID_WICPixelFormat64bppRGBAHalf" -and
@@ -62,7 +63,7 @@ Assert-True ($appleJpeg.gainMapFamily -eq "apple-mpf-iso" -and
 Assert-True ($adobeTiff.gainMapFamily -eq "adobe-iso-tiff" -and
              $adobeTiff.metadata.xmp -eq "present" -and $adobeTiff.metadata.icc -eq "present") "Adobe TIFF source metadata"
 
-$adobe = Join-Path $Corpus "IMG_20260119_203043_HDR.avif"
+$adobe = Join-Path $Corpus "GM_AVIF.AVIF"
 Convert-Pair $adobe "out-uhdr.jpg" "ultrahdr" "out-png.png" "png-pq16"
 Convert-Pair $adobe "out-jxl.jxl" "jxl-pq16" "out-avif.avif" "avif-pq10"
 Convert-Pair $adobe "out-tiff.tif" "tiff-pq16" "out-jxr.jxr" "jxr-scrgb-fp16"
