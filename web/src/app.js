@@ -82,11 +82,15 @@ function setStatus(text, kind = "") {
   elements.status.className = `status-text status ${kind}`.trim();
 }
 
+function refreshConvertAvailability() {
+  elements.convert.disabled = !state.busy &&
+    (!state.file || !state.sourceSupported || !availableFormats.has(state.format));
+}
+
 function setBusy(busy) {
   state.busy = busy;
   elements.progress.hidden = !busy;
-  elements.convert.disabled = !busy &&
-    (!state.file || !state.sourceSupported || !availableFormats.has(state.format));
+  refreshConvertAvailability();
   elements.convert.textContent = busy ? "STOP PROCESSING" : "CONVERT";
   elements.convert.className = busy
     ? "main-btn process-button is-processing"
@@ -101,6 +105,7 @@ function clearOutput() {
   if (!state.busy) {
     elements.convert.className = "main-btn process-button";
     elements.convert.textContent = "CONVERT";
+    refreshConvertAvailability();
   }
 }
 
@@ -224,7 +229,7 @@ function handleWorkerMessage({ data }) {
     setStatus(state.sourceSupported
       ? "HDR source detected. Ready to convert locally."
       : "No supported HDR data was found.", state.sourceSupported ? "" : "error");
-    elements.convert.disabled = !state.sourceSupported || !availableFormats.has(state.format);
+    refreshConvertAvailability();
     return;
   }
   if (data.type === "converted") {
@@ -246,7 +251,7 @@ function handleWorkerMessage({ data }) {
     setStatus(`Converted ${data.info.verification?.pixelFormat || state.format.toUpperCase()} · ${humanBytes(blob.size)}${Number.isFinite(peak) ? ` · peak ${peak.toFixed(1)} nit` : ""}`, "success");
     elements.convert.textContent = "PROCESSING COMPLETE";
     elements.convert.className = "main-btn process-button is-complete";
-    elements.convert.disabled = true;
+    refreshConvertAvailability();
   }
 }
 
