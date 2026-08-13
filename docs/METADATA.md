@@ -6,16 +6,18 @@ Inspector data is read from the source container. The canonical HDR working rast
 
 | Input | Representation and metadata read |
 |---|---|
-| HEIF/HIF direct HDR | HEVC bit depth/chroma, NCLX CICP/range, Exif/XMP items, ICC presence, `irot`/`imir` and Exif Orientation |
+| HEIF/HIF direct HDR | HEVC bit depth/chroma, native NCLX CICP/range and embedded ICC as separate signals, resolved color, Exif/XMP items, `irot`/`imir` and Exif Orientation |
 | HEIC/AVIF gain map | SDR base and auxiliary/base-map-tmap graph, Exif/XMP/ICC/CICP, auxiliary type and ISO gain-map metadata |
 | JPEG / Ultra HDR / Apple JPEG | base SOF and MPF/gain-map JPEG independently; APP1 Exif/XMP, APP2 ICC, Orientation and ISO gain-map metadata |
-| JPEG XL | integer representation, native structured color, Exif and `xml ` boxes, codestream Orientation; color is labeled `CICP equivalent` |
-| PNG | RGB16, literal cICP, eXIf, XMP iTXt and iCCP |
+| JPEG XL | integer representation, native structured color or actual embedded ICC, Exif and `xml ` boxes, codestream Orientation; native color is labeled `CICP equivalent` |
+| PNG | RGB16, literal cICP and iCCP as separate signals, resolved color, eXIf and XMP iTXt |
 | TIFF | sample format/bit depth, ICC interpretation, Orientation, XMP and Exif/main camera tags |
-| Direct HDR AVIF | AV1 bit depth/chroma, NCLX CICP/range, Exif/XMP items and ICC presence |
+| Direct HDR AVIF | AV1 bit depth/chroma, native NCLX CICP/range and embedded ICC as separate signals, resolved color and Exif/XMP items |
 | JPEG XR | exact WIC pixel-format GUID, color-context and metadata-query status |
 
 Exif, XMP, ICC and Orientation report `Present`, `Absent`, `Unsupported` or `Read error`. JPEG range is `Unknown` when there is no authoritative signal.
+
+Direct HDR classification does not require native CICP/NCLX. The resolver may obtain PQ or HLG primaries and transfer from a valid embedded ICC, including its `cicp` tag. Inspector preserves `Native`, `ICC`, `Native + ICC`, `Conflict` or `Unknown` as the signaling source instead of replacing the source representation with the canonical master description.
 
 ## Output preservation
 

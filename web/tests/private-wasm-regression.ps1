@@ -12,7 +12,9 @@ $hasher = Join-Path $PSScriptRoot "png-pixel-hash.mjs"
 foreach ($required in @($Cli, $CoreModule, $converter, $hasher)) {
   if (-not (Test-Path -LiteralPath $required)) { throw "Missing test dependency: $required" }
 }
+$OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
+if (-not (Test-Path -LiteralPath $OutputRoot)) { throw "Cannot create Web regression output directory: $OutputRoot" }
 
 $cases = @(
   @{ Name = "canon-pq"; Input = "PQ_HIF.HIF"; Primaries = 9; Transfer = 16; Gamut = "rec2020"; TransferName = "pq" },

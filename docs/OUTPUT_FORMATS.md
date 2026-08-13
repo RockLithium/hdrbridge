@@ -10,11 +10,11 @@ Ultra HDR is backward compatible with ordinary JPEG readers, which show only the
 ## HDR PNG
 
 RGB16 with Rec.2020/PQ by default, optional Display P3/PQ, Rec.2020/HLG or Display P3/HLG.
-PQ PNG writes cICP `9/16/0/1` and the production `Rec.2100 PQ` ICC. HLG writes cICP `9/18/0/1` without a misleading PQ ICC. PNG Deflate is lossless for the target RGB16 buffer.
+PQ PNG writes cICP `9/16/0/1` and the production `Rec.2100 PQ` ICC; Display P3/PQ uses the corresponding primaries. HLG writes cICP `9/18/0/1` or `12/18/0/1` without a PQ ICC. PNG Deflate is lossless for the target RGB16 buffer.
 
 ## Direct HDR TIFF
 
-RGB16 PQ with Rec.2020 or Display P3, Deflate compression and normalized metadata. Its HDR-aware ICC carries CICP `9/16/0/1` for Rec.2020/PQ or `12/16/0/1` for Display P3/PQ, plus a conventional fallback TRC for legacy ICC readers. The image is stored in an application-compatible large-strip layout. Deflate without prediction is the default and is lossless for the target RGB16 buffer; uncompressed output is optional. Tested professional applications either recognize HDR automatically or accept manual Rec.2100 PQ assignment as recorded in the compatibility matrix.
+RGB16 PQ with Rec.2020 or Display P3, Deflate compression and normalized metadata. Its HDR-aware ICC carries CICP `9/16/0/1` for Rec.2020/PQ or `12/16/0/1` for Display P3/PQ. The image is stored in an application-compatible large-strip layout. Deflate without prediction is the default and is lossless for the target RGB16 buffer; uncompressed output is optional. Tested professional applications either recognize HDR automatically or accept manual Rec.2100 PQ assignment as recorded in the compatibility matrix.
 
 ## JPEG XL
 

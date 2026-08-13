@@ -13,7 +13,7 @@ void usage() {
             << "      [--gamut=rec2020|p3] [--transfer=pq|hlg] [--target-peak=auto|203..10000] [--quality=1..100]\n"
             << "      [--base-quality=0..100] [--gainmap-quality=0..100] [--gainmap-scale=1|2|4]\n"
             << "      [--single-channel-gainmap|--rgb-gainmap] [--no-icc] [--png-icc-name=<description>] [--png-compression=1..9]\n"
-            << "      [--tiff-compression=1..9|--tiff-uncompressed] [--lossy] [--overwrite]\n"
+            << "      [--tiff-compression=1..9|--tiff-uncompressed] [--diagnostic-icc-only] [--lossy] [--overwrite]\n"
             << "  hdrbridge-cli verify <output> <mode>\n"
             << "  hdrbridge-cli benchmark-cache <input> <output-a> <mode-a> <output-b> <mode-b>\n";
 }
@@ -70,6 +70,13 @@ int main(int argc, char** argv) {
         else if (flag.rfind("--png-compression=", 0) == 0) options.png_compression_level = std::stoi(flag.substr(18));
         else if (flag.rfind("--tiff-compression=", 0) == 0) options.tiff_compression_level = std::stoi(flag.substr(19));
         else if (flag == "--tiff-uncompressed") options.tiff_compressed = false;
+        else if (flag == "--diagnostic-icc-only") options.diagnostic_icc_only = true;
+        else if (flag.rfind("--diagnostic-icc-profile=", 0) == 0)
+          options.diagnostic_icc_profile_path = flag.substr(25);
+        else if (flag.rfind("--diagnostic-tiff-metadata=", 0) == 0)
+          options.diagnostic_tiff_metadata_source = flag.substr(27);
+        else if (flag == "--diagnostic-windows-compatible-icc")
+          options.diagnostic_windows_compatible_icc = true;
         else throw std::runtime_error("unknown option: " + flag);
       }
       std::atomic_bool cancel{false};

@@ -66,6 +66,25 @@ struct SourceInfo {
   // Description of how the source container signals color. This is kept
   // separate from the canonical working representation.
   std::string color_signal_kind = "CICP / NCLX";
+  // Container-native and ICC signaling are retained independently. The
+  // legacy primaries/transfer/matrix fields below are the resolved result.
+  bool native_color_present = false;
+  uint16_t native_primaries = 0;
+  uint16_t native_transfer = 0;
+  uint16_t native_matrix = 0;
+  bool native_full_range = false;
+  bool native_range_known = false;
+  std::string native_color_description = "Absent / Unspecified";
+  uint16_t icc_primaries = 0;
+  uint16_t icc_transfer = 0;
+  uint16_t icc_matrix = 0;
+  bool icc_full_range = false;
+  bool icc_cicp_present = false;
+  std::string icc_description;
+  std::string icc_version;
+  std::string icc_transfer_interpretation = "Unknown";
+  std::string resolved_signaling_source = "Unknown";
+  bool color_signaling_conflict = false;
   std::string pixel_format;
   uint32_t bit_depth = 0;
   std::string chroma;
@@ -114,6 +133,13 @@ struct ConversionOptions {
   // Direct HDR TIFF defaults to Adobe Deflate without a horizontal predictor.
   // When false, the same single-strip RGB16 raster is written uncompressed.
   bool tiff_compressed = true;
+  // Regression-only path used to prove that an input is classified from an
+  // actual embedded ICC profile. It is deliberately not exposed by the GUI.
+  bool diagnostic_icc_only = false;
+  // Local interoperability experiments only; never surfaced in product UI.
+  std::string diagnostic_icc_profile_path;
+  std::string diagnostic_tiff_metadata_source;
+  bool diagnostic_windows_compatible_icc = false;
   bool copy_exif = true;
   bool copy_xmp = true;
   bool overwrite = false;

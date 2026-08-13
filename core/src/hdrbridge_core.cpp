@@ -115,6 +115,7 @@ void convert_p3_pq_to_rec2020_pq(std::vector<uint16_t>& pixels);
 void write_file(const std::filesystem::path& path, const std::vector<uint8_t>& data);
 std::vector<uint16_t> convert_rec2020_pq_to_p3_pq(const DecodedImage& decoded);
 std::vector<uint16_t> convert_rec2020_pq_to_rec709_pq(const DecodedImage& decoded);
+double inverse_pq(double encoded);
 
 HdrTransfer public_transfer_kind(uint16_t cicp_transfer) {
   if (cicp_transfer == 16) return HdrTransfer::pq_st2084;
@@ -130,6 +131,202 @@ const char* public_transfer_name(uint16_t cicp_transfer) {
 
 const char* metadata_status(bool present) {
   return present ? "present" : "absent";
+}
+
+struct IccSignal {
+  bool present = false;
+  bool valid = false;
+  bool cicp_present = false;
+  uint16_t primaries = 0;
+  uint16_t transfer = 0;
+  uint16_t matrix = 0;
+  bool full_range = false;
+  std::string description;
+  std::string version;
+  std::string transfer_interpretation = "Unknown";
+};
+
+std::string icc_info_ascii(cmsHPROFILE profile, cmsInfoType type) {
+  const cmsUInt32Number size = cmsGetProfileInfoASCII(profile, type, "en", "US", nullptr, 0);
+  if (!size) return {};
+  std::string text(size, '\0');
+  cmsGetProfileInfoASCII(profile, type, "en", "US", text.data(), size);
+  if (!text.empty() && text.back() == '\0') text.pop_back();
+  return text;
+}
+
+uint16_t identify_icc_primaries(cmsHPROFILE profile) {
+  const auto* r = static_cast<const cmsCIEXYZ*>(cmsReadTag(profile, cmsSigRedColorantTag));
+  const auto* g = static_cast<const cmsCIEXYZ*>(cmsReadTag(profile, cmsSigGreenColorantTag));
+  const auto* b = static_cast<const cmsCIEXYZ*>(cmsReadTag(profile, cmsSigBlueColorantTag));
+  if (!r || !g || !b) return 0;
+  const std::array<double, 9> actual{r->X, r->Y, r->Z, g->X, g->Y, g->Z, b->X, b->Y, b->Z};
+  struct Candidate { uint16_t cicp; cmsCIExyYTRIPLE xy; };
+  const std::array<Candidate, 3> candidates{{
+      {1, {{0.6400, 0.3300, 1.0}, {0.3000, 0.6000, 1.0}, {0.1500, 0.0600, 1.0}}},
+      {9, {{0.7080, 0.2920, 1.0}, {0.1700, 0.7970, 1.0}, {0.1310, 0.0460, 1.0}}},
+      {12, {{0.6800, 0.3200, 1.0}, {0.2650, 0.6900, 1.0}, {0.1500, 0.0600, 1.0}}},
+  }};
+  const cmsCIExyY white{0.3127, 0.3290, 1.0};
+  uint16_t best = 0; double best_error = std::numeric_limits<double>::max();
+  for (const auto& candidate : candidates) {
+    cmsToneCurve* curve = cmsBuildGamma(nullptr, 1.0);
+    cmsToneCurve* curves[3]{curve, curve, curve};
+    cmsHPROFILE reference = curve ? cmsCreateRGBProfile(&white, &candidate.xy, curves) : nullptr;
+    if (curve) cmsFreeToneCurve(curve);
+    if (!reference) continue;
+    const auto* rr = static_cast<const cmsCIEXYZ*>(cmsReadTag(reference, cmsSigRedColorantTag));
+    const auto* rg = static_cast<const cmsCIEXYZ*>(cmsReadTag(reference, cmsSigGreenColorantTag));
+    const auto* rb = static_cast<const cmsCIEXYZ*>(cmsReadTag(reference, cmsSigBlueColorantTag));
+    if (rr && rg && rb) {
+      const std::array<double, 9> expected{rr->X, rr->Y, rr->Z, rg->X, rg->Y, rg->Z,
+                                           rb->X, rb->Y, rb->Z};
+      double error = 0.0;
+      for (size_t i = 0; i < actual.size(); ++i) {
+        const double delta = actual[i] - expected[i]; error += delta * delta;
+      }
+      if (error < best_error) { best_error = error; best = candidate.cicp; }
+    }
+    cmsCloseProfile(reference);
+  }
+  return best_error < 1e-4 ? best : 0;
+}
+
+uint16_t identify_icc_transfer(cmsHPROFILE profile) {
+  const auto* curve = static_cast<const cmsToneCurve*>(cmsReadTag(profile, cmsSigRedTRCTag));
+  if (!curve) return 0;
+  constexpr std::array<double, 5> samples{0.10, 0.25, 0.50, 0.75, 0.90};
+  double pq_error = 0.0, hlg_error = 0.0;
+  constexpr double a = 0.17883277, b = 0.28466892, c = 0.55991073;
+  for (double encoded : samples) {
+    const double actual = cmsEvalToneCurveFloat(curve, static_cast<cmsFloat32Number>(encoded));
+    const double pq = inverse_pq(encoded) / 10000.0;
+    const double hlg = encoded <= 0.5 ? encoded * encoded / 3.0
+                                     : (std::exp((encoded - c) / a) + b) / 12.0;
+    pq_error += std::pow(actual - pq, 2.0);
+    hlg_error += std::pow(actual - hlg, 2.0);
+  }
+  if (pq_error < 2e-5) return 16;
+  if (hlg_error < 2e-4) return 18;
+  return 0;
+}
+
+IccSignal parse_icc_signal(const void* data, size_t size) {
+  IccSignal result;
+  result.present = data && size > 0;
+  if (!result.present || size > std::numeric_limits<cmsUInt32Number>::max()) return result;
+  cmsHPROFILE profile = cmsOpenProfileFromMem(data, static_cast<cmsUInt32Number>(size));
+  if (!profile) return result;
+  result.valid = true;
+  result.description = icc_info_ascii(profile, cmsInfoDescription);
+  const double version = cmsGetProfileVersion(profile);
+  std::ostringstream version_text;
+  version_text << std::fixed << std::setprecision(1) << version;
+  result.version = version_text.str();
+  const uint16_t transform_primaries = identify_icc_primaries(profile);
+  const uint16_t transform_transfer = identify_icc_transfer(profile);
+  const auto* cicp = static_cast<const cmsVideoSignalType*>(cmsReadTag(profile, cmsSigcicpTag));
+  if (cicp) {
+    result.cicp_present = true;
+    result.primaries = static_cast<uint16_t>(cicp->ColourPrimaries);
+    result.transfer = static_cast<uint16_t>(cicp->TransferCharacteristics);
+    result.matrix = static_cast<uint16_t>(cicp->MatrixCoefficients);
+    result.full_range = cicp->VideoFullRangeFlag != 0;
+    result.transfer_interpretation = std::string("CICP ") + public_transfer_name(result.transfer);
+    if (transform_transfer == result.transfer) result.transfer_interpretation += "; TRC agrees";
+    else if (transform_transfer != 0) result.transfer_interpretation += "; legacy/fallback TRC differs";
+  } else {
+    result.primaries = transform_primaries;
+    result.transfer = transform_transfer;
+    result.matrix = 0;
+    result.full_range = transform_transfer != 0;
+    result.transfer_interpretation = transform_transfer
+        ? std::string("matrix/TRC interpreted as ") + public_transfer_name(transform_transfer)
+        : "matrix/TRC is not a recognized PQ or HLG transform";
+  }
+  cmsCloseProfile(profile);
+  return result;
+}
+
+void store_icc_signal(SourceInfo& info, const IccSignal& icc) {
+  info.icc_present = icc.present;
+  info.icc_status = icc.present ? (icc.valid ? "present" : "read-error") : "absent";
+  info.icc_description = icc.description;
+  info.icc_version = icc.version;
+  info.icc_cicp_present = icc.cicp_present;
+  info.icc_primaries = icc.primaries;
+  info.icc_transfer = icc.transfer;
+  info.icc_matrix = icc.matrix;
+  info.icc_full_range = icc.full_range;
+  info.icc_transfer_interpretation = icc.transfer_interpretation;
+}
+
+bool hdr_color(uint16_t primaries, uint16_t transfer) {
+  return (transfer == 16 || transfer == 18) &&
+         (primaries == 1 || primaries == 9 || primaries == 12);
+}
+
+void resolve_color_signaling(SourceInfo& info, bool native_preferred) {
+  const bool native_hdr = info.native_color_present &&
+                          hdr_color(info.native_primaries, info.native_transfer);
+  const bool icc_hdr = info.icc_present &&
+                       hdr_color(info.icc_primaries, info.icc_transfer);
+  const bool both = info.native_color_present && icc_hdr;
+  info.color_signaling_conflict = both &&
+      (info.native_primaries != info.icc_primaries ||
+       info.native_transfer != info.icc_transfer ||
+       info.native_full_range != info.icc_full_range);
+  if (info.color_signaling_conflict) {
+    info.resolved_signaling_source = "Conflict";
+  } else if (both) {
+    info.resolved_signaling_source = "Native + ICC";
+  } else if (native_hdr || (info.native_color_present && !icc_hdr)) {
+    info.resolved_signaling_source = "Native";
+  } else if (icc_hdr || info.icc_cicp_present) {
+    info.resolved_signaling_source = "ICC";
+  } else {
+    info.resolved_signaling_source = "Unknown";
+  }
+  const bool use_native = native_hdr && (native_preferred || !icc_hdr);
+  if (use_native) {
+    info.primaries = info.native_primaries;
+    info.transfer = info.native_transfer;
+    info.matrix = info.native_matrix;
+    info.full_range = info.native_full_range;
+    info.range_known = info.native_range_known;
+  } else if (icc_hdr) {
+    info.primaries = info.icc_primaries;
+    info.transfer = info.icc_transfer;
+    // ICC matrix=0 describes RGB profile interpretation, not stored YCbCr.
+    // Preserve a native storage matrix when one exists.
+    info.matrix = info.native_color_present ? info.native_matrix : info.icc_matrix;
+    info.full_range = info.icc_full_range;
+    info.range_known = true;
+  } else if (info.native_color_present) {
+    info.primaries = info.native_primaries;
+    info.transfer = info.native_transfer;
+    info.matrix = info.native_matrix;
+    info.full_range = info.native_full_range;
+    info.range_known = info.native_range_known;
+  }
+  info.transfer_kind = public_transfer_kind(info.transfer);
+  if (!info.gain_map_present) info.asset_kind = hdr_color(info.primaries, info.transfer)
+      ? "direct-hdr" : "non-HDR";
+}
+
+void convert_rec709_pq_to_rec2020_pq(std::vector<uint16_t>& pixels) {
+  for (size_t p = 0; p < pixels.size() / 3u; ++p) {
+    const double r = transfer::pq_to_nits(pixels[p * 3u] / 65535.0);
+    const double g = transfer::pq_to_nits(pixels[p * 3u + 1u] / 65535.0);
+    const double b = transfer::pq_to_nits(pixels[p * 3u + 2u] / 65535.0);
+    const std::array<double, 3> rec2020{
+        0.6274040 * r + 0.3292830 * g + 0.0433130 * b,
+        0.0690970 * r + 0.9195400 * g + 0.0113620 * b,
+        0.0163910 * r + 0.0880130 * g + 0.8955950 * b};
+    for (size_t c = 0; c < 3; ++c) pixels[p * 3u + c] =
+        static_cast<uint16_t>(std::llround(transfer::nits_to_pq(
+            std::clamp(rec2020[c], 0.0, 10000.0)) * 65535.0));
+  }
 }
 
 void require_heif(const heif_error& e, const char* operation) {
@@ -342,18 +539,24 @@ SourceInfo inspect_opened(const std::filesystem::path& path, const OpenedHeif& o
   const heif_error color_error = heif_image_handle_get_nclx_color_profile(opened.handle.get(), &raw_nclx);
   NclxPtr nclx(raw_nclx);
   if (color_error.code == heif_error_Ok && nclx) {
-    info.primaries = static_cast<uint16_t>(nclx->color_primaries);
-    info.transfer = static_cast<uint16_t>(nclx->transfer_characteristics);
-    info.transfer_kind = public_transfer_kind(info.transfer);
-    info.matrix = static_cast<uint16_t>(nclx->matrix_coefficients);
-    info.full_range = nclx->full_range_flag != 0;
-    info.range_known = true;
+    info.native_color_present = true;
+    info.native_primaries = static_cast<uint16_t>(nclx->color_primaries);
+    info.native_transfer = static_cast<uint16_t>(nclx->transfer_characteristics);
+    info.native_matrix = static_cast<uint16_t>(nclx->matrix_coefficients);
+    info.native_full_range = nclx->full_range_flag != 0;
+    info.native_range_known = true;
+    info.native_color_description = "CICP / NCLX";
   }
   std::vector<uint8_t> source_exif;
   load_metadata(opened.handle.get(), info, &source_exif, nullptr);
   const size_t raw_profile_size = heif_image_handle_get_raw_color_profile_size(opened.handle.get());
-  info.icc_present = raw_profile_size > 0;
-  info.icc_status = metadata_status(info.icc_present);
+  std::vector<uint8_t> raw_profile(raw_profile_size);
+  if (!raw_profile.empty()) {
+    const heif_error raw_error = heif_image_handle_get_raw_color_profile(
+        opened.handle.get(), raw_profile.data());
+    if (raw_error.code != heif_error_Ok) raw_profile.clear();
+  }
+  store_icc_signal(info, parse_icc_signal(raw_profile.data(), raw_profile.size()));
   info.original_orientation = heif_container_orientation(opened);
   const bool exif_orientation = orientation::has_exif_orientation(source_exif);
   if (info.original_orientation == 1 && exif_orientation) {
@@ -367,15 +570,11 @@ SourceInfo inspect_opened(const std::filesystem::path& path, const OpenedHeif& o
   info.orientation_normalized = true;
   inspect_container_bits(read_file(path), info);
   info.format = info.container_brand == "avif" ? "AVIF" : "HEIF/HIF";
-  info.color_signal_kind = "CICP / NCLX";
+  resolve_color_signaling(info, false);
+  info.color_signal_kind = info.resolved_signaling_source;
   info.pixel_format = info.chroma == "monochrome"
       ? "monochrome" : "YCbCr " + info.chroma;
-  const bool direct_pq = info.transfer == 16 &&
-                         (info.primaries == 9 || info.primaries == 12);
-  const bool direct_hlg = info.transfer == 18 && info.primaries == 9;
-  if (!direct_pq && !direct_hlg && !info.gain_map_present) {
-    info.asset_kind = "non-PQ/unknown";
-  }
+  if (!info.icc_description.empty()) info.profile = info.icc_description;
   if (info.codec.empty()) info.codec = "HEVC/HEIF";
   if (info.profile.empty()) info.profile = "unknown";
   if (info.chroma.empty()) info.chroma = "unknown";
@@ -394,10 +593,22 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
     throw std::runtime_error("gain-map HEIF/AVIF detected; direct primary-image decode would discard HDR intent");
   }
   const bool direct_pq = result.info.transfer == 16 &&
-                         (result.info.primaries == 9 || result.info.primaries == 12);
-  const bool direct_hlg = result.info.transfer == 18 && result.info.primaries == 9;
+                         (result.info.primaries == 1 || result.info.primaries == 9 ||
+                          result.info.primaries == 12);
+  const bool direct_hlg = result.info.transfer == 18 &&
+                          (result.info.primaries == 1 || result.info.primaries == 9 ||
+                           result.info.primaries == 12);
   if (!direct_pq && !direct_hlg) {
     throw std::runtime_error("HEIF/AVIF input is not supported direct PQ or BT.2100 HLG HDR");
+  }
+  if (result.info.color_signaling_conflict) {
+    report(progress, 7,
+           "Color signaling conflict: preserving container/codec YUV decode while using the resolved HDR RGB interpretation");
+  } else if (result.info.resolved_signaling_source == "ICC") {
+    report(progress, 7,
+           "HDR transfer/gamut resolved from ICC; codec/VUI remains responsible for stored YUV-to-RGB decoding");
+  } else if (result.info.resolved_signaling_source == "Native + ICC") {
+    report(progress, 7, "Matching native and ICC HDR signaling resolved");
   }
   load_metadata(opened.handle.get(), result.info, &result.exif, &result.xmp);
   check_cancel(cancel);
@@ -469,7 +680,16 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
           result.rgb[p * 3u] / 65535.0,
           result.rgb[p * 3u + 1u] / 65535.0,
           result.rgb[p * 3u + 2u] / 65535.0};
-      const auto nits = transfer::hlg_to_linear_nits(source_signal);
+      auto nits = transfer::hlg_to_linear_nits(source_signal);
+      if (result.info.primaries == 12) {
+        nits = {0.7538330 * nits[0] + 0.1985974 * nits[1] + 0.0475696 * nits[2],
+                0.0457438 * nits[0] + 0.9417772 * nits[1] + 0.0124789 * nits[2],
+               -0.0012103 * nits[0] + 0.0176017 * nits[1] + 0.9836086 * nits[2]};
+      } else if (result.info.primaries == 1) {
+        nits = {0.6274040 * nits[0] + 0.3292830 * nits[1] + 0.0433130 * nits[2],
+                0.0690970 * nits[0] + 0.9195400 * nits[1] + 0.0113620 * nits[2],
+                0.0163910 * nits[0] + 0.0880130 * nits[1] + 0.8955950 * nits[2]};
+      }
       for (size_t c = 0; c < 3; ++c) {
         const double ideal_pq = transfer::nits_to_pq(nits[c]);
         result.rgb[p * 3u + c] = static_cast<uint16_t>(std::llround(
@@ -496,6 +716,8 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
     result.source_to_canonical_max_abs_error = pq_max_error;
   } else if (result.info.primaries == 12) {
     convert_p3_pq_to_rec2020_pq(result.rgb);
+  } else if (result.info.primaries == 1) {
+    convert_rec709_pq_to_rec2020_pq(result.rgb);
   }
   result.timings.color_conversion_ms = elapsed_ms(color_start);
   report(progress, 42, direct_hlg
@@ -503,6 +725,11 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
       : "High-precision Rec.2020/PQ RGB ready");
   return result;
 }
+
+std::vector<uint8_t> make_pq_icc(bool display_p3,
+                                 const std::string& description_override,
+                                 bool include_cicp);
+std::vector<uint8_t> make_windows_compatible_pq_icc(bool display_p3);
 
 std::vector<uint8_t> encode_jxl(const DecodedImage& decoded, const ConversionOptions& options,
                                 const std::vector<uint16_t>& pixels) {
@@ -528,15 +755,24 @@ std::vector<uint8_t> encode_jxl(const DecodedImage& decoded, const ConversionOpt
   basic.uses_original_profile = JXL_TRUE;
   if (JxlEncoderSetBasicInfo(encoder.get(), &basic) != JXL_ENC_SUCCESS) throw std::runtime_error("cannot set JXL basic info");
 
-  JxlColorEncoding color{};
-  color.color_space = JXL_COLOR_SPACE_RGB;
-  color.white_point = JXL_WHITE_POINT_D65;
-  color.primaries = options.output_gamut == "rec709" ? JXL_PRIMARIES_SRGB :
-                    options.output_gamut == "p3" ? JXL_PRIMARIES_P3 : JXL_PRIMARIES_2100;
-  color.transfer_function = options.output_transfer == "hlg"
-      ? JXL_TRANSFER_FUNCTION_HLG : JXL_TRANSFER_FUNCTION_PQ;
-  color.rendering_intent = JXL_RENDERING_INTENT_RELATIVE;
-  if (JxlEncoderSetColorEncoding(encoder.get(), &color) != JXL_ENC_SUCCESS) throw std::runtime_error("cannot set Rec.2020/PQ JXL encoding");
+  if (options.diagnostic_icc_only) {
+    const auto icc = make_windows_compatible_pq_icc(options.output_gamut == "p3");
+    if (JxlEncoderSetICCProfile(encoder.get(), icc.data(), icc.size()) != JXL_ENC_SUCCESS) {
+      throw std::runtime_error("cannot set actual ICC-coded JPEG XL profile");
+    }
+  } else {
+    JxlColorEncoding color{};
+    color.color_space = JXL_COLOR_SPACE_RGB;
+    color.white_point = JXL_WHITE_POINT_D65;
+    color.primaries = options.output_gamut == "rec709" ? JXL_PRIMARIES_SRGB :
+                      options.output_gamut == "p3" ? JXL_PRIMARIES_P3 : JXL_PRIMARIES_2100;
+    color.transfer_function = options.output_transfer == "hlg"
+        ? JXL_TRANSFER_FUNCTION_HLG : JXL_TRANSFER_FUNCTION_PQ;
+    color.rendering_intent = JXL_RENDERING_INTENT_RELATIVE;
+    if (JxlEncoderSetColorEncoding(encoder.get(), &color) != JXL_ENC_SUCCESS) {
+      throw std::runtime_error("cannot set JPEG XL structured color encoding");
+    }
+  }
 
   JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(encoder.get(), nullptr);
   if (!frame) throw std::runtime_error("cannot create JXL frame settings");
@@ -756,6 +992,23 @@ Verification decode_jxl(const std::vector<uint8_t>& data, const std::vector<uint
                     color.primaries == JXL_PRIMARIES_2100 ? "Rec.2020/PQ" :
             color.transfer_function == JXL_TRANSFER_FUNCTION_PQ &&
                     color.primaries == JXL_PRIMARIES_P3 ? "Display P3/PQ" : "unexpected";
+      } else {
+        size_t icc_size = 0;
+        if (JxlDecoderGetICCProfileSize(decoder.get(), JXL_COLOR_PROFILE_TARGET_ORIGINAL,
+                                       &icc_size) == JXL_DEC_SUCCESS && icc_size > 0) {
+          std::vector<uint8_t> icc(icc_size);
+          if (JxlDecoderGetColorAsICCProfile(decoder.get(), JXL_COLOR_PROFILE_TARGET_ORIGINAL,
+                                            icc.data(), icc.size()) == JXL_DEC_SUCCESS) {
+            const auto signal = parse_icc_signal(icc.data(), icc.size());
+            if (signal.cicp_present && (signal.transfer == 16 || signal.transfer == 18)) {
+              verification.color_encoding = signal.transfer == 18
+                  ? (signal.primaries == 12 ? "Display P3/HLG ICC" : signal.primaries == 9
+                                             ? "Rec.2020/HLG ICC" : "unexpected ICC")
+                  : (signal.primaries == 12 ? "Display P3/PQ ICC" : signal.primaries == 9
+                                             ? "Rec.2020/PQ ICC" : "unexpected ICC");
+            }
+          }
+        }
       }
     } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
       size_t size = 0;
@@ -772,9 +1025,13 @@ Verification decode_jxl(const std::vector<uint8_t>& data, const std::vector<uint
   verification.checks.push_back(verification.width && verification.height ? "dimensions parse" : "dimensions missing");
   verification.checks.push_back(verification.bit_depth == 16 ? "16-bit integer" : "unexpected bit depth");
   const bool pq_profile = verification.color_encoding == "Rec.2020/PQ" ||
-                          verification.color_encoding == "Display P3/PQ";
+                          verification.color_encoding == "Display P3/PQ" ||
+                          verification.color_encoding == "Rec.2020/PQ ICC" ||
+                          verification.color_encoding == "Display P3/PQ ICC";
   const bool hlg_profile = verification.color_encoding == "Rec.2020/HLG" ||
-                           verification.color_encoding == "Display P3/HLG";
+                           verification.color_encoding == "Display P3/HLG" ||
+                           verification.color_encoding == "Rec.2020/HLG ICC" ||
+                           verification.color_encoding == "Display P3/HLG ICC";
   verification.checks.push_back(pq_profile || hlg_profile
       ? verification.color_encoding + " profile" : "profile mismatch");
   if (expected) verification.checks.push_back(verification.exact_roundtrip ? "exact RGB16 encoder-buffer roundtrip" : "RGB16 roundtrip mismatch");
@@ -802,14 +1059,15 @@ DecodedImage decode_jxl_input(const std::filesystem::path& path) {
   const JxlPixelFormat format{3, JXL_TYPE_UINT16, JXL_NATIVE_ENDIAN, 0};
   DecodedImage decoded;
   decoded.info.path = path; decoded.info.format = "JPEG XL"; decoded.info.container_brand = "JXL ";
-  decoded.info.asset_kind = "direct-hdr"; decoded.info.codec = "JPEG XL"; decoded.info.chroma = "4:4:4 RGB";
+  decoded.info.asset_kind = "non-HDR"; decoded.info.codec = "JPEG XL"; decoded.info.chroma = "4:4:4 RGB";
   decoded.info.pixel_format = "RGB integer";
-  decoded.info.color_signal_kind = "CICP equivalent (JPEG XL structured color encoding)";
+  decoded.info.color_signal_kind = "Unknown";
   decoded.info.exif_status = "absent";
   decoded.info.xmp_status = "absent";
   decoded.info.icc_status = "absent";
   JxlColorEncoding color{};
-  bool color_ok = false;
+  bool structured_available = false;
+  std::vector<uint8_t> original_icc;
   std::vector<uint8_t>* box_target = nullptr;
   size_t box_chunk_offset = 0;
   size_t box_chunk_size = 0;
@@ -828,18 +1086,22 @@ DecodedImage decode_jxl_input(const std::filesystem::path& path) {
       if (JxlDecoderGetBasicInfo(decoder.get(), &basic) != JXL_DEC_SUCCESS) throw std::runtime_error("cannot read JPEG XL input info");
       decoded.info.width = basic.xsize; decoded.info.height = basic.ysize; decoded.info.bit_depth = basic.bits_per_sample;
       decoded.info.profile = "RGB" + std::to_string(basic.bits_per_sample);
-      decoded.info.pixel_format = "RGB" + std::to_string(basic.bits_per_sample) + " integer";
+      decoded.info.pixel_format = "RGB" + std::to_string(basic.bits_per_sample) +
+          (basic.alpha_bits ? "A integer" : " integer");
       decoded.info.original_orientation = static_cast<uint8_t>(basic.orientation);
       decoded.info.orientation_status = "present";
     } else if (status == JXL_DEC_COLOR_ENCODING) {
-      if (JxlDecoderGetColorAsEncodedProfile(decoder.get(), JXL_COLOR_PROFILE_TARGET_ORIGINAL, &color) == JXL_DEC_SUCCESS) {
-        const bool pq = color.transfer_function == JXL_TRANSFER_FUNCTION_PQ &&
-                        (color.primaries == JXL_PRIMARIES_2100 ||
-                         color.primaries == JXL_PRIMARIES_P3);
-        const bool hlg = color.transfer_function == JXL_TRANSFER_FUNCTION_HLG &&
-                         (color.primaries == JXL_PRIMARIES_2100 ||
-                          color.primaries == JXL_PRIMARIES_P3);
-        color_ok = color.color_space == JXL_COLOR_SPACE_RGB && (pq || hlg);
+      structured_available = JxlDecoderGetColorAsEncodedProfile(
+          decoder.get(), JXL_COLOR_PROFILE_TARGET_ORIGINAL, &color) == JXL_DEC_SUCCESS;
+      size_t icc_size = 0;
+      if (!structured_available &&
+          JxlDecoderGetICCProfileSize(decoder.get(), JXL_COLOR_PROFILE_TARGET_ORIGINAL,
+                                      &icc_size) == JXL_DEC_SUCCESS && icc_size > 0) {
+        original_icc.resize(icc_size);
+        if (JxlDecoderGetColorAsICCProfile(decoder.get(), JXL_COLOR_PROFILE_TARGET_ORIGINAL,
+                                           original_icc.data(), original_icc.size()) != JXL_DEC_SUCCESS) {
+          original_icc.clear();
+        }
       }
     } else if (status == JXL_DEC_BOX) {
       finish_box();
@@ -883,11 +1145,27 @@ DecodedImage decode_jxl_input(const std::filesystem::path& path) {
       break;
     }
   }
-  if (!color_ok || decoded.info.bit_depth != 16) throw std::runtime_error("JPEG XL input is not supported RGB16 PQ/HLG HDR");
-  decoded.info.primaries = color.primaries == JXL_PRIMARIES_P3 ? 12 : 9;
-  decoded.info.transfer = color.transfer_function == JXL_TRANSFER_FUNCTION_HLG ? 18 : 16;
-  decoded.info.transfer_kind = public_transfer_kind(decoded.info.transfer);
-  decoded.info.matrix = 0; decoded.info.full_range = true; decoded.info.range_known = true;
+  if (structured_available && color.color_space == JXL_COLOR_SPACE_RGB) {
+    decoded.info.native_color_present = true;
+    decoded.info.native_primaries = color.primaries == JXL_PRIMARIES_P3 ? 12 :
+        color.primaries == JXL_PRIMARIES_2100 ? 9 :
+        color.primaries == JXL_PRIMARIES_SRGB ? 1 : 0;
+    decoded.info.native_transfer = static_cast<uint16_t>(color.transfer_function);
+    decoded.info.native_matrix = 0;
+    decoded.info.native_full_range = true;
+    decoded.info.native_range_known = true;
+    decoded.info.native_color_description = "JPEG XL structured color encoding (CICP equivalent)";
+  }
+  store_icc_signal(decoded.info, parse_icc_signal(original_icc.data(), original_icc.size()));
+  resolve_color_signaling(decoded.info, true);
+  decoded.info.color_signal_kind = decoded.info.native_color_present
+      ? "CICP equivalent (JPEG XL structured color encoding)"
+      : decoded.info.resolved_signaling_source;
+  if (!decoded.info.icc_description.empty()) decoded.info.profile = decoded.info.icc_description;
+  if (decoded.info.asset_kind != "direct-hdr") return decoded;
+  if (decoded.info.bit_depth > 16 || decoded.info.bit_depth == 0) {
+    throw std::runtime_error("JPEG XL direct HDR integer storage exceeds the supported 16-bit precision");
+  }
   if (decoded.info.transfer == 18) {
     const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
     for (size_t p = 0; p < count; ++p) {
@@ -900,6 +1178,8 @@ DecodedImage decode_jxl_input(const std::filesystem::path& path) {
     }
   } else if (decoded.info.primaries == 12) {
     convert_p3_pq_to_rec2020_pq(decoded.rgb);
+  } else if (decoded.info.primaries == 1) {
+    convert_rec709_pq_to_rec2020_pq(decoded.rgb);
   }
   return decoded;
 }
@@ -1048,7 +1328,8 @@ void attach_hdr_stats(Verification& verification, const HdrStats& stats) {
 }
 
 std::vector<uint8_t> make_pq_icc(bool display_p3,
-                                 const std::string& description_override = {}) {
+                                 const std::string& description_override = {},
+                                 bool include_cicp = false) {
   cmsCIExyY white{0.3127, 0.3290, 1.0};
   cmsCIExyYTRIPLE primaries{};
   if (display_p3) {
@@ -1075,8 +1356,19 @@ std::vector<uint8_t> make_pq_icc(bool display_p3,
   cmsHPROFILE profile = cmsCreateRGBProfile(&white, &primaries, curves.data());
   free_curves();
   if (!profile) throw std::runtime_error("cannot create PQ ICC profile");
-  cmsSetProfileVersion(profile, 4.3);
+  cmsSetProfileVersion(profile, include_cicp ? 4.4 : 4.3);
   cmsSetDeviceClass(profile, cmsSigDisplayClass);
+  if (include_cicp) {
+    cmsVideoSignalType cicp{};
+    cicp.ColourPrimaries = display_p3 ? 12 : 9;
+    cicp.TransferCharacteristics = 16;
+    cicp.MatrixCoefficients = 0;
+    cicp.VideoFullRangeFlag = 1;
+    if (!cmsWriteTag(profile, cmsSigcicpTag, &cicp)) {
+      cmsCloseProfile(profile);
+      throw std::runtime_error("cannot write diagnostic PQ ICC CICP tag");
+    }
+  }
   cmsMLU* description = cmsMLUalloc(nullptr, 1);
   cmsMLU* copyright = cmsMLUalloc(nullptr, 1);
   const std::string name = description_override.empty()
@@ -1196,6 +1488,112 @@ std::vector<uint8_t> make_hdr_tiff_icc(bool display_p3) {
   if (bytes.size() < 100u) throw std::runtime_error("serialized HDR TIFF ICC is truncated");
   constexpr std::array<uint8_t, 12> kProfileRevisionDate{
       0x07, 0xEA, 0x00, 0x08, 0x00, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  std::copy(kProfileRevisionDate.begin(), kProfileRevisionDate.end(), bytes.begin() + 24);
+  return bytes;
+}
+
+std::vector<uint8_t> make_windows_compatible_pq_icc(bool display_p3) {
+  cmsCIExyY white{0.3127, 0.3290, 1.0};
+  cmsCIExyYTRIPLE primaries{};
+  if (display_p3) {
+    primaries.Red = {0.6800, 0.3200, 1.0};
+    primaries.Green = {0.2650, 0.6900, 1.0};
+    primaries.Blue = {0.1500, 0.0600, 1.0};
+  } else {
+    primaries.Red = {0.7080, 0.2920, 1.0};
+    primaries.Green = {0.1700, 0.7970, 1.0};
+    primaries.Blue = {0.1310, 0.0460, 1.0};
+  }
+  // A bounded perceptual SDR fallback for legacy ICC consumers. The real
+  // encoding is still unambiguously declared by the ICC CICP tag below. The
+  // smooth shoulder reaches diffuse white near PQ code 0.78; its deliberately
+  // lifted mid-tones keep consumers which ignore CICP from rendering encoded
+  // PQ as a near-black image.
+  std::array<cmsUInt16Number, 1024> fallback{};
+  constexpr std::array<double, 13> x{
+      0.0, 0.0625, 0.125, 0.25, 0.375, 0.50, 0.625,
+      0.70, 0.75, 0.775, 0.80, 0.875, 1.0};
+  constexpr std::array<double, 13> y{
+      0.0, 0.0004, 0.0022, 0.019, 0.092, 0.31, 0.62,
+      0.83, 0.99, 1.0, 1.0, 1.0, 1.0};
+  for (size_t i = 0; i < fallback.size(); ++i) {
+    const double encoded = i / static_cast<double>(fallback.size() - 1u);
+    const auto upper = std::upper_bound(x.begin(), x.end(), encoded);
+    const size_t hi = static_cast<size_t>(std::distance(x.begin(), upper));
+    double decoded = 1.0;
+    if (hi > 0u && hi < x.size()) {
+      const size_t lo = hi - 1u;
+      const double t = (encoded - x[lo]) / (x[hi] - x[lo]);
+      // Smoothstep interpolation avoids visible slope discontinuities while
+      // preserving monotonicity and the bounded shoulder.
+      const double smooth = t * t * (3.0 - 2.0 * t);
+      decoded = y[lo] + (y[hi] - y[lo]) * smooth;
+    } else if (hi == 0u) {
+      decoded = y.front();
+    }
+    fallback[i] = static_cast<cmsUInt16Number>(std::llround(
+        std::clamp(decoded, 0.0, 1.0) * 65535.0));
+  }
+  std::array<cmsToneCurve*, 3> curves{};
+  for (auto& curve : curves) curve = cmsBuildTabulatedToneCurve16(
+      nullptr, static_cast<cmsUInt32Number>(fallback.size()), fallback.data());
+  auto free_curves = [&] { for (auto* curve : curves) if (curve) cmsFreeToneCurve(curve); };
+  if (std::any_of(curves.begin(), curves.end(),
+                  [](const cmsToneCurve* curve) { return curve == nullptr; })) {
+    free_curves();
+    throw std::runtime_error("cannot create Windows-compatible PQ ICC fallback curves");
+  }
+  cmsHPROFILE profile = cmsCreateRGBProfile(&white, &primaries, curves.data());
+  free_curves();
+  if (!profile) throw std::runtime_error("cannot create Windows-compatible PQ ICC profile");
+  cmsSetProfileVersion(profile, 4.2);
+  cmsSetDeviceClass(profile, cmsSigDisplayClass);
+  cmsSetHeaderRenderingIntent(profile, INTENT_RELATIVE_COLORIMETRIC);
+  cmsVideoSignalType cicp{};
+  cicp.ColourPrimaries = display_p3 ? 12 : 9;
+  cicp.TransferCharacteristics = 16;
+  cicp.MatrixCoefficients = 0;
+  cicp.VideoFullRangeFlag = 1;
+  if (!cmsWriteTag(profile, cmsSigcicpTag, &cicp)) {
+    cmsCloseProfile(profile);
+    throw std::runtime_error("cannot write Windows-compatible PQ ICC CICP tag");
+  }
+  cmsCIEXYZ d65{};
+  cmsxyY2XYZ(&d65, &white);
+  if (!cmsWriteTag(profile, cmsSigMediaWhitePointTag, &d65)) {
+    cmsCloseProfile(profile);
+    throw std::runtime_error("cannot write D65 media white point");
+  }
+  cmsMLU* description = cmsMLUalloc(nullptr, 1);
+  cmsMLU* copyright = cmsMLUalloc(nullptr, 1);
+  const char* name = display_p3 ? "Display P3 PQ" : "Rec. 2020 PQ";
+  if (!description || !copyright || !cmsMLUsetASCII(description, "en", "US", name) ||
+      !cmsMLUsetASCII(copyright, "en", "US",
+                     "Generated by HDR Bridge; no embedded third-party profile")) {
+    if (description) cmsMLUfree(description);
+    if (copyright) cmsMLUfree(copyright);
+    cmsCloseProfile(profile);
+    throw std::runtime_error("cannot label Windows-compatible PQ ICC profile");
+  }
+  cmsWriteTag(profile, cmsSigProfileDescriptionTag, description);
+  cmsWriteTag(profile, cmsSigCopyrightTag, copyright);
+  cmsMLUfree(description); cmsMLUfree(copyright);
+  cmsUInt32Number size = 0;
+  if (!cmsSaveProfileToMem(profile, nullptr, &size) || size == 0) {
+    cmsCloseProfile(profile);
+    throw std::runtime_error("cannot size Windows-compatible PQ ICC profile");
+  }
+  std::vector<uint8_t> bytes(size);
+  if (!cmsSaveProfileToMem(profile, bytes.data(), &size)) {
+    cmsCloseProfile(profile);
+    throw std::runtime_error("cannot serialize Windows-compatible PQ ICC profile");
+  }
+  cmsCloseProfile(profile); bytes.resize(size);
+  if (bytes.size() < 100u) {
+    throw std::runtime_error("serialized Windows-compatible PQ ICC profile is truncated");
+  }
+  constexpr std::array<uint8_t, 12> kProfileRevisionDate{
+      0x07, 0xEA, 0x00, 0x08, 0x00, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
   std::copy(kProfileRevisionDate.begin(), kProfileRevisionDate.end(), bytes.begin() + 24);
   return bytes;
 }
@@ -1369,20 +1767,26 @@ std::vector<uint8_t> encode_png(const DecodedImage& decoded, const ConversionOpt
   const bool rec709 = options.output_gamut == "rec709";
   std::array<png_byte, 4> cicp{static_cast<png_byte>(rec709 ? 1 : p3 ? 12 : 9),
                                static_cast<png_byte>(hlg ? 18 : 16), 0, 1};
-  png_unknown_chunk chunk{};
-  std::memcpy(chunk.name, "cICP", 4);
-  chunk.data = cicp.data();
-  chunk.size = cicp.size();
-  chunk.location = PNG_HAVE_IHDR;
-  png_set_unknown_chunks(png, info, &chunk, 1);
-  png_set_unknown_chunk_location(png, info, 0, PNG_HAVE_IHDR);
+  if (!options.diagnostic_icc_only) {
+    png_unknown_chunk chunk{};
+    std::memcpy(chunk.name, "cICP", 4);
+    chunk.data = cicp.data();
+    chunk.size = cicp.size();
+    chunk.location = PNG_HAVE_IHDR;
+    png_set_unknown_chunks(png, info, &chunk, 1);
+    png_set_unknown_chunk_location(png, info, 0, PNG_HAVE_IHDR);
+  }
   std::vector<uint8_t> icc;
-  if (options.embed_hdr_icc && !hlg) {
+  if ((options.embed_hdr_icc && !hlg) || options.diagnostic_icc_only) {
     const std::string png_profile_name = options.png_icc_name_override.empty()
         ? (p3 ? "Display P3 PQ" : "Rec.2100 PQ")
         : options.png_icc_name_override;
     if (png_profile_name.size() > 79u) throw std::runtime_error("PNG ICC name exceeds 79 bytes");
-    icc = make_pq_icc(p3, png_profile_name);
+    // The ordinary PQ profile uses CICP for HDR-aware consumers and a bounded
+    // perceptual TRC for legacy ICC fallback (notably Windows Photos).
+    icc = options.diagnostic_icc_only
+        ? make_windows_compatible_pq_icc(p3)
+        : make_windows_compatible_pq_icc(p3);
     png_set_iCCP(png, info, png_profile_name.c_str(),
                  PNG_COMPRESSION_TYPE_BASE, icc.data(), static_cast<png_uint_32>(icc.size()));
   }
@@ -1418,7 +1822,7 @@ std::vector<uint8_t> encode_png(const DecodedImage& decoded, const ConversionOpt
   png_write_image(png, rows.data());
   png_write_end(png, info);
   png_destroy_write_struct(&png, &info);
-  insert_png_cicp_after_ihdr(writer.bytes, cicp);
+  if (!options.diagnostic_icc_only) insert_png_cicp_after_ihdr(writer.bytes, cicp);
   return std::move(writer.bytes);
 }
 
@@ -1448,7 +1852,8 @@ bool find_png_cicp(const std::vector<uint8_t>& bytes, std::array<uint8_t, 4>& ci
 
 Verification decode_png(const std::vector<uint8_t>& bytes,
                         const std::vector<uint16_t>* expected = nullptr,
-                        bool expect_icc = true) {
+                        bool expect_icc = true,
+                        bool expect_icc_only = false) {
   Verification v;
   png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
   if (!png) throw std::runtime_error("cannot create PNG reader");
@@ -1488,6 +1893,7 @@ Verification decode_png(const std::vector<uint8_t>& bytes,
                      p3 ? "Display P3/PQ full-range cICP 12/16/0/1" :
                      hlg ? (cicp[0] == 12 ? "Display P3/HLG full-range cICP 12/18/0/1" :
                                              "Rec.2020/HLG full-range cICP 9/18/0/1") :
+                     expect_icc_only && has_icc ? "direct HDR from ICC; cICP absent" :
                      "unexpected/missing PNG cICP";
   v.exact_roundtrip = expected && expected->size() == pixels.size() &&
                       std::memcmp(expected->data(), pixels.data(), pixels.size() * sizeof(uint16_t)) == 0;
@@ -1498,14 +1904,16 @@ Verification decode_png(const std::vector<uint8_t>& bytes,
   v.checks.push_back(rec2020 || p3 || hlg
       ? (hlg ? "HLG cICP present with RGB matrix=0 and full range"
              : "PQ cICP present with RGB matrix=0 and full range")
-      : "PNG cICP mismatch");
+      : expect_icc_only && !has_cicp ? "PNG cICP absent as required for ICC-only regression"
+                                    : "PNG cICP mismatch");
   v.checks.push_back(expect_icc
                          ? (has_icc ? "compatible HDR PQ ICC profile embedded" : "HDR ICC profile missing")
                          : (!has_icc ? "cICP-only A/B variant contains no ICC profile"
                                      : "cICP-only A/B variant unexpectedly contains ICC"));
   if (expected) v.checks.push_back(v.exact_roundtrip ? "exact RGB16 pixel roundtrip" : "RGB16 pixel roundtrip mismatch");
   v.passed = width > 0 && height > 0 && bit_depth == 16 && color_type == PNG_COLOR_TYPE_RGB &&
-             (rec2020 || p3 || hlg) && (has_icc == expect_icc) && (!expected || v.exact_roundtrip);
+             (expect_icc_only ? (!has_cicp && has_icc) : (rec2020 || p3 || hlg)) &&
+             (has_icc == expect_icc) && (!expected || v.exact_roundtrip);
   return v;
 }
 
@@ -1529,12 +1937,7 @@ void convert_p3_pq_to_rec2020_pq(std::vector<uint16_t>& pixels) {
 DecodedImage decode_png_input(const std::filesystem::path& path) {
   const auto bytes = read_file(path);
   std::array<uint8_t, 4> cicp{};
-  const bool cicp_ok = find_png_cicp(bytes, cicp) && cicp[2] == 0 && cicp[3] == 1 &&
-      ((cicp[1] == 16 && (cicp[0] == 9 || cicp[0] == 12)) ||
-       (cicp[1] == 18 && cicp[0] == 9));
-  if (!cicp_ok) {
-    throw std::runtime_error("PNG input is not a supported full-range Rec.2020/P3 PQ or Rec.2020 HLG RGB asset");
-  }
+  const bool has_cicp = find_png_cicp(bytes, cicp);
   png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
   png_infop info = png ? png_create_info_struct(png) : nullptr;
   if (!png || !info) {
@@ -1563,19 +1966,33 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
   decoded.info.width = width; decoded.info.height = height;
   decoded.info.codec = "PNG/DEFLATE"; decoded.info.profile = "RGB16";
   decoded.info.pixel_format = "RGB16 integer";
-  decoded.info.color_signal_kind = "cICP chunk";
+  decoded.info.color_signal_kind = "Unknown";
   decoded.info.bit_depth = 16; decoded.info.chroma = "4:4:4 RGB";
-  decoded.info.primaries = cicp[0]; decoded.info.transfer = cicp[1];
-  decoded.info.transfer_kind = public_transfer_kind(decoded.info.transfer);
-  decoded.info.matrix = cicp[2]; decoded.info.full_range = true; decoded.info.range_known = true;
+  if (has_cicp) {
+    decoded.info.native_color_present = true;
+    decoded.info.native_primaries = cicp[0];
+    decoded.info.native_transfer = cicp[1];
+    decoded.info.native_matrix = cicp[2];
+    decoded.info.native_full_range = cicp[3] != 0;
+    decoded.info.native_range_known = true;
+    decoded.info.native_color_description = "PNG cICP chunk";
+  }
   png_charp profile_name = nullptr;
   int profile_compression = 0;
   png_bytep profile_data = nullptr;
   png_uint_32 profile_size = 0;
-  decoded.info.icc_present = png_get_iCCP(png, info, &profile_name, &profile_compression,
-                                           &profile_data, &profile_size) != 0 && profile_size > 0;
-  decoded.info.icc_status = metadata_status(decoded.info.icc_present);
-  if (decoded.info.icc_present && profile_name) decoded.info.profile = profile_name;
+  const bool has_icc = png_get_iCCP(png, info, &profile_name, &profile_compression,
+                                    &profile_data, &profile_size) != 0 && profile_size > 0;
+  store_icc_signal(decoded.info, parse_icc_signal(has_icc ? profile_data : nullptr,
+                                                  has_icc ? profile_size : 0));
+  if (!decoded.info.icc_description.empty()) decoded.info.profile = decoded.info.icc_description;
+  else if (has_icc && profile_name) decoded.info.profile = profile_name;
+  resolve_color_signaling(decoded.info, true);
+  decoded.info.color_signal_kind = decoded.info.resolved_signaling_source;
+  if (decoded.info.asset_kind != "direct-hdr") {
+    png_destroy_read_struct(&png, &info, nullptr);
+    throw std::runtime_error("PNG input has no supported direct PQ/HLG color signal");
+  }
   decoded.info.exif_status = "absent";
   decoded.info.xmp_status = "absent";
 #ifdef PNG_eXIf_SUPPORTED
@@ -1610,7 +2027,7 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
   }
   png_read_end(png, info);
   png_destroy_read_struct(&png, &info, nullptr);
-  if (cicp[1] == 18) {
+  if (decoded.info.transfer == 18) {
     const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
     for (size_t p = 0; p < count; ++p) {
       const auto nits = transfer::hlg_to_linear_nits({
@@ -1620,8 +2037,10 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
       for (size_t c = 0; c < 3; ++c) decoded.rgb[p * 3u + c] =
           static_cast<uint16_t>(std::llround(forward_pq(nits[c]) * 65535.0));
     }
-  } else if (cicp[0] == 12) {
+  } else if (decoded.info.primaries == 12) {
     convert_p3_pq_to_rec2020_pq(decoded.rgb);
+  } else if (decoded.info.primaries == 1) {
+    convert_rec709_pq_to_rec2020_pq(decoded.rgb);
   }
   return decoded;
 }
@@ -1647,7 +2066,9 @@ void encode_tiff(const std::filesystem::path& path, const DecodedImage& decoded,
                  const ConversionOptions& options, const std::vector<uint16_t>& pixels) {
   auto tiff = open_tiff(path, "w");
   const bool p3 = options.output_gamut == "p3";
-  auto icc = make_hdr_tiff_icc(p3);
+  auto icc = !options.diagnostic_icc_profile_path.empty()
+      ? read_file(options.diagnostic_icc_profile_path)
+      : make_windows_compatible_pq_icc(p3);
   TIFFSetField(tiff.get(), TIFFTAG_IMAGEWIDTH, decoded.info.width);
   TIFFSetField(tiff.get(), TIFFTAG_IMAGELENGTH, decoded.info.height);
   TIFFSetField(tiff.get(), TIFFTAG_SAMPLESPERPIXEL, 3);
@@ -1670,10 +2091,43 @@ void encode_tiff(const std::filesystem::path& path, const DecodedImage& decoded,
   const std::string description = p3 ? "HDR Bridge direct RGB16 Display P3 PQ" :
                                        "HDR Bridge direct RGB16 Rec.2020 PQ";
   TIFFSetField(tiff.get(), TIFFTAG_IMAGEDESCRIPTION, description.c_str());
-  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.1.1");
+  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.1.2");
   TIFFSetField(tiff.get(), TIFFTAG_ICCPROFILE, static_cast<uint32_t>(icc.size()), icc.data());
+  std::vector<uint8_t> diagnostic_photoshop;
+  std::vector<uint8_t> diagnostic_iptc;
+  std::vector<uint8_t> diagnostic_xmp;
+  if (!options.diagnostic_tiff_metadata_source.empty()) {
+    auto source = open_tiff(options.diagnostic_tiff_metadata_source, "r");
+#ifdef TIFFTAG_PHOTOSHOP
+    uint32_t photoshop_size = 0; void* photoshop_data = nullptr;
+    if (TIFFGetField(source.get(), TIFFTAG_PHOTOSHOP, &photoshop_size, &photoshop_data) == 1 && photoshop_data && photoshop_size) {
+      diagnostic_photoshop.assign(static_cast<uint8_t*>(photoshop_data), static_cast<uint8_t*>(photoshop_data) + photoshop_size);
+      TIFFSetField(tiff.get(), TIFFTAG_PHOTOSHOP, photoshop_size, diagnostic_photoshop.data());
+    }
+#endif
+#ifdef TIFFTAG_RICHTIFFIPTC
+    uint32_t iptc_words = 0; void* iptc_data = nullptr;
+    if (TIFFGetField(source.get(), TIFFTAG_RICHTIFFIPTC, &iptc_words, &iptc_data) == 1 && iptc_data && iptc_words) {
+      const uint32_t iptc_bytes = iptc_words * 4u;
+      diagnostic_iptc.assign(static_cast<uint8_t*>(iptc_data), static_cast<uint8_t*>(iptc_data) + iptc_bytes);
+      TIFFSetField(tiff.get(), TIFFTAG_RICHTIFFIPTC, iptc_words, diagnostic_iptc.data());
+    }
+#endif
 #ifdef TIFFTAG_XMLPACKET
-  if (options.copy_xmp && !decoded.xmp.empty()) {
+    uint32_t xmp_size = 0; void* xmp_data = nullptr;
+    if (TIFFGetField(source.get(), TIFFTAG_XMLPACKET, &xmp_size, &xmp_data) == 1 && xmp_data && xmp_size) {
+      diagnostic_xmp.assign(static_cast<uint8_t*>(xmp_data), static_cast<uint8_t*>(xmp_data) + xmp_size);
+      TIFFSetField(tiff.get(), TIFFTAG_XMLPACKET, xmp_size, diagnostic_xmp.data());
+    }
+#endif
+    float xres = 0.0f, yres = 0.0f; uint16_t unit = RESUNIT_NONE;
+    if (TIFFGetField(source.get(), TIFFTAG_XRESOLUTION, &xres) == 1) TIFFSetField(tiff.get(), TIFFTAG_XRESOLUTION, xres);
+    if (TIFFGetField(source.get(), TIFFTAG_YRESOLUTION, &yres) == 1) TIFFSetField(tiff.get(), TIFFTAG_YRESOLUTION, yres);
+    if (TIFFGetField(source.get(), TIFFTAG_RESOLUTIONUNIT, &unit) == 1) TIFFSetField(tiff.get(), TIFFTAG_RESOLUTIONUNIT, unit);
+  }
+#ifdef TIFFTAG_XMLPACKET
+  if (options.diagnostic_tiff_metadata_source.empty() &&
+      options.copy_xmp && !decoded.xmp.empty()) {
     TIFFSetField(tiff.get(), TIFFTAG_XMLPACKET, static_cast<uint32_t>(decoded.xmp.size()), decoded.xmp.data());
   }
 #endif
@@ -1734,8 +2188,17 @@ Verification decode_tiff(const std::filesystem::path& path,
   const bool p3 = cicp && cicp->ColourPrimaries == 12 &&
                   cicp->TransferCharacteristics == 16 &&
                   cicp->MatrixCoefficients == 0 && cicp->VideoFullRangeFlag == 1;
+  const bool rec2020_hlg = cicp && cicp->ColourPrimaries == 9 &&
+                           cicp->TransferCharacteristics == 18 &&
+                           cicp->MatrixCoefficients == 0 && cicp->VideoFullRangeFlag == 1;
+  const bool p3_hlg = cicp && cicp->ColourPrimaries == 12 &&
+                      cicp->TransferCharacteristics == 18 &&
+                      cicp->MatrixCoefficients == 0 && cicp->VideoFullRangeFlag == 1;
   v.color_encoding = rec2020 ? "direct RGB16 Rec.2020/PQ ICC" :
-                     p3 ? "direct RGB16 Display P3/PQ ICC" : "missing/unexpected direct-HDR ICC";
+                     p3 ? "direct RGB16 Display P3/PQ ICC" :
+                     rec2020_hlg ? "direct RGB16 Rec.2020/HLG ICC" :
+                     p3_hlg ? "direct RGB16 Display P3/HLG ICC" :
+                     "missing/unexpected direct-HDR ICC";
   std::vector<uint16_t> pixels(static_cast<size_t>(v.width) * v.height * 3u);
   for (uint32_t y = 0; y < v.height; ++y) {
     if (TIFFReadScanline(tiff.get(), pixels.data() + static_cast<size_t>(y) * v.width * 3u, y, 0) < 0) {
@@ -1750,11 +2213,12 @@ Verification decode_tiff(const std::filesystem::path& path,
   v.checks.push_back(v.pixel_format == "TIFF RGB uint16 contiguous" ? "direct unsigned RGB16 storage" : "TIFF is not direct RGB16");
   v.checks.push_back(compression == COMPRESSION_ADOBE_DEFLATE || compression == COMPRESSION_LZW || compression == COMPRESSION_NONE
       ? "lossless TIFF compression" : "unexpected TIFF compression");
-  v.checks.push_back(rec2020 || p3 ? "HDR-aware ICC carries PQ CICP signaling" : "direct-HDR PQ CICP ICC missing");
+  v.checks.push_back(rec2020 || p3 || rec2020_hlg || p3_hlg
+      ? "HDR-aware ICC carries matching CICP signaling" : "direct-HDR CICP ICC missing");
   if (expected) v.checks.push_back(v.exact_roundtrip ? "exact RGB16 pixel roundtrip" : "RGB16 pixel roundtrip mismatch");
   v.passed = v.width > 0 && v.height > 0 && samples == 3 && bits == 16 &&
              sample_format == SAMPLEFORMAT_UINT && photometric == PHOTOMETRIC_RGB &&
-             planar == PLANARCONFIG_CONTIG && (rec2020 || p3) &&
+             planar == PLANARCONFIG_CONTIG && (rec2020 || p3 || rec2020_hlg || p3_hlg) &&
              (!expected || v.exact_roundtrip);
   return v;
 }
@@ -1779,20 +2243,14 @@ SourceInfo inspect_tiff_metadata(const std::filesystem::path& path) {
   info.pixel_format = samples == 3
       ? "RGB" + std::to_string(bits) + (sample_format == SAMPLEFORMAT_IEEEFP ? " float" : " integer")
       : "unknown";
-  info.color_signal_kind = "ICC profile";
   uint32_t icc_size = 0; void* icc_data = nullptr;
-  info.icc_present = TIFFGetField(tiff.get(), TIFFTAG_ICCPROFILE, &icc_size, &icc_data) == 1 &&
-                     icc_data && icc_size > 0;
-  info.icc_status = metadata_status(info.icc_present);
-  const std::string profile = info.icc_present ? icc_description(icc_data, icc_size) : std::string{};
-  info.profile = profile.empty() ? "unprofiled" : profile;
-  if (profile.find("Rec.2020 PQ") != std::string::npos) {
-    info.primaries = 9; info.transfer = 16; info.matrix = 0; info.full_range = true; info.range_known = true; info.asset_kind = "direct-hdr";
-  } else if (profile.find("P3 PQ") != std::string::npos) {
-    info.primaries = 12; info.transfer = 16; info.matrix = 0; info.full_range = true; info.range_known = true; info.asset_kind = "direct-hdr";
-  } else {
-    info.asset_kind = "non-PQ/unknown";
-  }
+  const bool has_icc = TIFFGetField(tiff.get(), TIFFTAG_ICCPROFILE, &icc_size, &icc_data) == 1 &&
+                       icc_data && icc_size > 0;
+  store_icc_signal(info, parse_icc_signal(has_icc ? icc_data : nullptr,
+                                           has_icc ? icc_size : 0));
+  info.profile = info.icc_description.empty() ? "unprofiled" : info.icc_description;
+  resolve_color_signaling(info, false);
+  info.color_signal_kind = info.resolved_signaling_source;
   uint16_t subifd_count = 0; toff_t* subifd_offsets = nullptr;
   if (TIFFGetField(tiff.get(), TIFFTAG_SUBIFD, &subifd_count, &subifd_offsets) == 1 && subifd_count > 0) {
     info.gain_map_present = true; info.asset_kind = "gain-map-hdr";
@@ -1822,8 +2280,10 @@ DecodedImage decode_tiff_input(const std::filesystem::path& path) {
   if (decoded.info.gain_map_present) {
     throw std::runtime_error("gain-map TIFF detected; Adobe SubIFD reconstruction is not yet a validated direct-HDR input path");
   }
-  if (decoded.info.transfer != 16 || (decoded.info.primaries != 9 && decoded.info.primaries != 12)) {
-    throw std::runtime_error("TIFF input is not a supported direct Rec.2020/P3 PQ asset");
+  if ((decoded.info.transfer != 16 && decoded.info.transfer != 18) ||
+      (decoded.info.primaries != 1 && decoded.info.primaries != 9 &&
+       decoded.info.primaries != 12)) {
+    throw std::runtime_error("TIFF input has no supported direct PQ/HLG ICC signal");
   }
   auto tiff = open_tiff(path, "r");
   uint16_t samples = 0, bits = 0, sample_format = SAMPLEFORMAT_UINT, photometric = 0, planar = 0;
@@ -1857,7 +2317,19 @@ DecodedImage decode_tiff_input(const std::filesystem::path& path) {
     decoded.info.height = transformed.height;
   }
   orientation::set_xmp_orientation_to_one(decoded.xmp);
+  if (decoded.info.transfer == 18) {
+    const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
+    for (size_t p = 0; p < count; ++p) {
+      const auto nits = transfer::hlg_to_linear_nits({
+          decoded.rgb[p * 3u] / 65535.0,
+          decoded.rgb[p * 3u + 1u] / 65535.0,
+          decoded.rgb[p * 3u + 2u] / 65535.0});
+      for (size_t c = 0; c < 3; ++c) decoded.rgb[p * 3u + c] =
+          static_cast<uint16_t>(std::llround(transfer::nits_to_pq(nits[c]) * 65535.0));
+    }
+  }
   if (decoded.info.primaries == 12) convert_p3_pq_to_rec2020_pq(decoded.rgb);
+  else if (decoded.info.primaries == 1) convert_rec709_pq_to_rec2020_pq(decoded.rgb);
   return decoded;
 }
 
@@ -1868,16 +2340,24 @@ void encode_avif(const std::filesystem::path& path, const DecodedImage& decoded,
                                  heif_colorspace_RGB, heif_chroma_interleaved_RRGGBB_LE, &raw_image),
                "create direct PQ AVIF image");
   ImagePtr image(raw_image);
-  heif_color_profile_nclx* raw_profile = heif_nclx_color_profile_alloc();
-  if (!raw_profile) throw std::bad_alloc();
-  NclxPtr profile(raw_profile);
-  profile->color_primaries = static_cast<heif_color_primaries>(
-      options.output_gamut == "rec709" ? 1 : options.output_gamut == "p3" ? 12 : 9);
-  profile->transfer_characteristics = static_cast<heif_transfer_characteristics>(
-      options.output_transfer == "hlg" ? 18 : 16);
-  profile->matrix_coefficients = static_cast<heif_matrix_coefficients>(9);
-  profile->full_range_flag = 1;
-  require_heif(heif_image_set_nclx_color_profile(image.get(), profile.get()), "set direct PQ AVIF NCLX");
+  NclxPtr profile;
+  if (options.diagnostic_icc_only) {
+    const auto icc = make_windows_compatible_pq_icc(options.output_gamut == "p3");
+    require_heif(heif_image_set_raw_color_profile(image.get(), "rICC", icc.data(), icc.size()),
+                 "set actual ICC-only direct PQ AVIF profile");
+  }
+  if (!options.diagnostic_icc_only) {
+    heif_color_profile_nclx* raw_profile = heif_nclx_color_profile_alloc();
+    if (!raw_profile) throw std::bad_alloc();
+    profile.reset(raw_profile);
+    profile->color_primaries = static_cast<heif_color_primaries>(
+        options.output_gamut == "rec709" ? 1 : options.output_gamut == "p3" ? 12 : 9);
+    profile->transfer_characteristics = static_cast<heif_transfer_characteristics>(
+        options.output_transfer == "hlg" ? 18 : 16);
+    profile->matrix_coefficients = static_cast<heif_matrix_coefficients>(9);
+    profile->full_range_flag = 1;
+    require_heif(heif_image_set_nclx_color_profile(image.get(), profile.get()), "set direct PQ AVIF NCLX");
+  }
   require_heif(heif_image_add_plane(image.get(), heif_channel_interleaved,
                                     static_cast<int>(decoded.info.width), static_cast<int>(decoded.info.height), 10),
                "allocate direct PQ AVIF RGB10 plane");
@@ -2041,7 +2521,8 @@ void encode_gainmap_avif(const std::filesystem::path& path,
 }
 
 Verification decode_avif(const std::filesystem::path& path,
-                         const std::vector<uint16_t>* expected = nullptr) {
+                         const std::vector<uint16_t>* expected = nullptr,
+                         bool expect_icc_only = false) {
   auto opened = open_heif(path);
   SourceInfo info = inspect_opened(path, opened);
   Verification v;
@@ -2051,12 +2532,17 @@ Verification decode_avif(const std::filesystem::path& path,
   const bool p3 = info.primaries == 12 && info.transfer == 16 && info.matrix == 9 && info.full_range;
   const bool hlg = (info.primaries == 9 || info.primaries == 12) &&
                    info.transfer == 18 && info.matrix == 9 && info.full_range;
-  const bool color_ok = rec2020 || p3 || hlg;
+  const bool icc_hdr = info.icc_present && !info.native_color_present &&
+                       (info.primaries == 9 || info.primaries == 12) &&
+                       (info.transfer == 16 || info.transfer == 18) &&
+                       info.resolved_signaling_source == "ICC";
+  const bool color_ok = expect_icc_only ? icc_hdr : (rec2020 || p3 || hlg);
   v.color_encoding = rec2020 ? "direct Rec.2020/PQ full-range CICP 9/16/9" :
                      p3 ? "direct Display P3/PQ full-range CICP 12/16/9" :
                      hlg ? (info.primaries == 12 ? "direct Display P3/HLG full-range CICP 12/18/9" :
                                                   "direct Rec.2020/HLG full-range CICP 9/18/9") :
-                     "unexpected AVIF CICP";
+                     icc_hdr ? "direct HDR from ICC; native NCLX absent" :
+                     "unexpected AVIF color signaling";
   OptionsPtr options(heif_decoding_options_alloc());
   if (!options) throw std::bad_alloc();
   options->convert_hdr_to_8bit = 0; options->ignore_transformations = 0; options->output_image_nclx_profile_passthrough = 1;
@@ -2089,8 +2575,9 @@ Verification decode_avif(const std::filesystem::path& path,
   v.checks.push_back(info.chroma == "4:4:4" ? "AV1 chroma is 4:4:4" : "AV1 chroma is not 4:4:4");
   v.checks.push_back(color_ok
       ? (hlg ? "BT.2020/HLG/BT.2020-NCL full-range signaling"
-             : "BT.2020/PQ/BT.2020-NCL full-range signaling")
-      : "AVIF CICP mismatch");
+             : expect_icc_only ? "actual embedded PQ ICC; native NCLX absent"
+                               : "BT.2020/PQ/BT.2020-NCL full-range signaling")
+      : "AVIF HDR signaling mismatch");
   if (expected) v.checks.push_back("lossy RGB16-domain reconstruction error recorded");
   v.passed = info.width > 0 && info.height > 0 && info.bit_depth == 10 && info.chroma == "4:4:4" && color_ok;
   return v;
@@ -3275,7 +3762,10 @@ DecodedImage decode_input_uncached(const std::filesystem::path& path,
   orientation::set_xmp_orientation_to_one(decoded.xmp);
   decoded.info.orientation_normalized = true;
   decoded.timings.orientation_ms += elapsed_ms(orientation_start);
-  report(progress, 42, "Canonical high-precision HDR master ready");
+  report(progress, 42, decoded.info.asset_kind == "direct-hdr" ||
+                       decoded.info.asset_kind == "gain-map-hdr"
+      ? "Canonical high-precision HDR master ready"
+      : "Source decoded; no HDR representation found");
   return decoded;
 }
 
@@ -3430,6 +3920,30 @@ json source_json(const SourceInfo& i) {
                  {"iccPresent", i.icc_present},
                  {"metadata", {{"exif", i.exif_status}, {"xmp", i.xmp_status},
                                 {"icc", i.icc_status}, {"orientation", i.orientation_status}}}};
+  result["nativeSignal"] = {{"present", i.native_color_present},
+                            {"description", i.native_color_description},
+                            {"primaries", i.native_primaries},
+                            {"transfer", i.native_transfer},
+                            {"matrix", i.native_matrix},
+                            {"range", !i.native_range_known ? "unknown" :
+                                      i.native_full_range ? "full" : "limited"}};
+  result["iccSignal"] = {{"present", i.icc_present},
+                         {"description", i.icc_description},
+                         {"version", i.icc_version},
+                         {"cicpPresent", i.icc_cicp_present},
+                         {"primaries", i.icc_primaries},
+                         {"transfer", i.icc_transfer},
+                         {"transferName", i.icc_transfer_interpretation},
+                         {"matrix", i.icc_matrix},
+                         {"range", i.icc_cicp_present ?
+                                   (i.icc_full_range ? "full" : "limited") : "unknown"}};
+  result["resolvedColor"] = {{"source", i.resolved_signaling_source},
+                             {"conflict", i.color_signaling_conflict},
+                             {"primaries", i.primaries},
+                             {"transfer", i.transfer},
+                             {"transferName", public_transfer_name(i.transfer)},
+                             {"matrix", i.matrix},
+                             {"representation", i.asset_kind}};
   if (i.gain_map_present) {
     result["gainMapFamily"] = i.gain_map_family;
     if (i.base_item_id || i.gain_map_item_id || i.tone_map_item_id) {
@@ -3519,6 +4033,16 @@ ConversionResult convert(const std::filesystem::path& input,
   if (options.output_transfer != "pq" && options.output_transfer != "hlg") {
     throw std::runtime_error("output transfer must be pq or hlg");
   }
+  if (options.diagnostic_icc_only && options.output_transfer != "pq") {
+    throw std::runtime_error("ICC-only regression fixtures are limited to PQ");
+  }
+  if (options.diagnostic_icc_only && options.output_gamut == "rec709") {
+    throw std::runtime_error("diagnostic ICC-only fixture supports Rec.2020 or Display P3");
+  }
+  if (options.diagnostic_icc_only && options.mode != "png-pq16" &&
+      options.mode != "jxl-pq16" && options.mode != "avif-pq10") {
+    throw std::runtime_error("diagnostic ICC-only fixture is supported for PNG, JPEG XL, and AVIF");
+  }
   if (options.output_representation != "direct" &&
       options.output_representation != "gainmap") {
     throw std::runtime_error("output representation must be direct or gainmap");
@@ -3540,6 +4064,10 @@ ConversionResult convert(const std::filesystem::path& input,
     check_cancel(cancel);
     auto decoded_pointer = decode_input(input, progress, cancel, timings);
     const DecodedImage& decoded = *decoded_pointer;
+    if (decoded.info.asset_kind != "direct-hdr" &&
+        decoded.info.asset_kind != "gain-map-hdr") {
+      throw std::runtime_error("No HDR data");
+    }
     const HdrStats stats = measure_hdr(decoded, options.target_peak_nits);
     std::vector<uint8_t> bytes;
     Verification verification;
@@ -3678,7 +4206,9 @@ ConversionResult convert(const std::filesystem::path& input,
       report(progress, 88, "Verifying PNG RGB16 equality and cICP signaling");
       const auto verification_start = Clock::now();
       verification = decode_png(bytes, &pixels,
-                                options.output_transfer == "pq" && options.embed_hdr_icc);
+                                options.diagnostic_icc_only ||
+                                    (options.output_transfer == "pq" && options.embed_hdr_icc),
+                                options.diagnostic_icc_only);
       timings.verification_ms = elapsed_ms(verification_start);
       attach_hdr_stats(verification, stats);
     } else if (options.mode == "tiff-pq16") {
@@ -3748,7 +4278,7 @@ ConversionResult convert(const std::filesystem::path& input,
       check_cancel(cancel);
       report(progress, 88, "Verifying AV1 10-bit 4:4:4 and HDR CICP signaling");
       const auto verification_start = Clock::now();
-      verification = decode_avif(temp, &pixels);
+      verification = decode_avif(temp, &pixels, options.diagnostic_icc_only);
       timings.verification_ms = elapsed_ms(verification_start);
       bytes = read_file(temp);
       attach_hdr_stats(verification, stats);

@@ -88,7 +88,11 @@ Assert-Near ([math]::Pow(2, $jpegInfo.gainMapMetadata.alternateHdrHeadroom)) 5.3
 $xiaomiPositive = Invoke-Inspect $xiaomiHdrJpeg
 Assert-True ($xiaomiPositive.assetKind -eq "gain-map-hdr" -and $xiaomiPositive.gainMapPresent) "Xiaomi Ultra HDR JPEG positive fixture"
 $xiaomiNegative = Invoke-Inspect $xiaomiSdrHeic
-Assert-True ($xiaomiNegative.assetKind -eq "non-PQ/unknown" -and -not $xiaomiNegative.gainMapPresent -and $xiaomiNegative.color.transfer -ne 16) "Xiaomi HEIC SDR negative fixture"
+Assert-True (($xiaomiNegative.assetKind -eq "non-HDR" -or
+              $xiaomiNegative.assetKind -eq "non-PQ/unknown") -and
+             -not $xiaomiNegative.gainMapPresent -and
+             $xiaomiNegative.color.transfer -ne 16 -and
+             $xiaomiNegative.color.transfer -ne 18) "Xiaomi HEIC SDR negative fixture"
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $cases = @(

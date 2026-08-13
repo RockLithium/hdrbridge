@@ -1,6 +1,6 @@
 # HDR color pipeline
 
-HDR Bridge reads actual source signaling rather than assuming a camera model or file extension implies a transfer function. CICP transfer 16 is PQ/ST 2084; transfer 18 is HLG/BT.2100.
+HDR Bridge reads actual source signaling rather than assuming a camera model or file extension implies a transfer function. The input resolver records container-native signaling, embedded ICC information and format-specific HDR representations independently, then resolves the source primaries and transfer. Native signaling includes HEIF/AVIF NCLX, PNG cICP and JPEG XL structured color encoding. A valid ICC profile can also identify a direct-HDR input when native signaling is absent; matching native and ICC signals are reported together, while conflicts remain visible in Inspector. In either source, CICP transfer 16 is PQ/ST 2084 and transfer 18 is HLG/BT.2100.
 
 ## Canonical HDR master
 

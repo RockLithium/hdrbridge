@@ -356,15 +356,27 @@ function selectFile(file) {
 function showInspector(info) {
   state.inspectInfo = info;
   elements.inspector.hidden = false;
-  const kind = info.assetKind === "gain-map-hdr" ? tr("gainMapHdr") : tr("directHdr");
+  const kind = info.assetKind === "gain-map-hdr" ? tr("gainMapHdr") :
+    info.assetKind === "direct-hdr" ? tr("directHdr") : "Non-HDR / SDR";
   elements.inspectKind.textContent = `${kind} · ${info.format || info.containerBrand}`;
   elements.inspectRaster.textContent = `${info.width}×${info.height} · ${info.bitDepth || "?"}-bit · ${info.pixelFormat || info.chroma}`;
-  const primaries = info.color?.primaries === 9 ? "BT.2020" :
-    info.color?.primaries === 12 ? "Display P3" : `CICP ${info.color?.primaries ?? "?"}`;
+  const gamutName = (value) => value === 1 ? "BT.709" : value === 9 ? "BT.2020" :
+    value === 12 ? "Display P3" : `CICP ${value ?? "?"}`;
+  const primaries = gamutName(info.color?.primaries);
   const transfer = info.color?.transferName || `CICP ${info.color?.transfer ?? "?"}`;
+  const native = info.nativeSignal?.present
+    ? `Native ${gamutName(info.nativeSignal.primaries)} / ${info.nativeSignal.transfer}`
+    : "Native absent";
+  const icc = info.iccSignal?.present
+    ? `ICC ${info.iccSignal.description || "present"}${info.iccSignal.cicpPresent
+      ? ` (${gamutName(info.iccSignal.primaries)} / ${info.iccSignal.transferName})` : ""}`
+    : "ICC absent";
+  const resolved = info.resolvedColor
+    ? `Resolved ${primaries} / ${transfer} from ${info.resolvedColor.source}${info.resolvedColor.conflict ? " (conflict)" : ""}`
+    : `${primaries} / ${transfer}`;
   elements.inspectSignal.textContent = info.gainMapPresent
     ? `${info.gainMapFamily} · ${info.gainMapSize.width}×${info.gainMapSize.height} · ${info.gainMapLayout.channels} channel`
-    : `${primaries} · ${transfer} · Matrix ${info.color?.matrix ?? "?"} · ${info.range}`;
+    : `${native} · ${icc} · ${resolved} · ${info.range}`;
   const metadata = Object.entries(info.metadata || {})
     .filter(([, status]) => status === "present")
     .map(([name]) => name.toUpperCase());

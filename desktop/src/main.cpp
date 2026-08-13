@@ -230,7 +230,7 @@ struct AppState {
   bool dark = false;
   int right_panel_width = 620;
   int activity_panel_height = 230;
-  int files_panel_height = 245;
+  int files_panel_height = 270;
   int last_format_index = -1;
   int last_transfer_index = -1;
   int last_representation_index = -1;
@@ -723,11 +723,44 @@ std::wstring source_summary(const hdrbridge::SourceInfo& i) {
     out << L"\r\n\r\nSOURCE SIGNAL\r\n" << i.bit_depth << L"-bit  "
         << widen(i.pixel_format) << L"  •  "
         << (!i.range_known ? L"Unknown range" : i.full_range ? L"Full range" : L"Limited range")
-        << L"\r\n" << widen(i.color_signal_kind);
-    if (i.color_signal_kind.find("WIC pixel format") == std::string::npos) {
-      out << L"  " << i.primaries << L" / " << i.transfer << L" / " << i.matrix;
+        << L"\r\n\r\nNATIVE SIGNAL\r\n";
+    if (i.native_color_present) {
+      out << widen(i.native_color_description) << L"  " << i.native_primaries
+          << L" / " << i.native_transfer << L" / " << i.native_matrix
+          << L"\r\n" << primaries_label(i.native_primaries) << L" / "
+          << transfer_label(i.native_transfer);
+    } else {
+      out << L"CICP/NCLX: Absent / Unspecified";
     }
-    out << L"\r\nPrimaries  " << primaries_label(i.primaries)
+    out << L"\r\n\r\nICC SIGNAL\r\n";
+    if (i.icc_present) {
+      out << L"Present\r\nProfile  "
+          << (i.icc_description.empty() ? L"Unreadable / unnamed" : widen(i.icc_description));
+      if (!i.icc_version.empty()) out << L"\r\nICC version  " << widen(i.icc_version);
+      if (i.icc_cicp_present) {
+        out << L"\r\nICC CICP  " << i.icc_primaries << L" / " << i.icc_transfer
+            << L" / " << i.icc_matrix << L" / " << (i.icc_full_range ? 1 : 0)
+            << L"\r\n" << primaries_label(i.icc_primaries) << L" / "
+            << transfer_label(i.icc_transfer);
+      } else {
+        out << L"\r\nICC CICP  Absent";
+        if (i.icc_transfer != 0 || i.icc_primaries != 0) {
+          out << L"\r\nICC transform  " << primaries_label(i.icc_primaries)
+              << L" / " << transfer_label(i.icc_transfer);
+        }
+      }
+      if (!i.icc_transfer_interpretation.empty()) {
+        out << L"\r\nInterpretation  " << widen(i.icc_transfer_interpretation);
+      }
+    } else {
+      out << L"Absent";
+    }
+    out << L"\r\n\r\nRESOLVED COLOR\r\n"
+        << primaries_label(i.primaries) << L" / " << transfer_label(i.transfer)
+        << L"\r\nHDR signaling  " << widen(i.resolved_signaling_source)
+        << (i.color_signaling_conflict ? L" — Color signaling conflict" : L"")
+        << L"\r\nRepresentation  " << widen(i.asset_kind)
+        << L"\r\nPrimaries  " << primaries_label(i.primaries)
         << L"\r\nTransfer   " << transfer_label(i.transfer)
         << L"\r\nMatrix     " << matrix_label(i.matrix);
   }
@@ -2280,7 +2313,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         case IDC_RESET_LAYOUT: {
           state->right_panel_width = 620;
           state->activity_panel_height = 230;
-          state->files_panel_height = 245;
+          state->files_panel_height = 270;
           RECT rect{};
           GetClientRect(window, &rect);
           layout(state, rect.right, rect.bottom);

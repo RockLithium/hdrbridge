@@ -51,21 +51,11 @@ jobs:
           @"
           Windows x64 portable release of HDR Bridge.
 
-          ### HDR input
-          - Direct PQ/HLG HEIF/HIF, AVIF, PNG, TIFF and JPEG XL
-          - Apple Adaptive HDR HEIC/JPEG
-          - ISO Ultra HDR JPEG, including mono and RGB gain maps
-          - Gain-map AVIF and gain-map TIFF
-          - Gain-map JPEG XL (`jhgm`)
-          - FP16 scRGB JPEG XR
-
-          ### HDR output
-          - Faithful/Auto Ultra HDR JPEG
-          - RGB16 PQ/HLG PNG and JPEG XL
-          - RGB gain-map JPEG XL and AVIF
-          - FP16 linear scRGB JPEG XR
-          - 10-bit 4:4:4 PQ/HLG AVIF
-          - RGB16 PQ TIFF
+          ### Changes
+          - Improved HDR color-signaling inspection and source classification
+          - Improved PNG and TIFF interoperability
+          - Refined Source Inspector details and the default desktop layout
+          - Updated measured compatibility results
 
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 
