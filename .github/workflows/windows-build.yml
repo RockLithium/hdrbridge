@@ -3,7 +3,31 @@ name: Windows build
 on:
   push:
     branches: [main]
+    paths:
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "core/**"
+      - "desktop/**"
+      - "ports-overlay/**"
+      - "scripts/**"
+      - "tests/**"
+      - "vcpkg.json"
+      - ".github/workflows/windows-build.yml"
+      - ".github/workflows/windows-release.yml"
+      - ".github/workflows/release.yml"
   pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "core/**"
+      - "desktop/**"
+      - "ports-overlay/**"
+      - "scripts/**"
+      - "tests/**"
+      - "vcpkg.json"
+      - ".github/workflows/windows-build.yml"
+      - ".github/workflows/windows-release.yml"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 jobs:
