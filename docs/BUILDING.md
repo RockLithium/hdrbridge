@@ -22,8 +22,7 @@ cmake --build --preset windows-release
 ctest --test-dir build-vs -C Release --output-on-failure
 ```
 
-The GUI is `build-vs\bin\Release\hdrbridge.exe`. Developer-only CLI and test
-targets are built alongside it when `BUILD_TESTING` is enabled.
+The GUI is `build-vs\bin\Release\hdrbridge.exe`. Developer-only CLI and test targets are built alongside it when `BUILD_TESTING` is enabled.
 
 ## Portable package
 
@@ -31,9 +30,7 @@ targets are built alongside it when `BUILD_TESTING` is enabled.
 .\scripts\package-windows.ps1
 ```
 
-The archive contains the GUI, required runtime DLLs, license texts and public
-documentation. It does not include the CLI, test executables, build tree,
-fixtures or generated test output.
+The archive contains the GUI, required runtime DLLs, license texts and public documentation. It does not include the CLI, test executables, build tree, fixtures or generated test output.
 
 ## Main dependencies
 
@@ -48,6 +45,4 @@ fixtures or generated test output.
 | Little CMS | ICC parsing and profile generation |
 | Windows Imaging Component | FP16 and experimental RGB10 JPEG XR |
 
-Exact license texts are collected into the portable archive. The tested
-dependency versions are recorded in `vcpkg.json`, the vcpkg lock revision and
-the libjxl overlay.
+Exact license texts are collected into the portable archive. The tested dependency versions are recorded in `vcpkg.json`, the vcpkg lock revision and the libjxl overlay.
