@@ -83,7 +83,8 @@ self.addEventListener("message", async ({ data }) => {
             data.encodingValue,
             data.lossless ? 1 : 0, data.copyExif ? 1 : 0,
             data.copyXmp ? 1 : 0, data.gainResolution,
-            data.gainChannels === "rgb" ? 1 : 0, data.peak);
+            data.gainChannels === "rgb" ? 1 : 0, data.peak,
+            data.tiffCompressed ? 1 : 0);
           if (status !== 0) {
             throw new Error(readCString(core, core._hb_last_error()));
           }

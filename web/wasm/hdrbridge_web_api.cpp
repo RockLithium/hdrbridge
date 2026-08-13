@@ -130,7 +130,7 @@ EMSCRIPTEN_KEEPALIVE int hb_convert_asset(
     int format, int primaries, int transfer, int output_representation,
     int encoding_value,
     int lossless, int copy_exif, int copy_xmp, int gain_scale,
-    int gain_channels, float target_peak_nits) {
+    int gain_channels, float target_peak_nits, int tiff_compressed) {
   output_bytes.clear();
   info_json = "{}";
   last_error.clear();
@@ -153,6 +153,7 @@ EMSCRIPTEN_KEEPALIVE int hb_convert_asset(
     options.target_peak_nits = target_peak_nits;
     options.png_compression_level = std::clamp(encoding_value, 1, 9);
     options.tiff_compression_level = std::clamp(encoding_value, 1, 9);
+    options.tiff_compressed = tiff_compressed != 0;
     options.copy_exif = copy_exif != 0;
     options.copy_xmp = copy_xmp != 0;
     options.overwrite = true;

@@ -6,12 +6,16 @@ or server-side conversion path.
 
 The WebAssembly module compiles the desktop project's HDR core and portable codec
 libraries. It supports direct PQ/HLG HEIF/HIF, Apple Adaptive HDR HEIC/JPEG,
-Ultra HDR JPEG, gain-map AVIF, Adobe gain-map TIFF, direct HDR AVIF/PNG/TIFF, JPEG XL and
+Ultra HDR JPEG, gain-map AVIF, gain-map TIFF, direct HDR AVIF/PNG/TIFF, JPEG XL and
 FP16 scRGB JPEG XR input, including ISO gain-map JPEG XL. Outputs are Ultra HDR
-JPEG, HDR PNG, JPEG XL, FP16 scRGB JPEG XR, HDR AVIF and direct HDR TIFF. JPEG
+JPEG, HDR PNG, direct HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and HDR AVIF. JPEG
 XL and AVIF can be written as direct PQ/HLG or ISO gain-map HDR. Their gain-map
 outputs use RGB maps only and default to half resolution; Ultra HDR JPEG retains
 its independent Mono/RGB choice.
+
+Direct HDR TIFF uses the same HDR-aware CICP ICC and large-strip layout as the
+Windows application. Deflate compression is the default; uncompressed output
+is available from the format controls.
 
 Native browser HDR presentation is used for JPEG, PNG and AVIF previews. If the
 browser cannot display an output format, conversion and download remain available

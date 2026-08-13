@@ -1,6 +1,6 @@
 param(
     [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build-vs\bin\Release"),
-    [string]$Version = "1.1.0",
+    [string]$Version = "1.1.1",
     [string]$Destination = (Join-Path $PSScriptRoot "..\dist\HDRBridge-v$Version-Windows-x64")
 )
 

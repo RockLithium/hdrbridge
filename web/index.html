@@ -43,10 +43,10 @@
       <div class="format-grid" id="format-grid">
         <button class="option-box" type="button" data-format="uhdr" data-i18n="formatUhdr">Ultra HDR JPEG</button>
         <button class="option-box active" type="button" data-format="png" data-i18n="formatPng">HDR PNG</button>
+        <button class="option-box" type="button" data-format="tiff" data-i18n="formatTiff">HDR TIFF</button>
         <button class="option-box" type="button" data-format="jxl">JPEG XL</button>
         <button class="option-box" type="button" data-format="jxr">JPEG XR</button>
         <button class="option-box" type="button" data-format="avif" data-i18n="formatAvif">HDR AVIF</button>
-        <button class="option-box" type="button" data-format="tiff" data-i18n="formatTiff">HDR TIFF</button>
       </div>
       <div class="availability" id="availability">HDR PNG is available now for direct PQ/HLG HEIF/HIF input.</div>
     </section>
@@ -107,6 +107,14 @@
         </div>
       </div>
 
+      <div class="parameter" id="tiff-compression-row" hidden>
+        <span class="parameter-label">Compression</span>
+        <div class="inline-options" data-setting="tiffCompression">
+          <button class="mini-option active" type="button" data-value="compressed">Compressed</button>
+          <button class="mini-option" type="button" data-value="uncompressed">Uncompressed</button>
+        </div>
+      </div>
+
       <div class="parameter" id="encoding-row">
         <span class="parameter-label" id="slider-label">PNG Compression</span>
         <div class="slider-line">
@@ -133,6 +141,6 @@
       <button id="download-button" class="main-btn download-button" type="button" disabled data-i18n="download">DOWNLOAD</button>
     </div>
   </main>
-  <script type="module" src="./src/app.js?v=7"></script>
+  <script type="module" src="./src/app.js?v=8"></script>
 </body>
 </html>

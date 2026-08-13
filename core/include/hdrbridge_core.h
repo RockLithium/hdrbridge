@@ -111,6 +111,9 @@ struct ConversionOptions {
   std::string png_icc_name_override;
   int png_compression_level = 4;
   int tiff_compression_level = 6;
+  // Direct HDR TIFF defaults to Adobe Deflate without a horizontal predictor.
+  // When false, the same single-strip RGB16 raster is written uncompressed.
+  bool tiff_compressed = true;
   bool copy_exif = true;
   bool copy_xmp = true;
   bool overwrite = false;

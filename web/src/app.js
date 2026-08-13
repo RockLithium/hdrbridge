@@ -17,8 +17,8 @@ const translations = {
     converted: "Converted {value}", peakNits: "peak {value} nit",
     formatCopy: {
       uhdr: "Ultra HDR JPEG with a faithful ISO gain map.", png: "16-bit HDR PNG with standard cICP signaling.",
-      jxl: "JPEG XL edit/master output with HDR color signaling.", jxr: "FP16 linear scRGB JPEG XR edit/master output.",
-      avif: "Direct 10-bit HDR AVIF output.", tiff: "Direct 16-bit PQ HDR TIFF output.",
+      jxl: "JPEG XL master output with HDR color signaling.", jxr: "FP16 linear scRGB JPEG XR for Windows workflows.",
+      avif: "Compact direct 10-bit HDR AVIF output.", tiff: "Professional 16-bit PQ HDR TIFF interchange output.",
     },
   },
   "zh-Hans": {
@@ -99,6 +99,7 @@ const state = {
   lossless: true,
   copyExif: true,
   copyXmp: true,
+  tiffCompression: "compressed",
   encodingValues: { uhdr: 95, png: 4, jxl: 95, jxr: 95, avif: 95, tiff: 6 },
   requestId: 0,
   outputUrl: null,
@@ -128,6 +129,7 @@ const elements = {
   gainChannelsRow: document.querySelector("#gain-channels-row"),
   peakRow: document.querySelector("#peak-row"),
   losslessOption: document.querySelector("#lossless-option"),
+  tiffCompressionRow: document.querySelector("#tiff-compression-row"),
   encodingRow: document.querySelector("#encoding-row"),
   sliderLabel: document.querySelector("#slider-label"),
   slider: document.querySelector("#encoding-slider"),
@@ -272,7 +274,13 @@ function configureParameters() {
   } else {
     parameters.insertBefore(elements.transferRow, elements.gainResolutionRow);
   }
-  elements.losslessOption.hidden = !(isJxl || isJxr);
+  elements.losslessOption.hidden = !(isJxl || isJxr || state.format === "png" || state.format === "tiff");
+  elements.losslessOption.textContent = tr("lossless");
+  elements.losslessOption.dataset.toggle = "lossless";
+  const fixedLossless = state.format === "png" || state.format === "tiff";
+  elements.losslessOption.classList.toggle("active", fixedLossless || state.lossless);
+  elements.losslessOption.disabled = fixedLossless;
+  elements.tiffCompressionRow.hidden = state.format !== "tiff";
   elements.encodingRow.hidden = (isJxl || isJxr) && state.lossless;
   document.querySelector('[data-setting="primaries"] [data-value="1"]').hidden = !isGainMap;
 
@@ -289,11 +297,15 @@ function configureParameters() {
   }
   elements.slider.value = String(state.encodingValues[state.format]);
   elements.sliderValue.value = elements.slider.value;
+  elements.slider.disabled = state.format === "tiff" && state.tiffCompression === "uncompressed";
+  elements.sliderValue.classList.toggle("disabled",
+    state.format === "tiff" && state.tiffCompression === "uncompressed");
 
   updateOptionButtons("primaries");
   updateOptionButtons("transfer");
   updateOptionButtons("peak");
   updateOptionButtons("gainChannels");
+  updateOptionButtons("tiffCompression");
 }
 
 function selectFormat(format) {
@@ -434,7 +446,8 @@ async function convert() {
       transfer: state.transfer,
       outputRepresentation: state.outputRepresentation,
       encodingValue: state.encodingValues[state.format],
-      lossless: state.lossless,
+      lossless: state.format === "png" || state.format === "tiff" ? true : state.lossless,
+      tiffCompressed: state.tiffCompression === "compressed",
       copyExif: state.copyExif,
       copyXmp: state.copyXmp,
       gainResolution: state.gainResolution,

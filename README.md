@@ -15,7 +15,7 @@ Supported input families include:
 - direct PQ or HLG HEIF/HIF, AVIF, PNG, TIFF and JPEG XL;
 - Apple Adaptive HDR HEIC and JPEG;
 - ISO Ultra HDR JPEG, including mono and RGB gain maps;
-- gain-map AVIF and Adobe gain-map TIFF;
+- gain-map AVIF and gain-map TIFF;
 - gain-map JPEG XL (`jhgm`);
 - FP16 scRGB JPEG XR.
 
@@ -23,13 +23,18 @@ Available outputs:
 
 - Ultra HDR JPEG (Faithful/Auto);
 - 16-bit HDR PNG in PQ or HLG;
+- 16-bit PQ HDR TIFF with optional lossless Deflate compression;
 - 16-bit JPEG XL in PQ or HLG;
 - RGB gain-map JPEG XL;
 - FP16 linear scRGB JPEG XR;
 - 10-bit 4:4:4 HDR AVIF in PQ or HLG;
 - RGB gain-map AVIF;
-- 16-bit PQ HDR TIFF;
 - packed RGB10 JPEG XR as an experimental option.
+
+The desktop order reflects observed interoperability: Ultra HDR JPEG, HDR PNG,
+HDR TIFF, JPEG XL, FP16 scRGB JPEG XR, AVIF, then experimental RGB10 JPEG XR.
+Direct HDR TIFF uses an HDR-aware CICP ICC and an application-compatible large-
+strip layout. Deflate compression is enabled by default and may be disabled.
 
 The Inspector reports the encoded source representation, metadata, gain-map
 components and reconstructed HDR separately. The task queue is sequential so
@@ -61,8 +66,8 @@ developer tools and are not included in the normal Windows release archive.
 The browser version lives in [`web/`](web/) and is built independently from
 the desktop application. It runs the portable HDR core in a Web Worker and
 supports the same principal direct-HDR and gain-map input families. Browser
-outputs are Ultra HDR JPEG, HDR PNG, JPEG XL, FP16 scRGB JPEG XR, direct HDR
-AVIF and direct HDR TIFF. Files remain on the device.
+outputs are Ultra HDR JPEG, HDR PNG, direct HDR TIFF, JPEG XL, FP16 scRGB JPEG
+XR and direct HDR AVIF. Files remain on the device.
 
 ## Documentation
 

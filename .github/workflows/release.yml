@@ -55,7 +55,7 @@ jobs:
           - Direct PQ/HLG HEIF/HIF, AVIF, PNG, TIFF and JPEG XL
           - Apple Adaptive HDR HEIC/JPEG
           - ISO Ultra HDR JPEG, including mono and RGB gain maps
-          - Gain-map AVIF and Adobe gain-map TIFF
+          - Gain-map AVIF and gain-map TIFF
           - Gain-map JPEG XL (`jhgm`)
           - FP16 scRGB JPEG XR
 

@@ -34,7 +34,7 @@ try {
   core.stringToUTF8(extension, extensionPointer, extensionSize);
   const status = core._hb_convert_asset(
     pointer, input.byteLength, extensionPointer, format, primaries, transfer,
-    representation, encoding, 1, 1, 1, 2, 0, 0);
+    representation, encoding, 1, 1, 1, 2, 0, 0, 1);
   if (status !== 0) throw new Error(readCString(core._hb_last_error()));
   const outputSize = core._hb_output_size();
   const outputPointer = core._hb_output_data();
