@@ -109,6 +109,7 @@ const state = {
   language: "en-US",
   statusMessage: { key: "selectBegin", kind: "", replacements: {} },
   inspectInfo: null,
+  previewState: "no-file",
 };
 
 const elements = {
@@ -146,6 +147,14 @@ function tr(key) {
   return translations[state.language]?.[key] ?? translations["en-US"][key] ?? key;
 }
 
+function renderPreviewPlaceholder() {
+  if (state.previewState === "unavailable") {
+    elements.preview.innerHTML = `<span class="preview-placeholder">${tr("previewUnavailable")}</span>`;
+  } else if (state.previewState === "no-file") {
+    elements.preview.innerHTML = `<span class="preview-placeholder">${tr("noFile")}</span>`;
+  }
+}
+
 function applyLanguage(language) {
   state.language = translations[language] ? language : "en-US";
   document.documentElement.lang = state.language;
@@ -160,6 +169,7 @@ function applyLanguage(language) {
     elements.fileState.textContent = `${humanBytes(state.file.size)} · ${tr("localFile")}`;
   }
   if (state.inspectInfo) showInspector(state.inspectInfo);
+  renderPreviewPlaceholder();
   renderTranslatedStatus();
   configureParameters();
   elements.availability.textContent = translations[state.language].formatCopy[state.format];
@@ -348,7 +358,8 @@ function selectFile(file) {
   elements.fileName.textContent = file.name;
   elements.fileState.textContent = `${humanBytes(file.size)} · ${tr("localFile")}`;
   elements.inspector.hidden = true;
-  elements.preview.innerHTML = `<span class="preview-placeholder">${tr("previewUnavailable")}</span>`;
+  state.previewState = "unavailable";
+  renderPreviewPlaceholder();
   setBusy(false);
   inspectFile(file);
 }
@@ -402,13 +413,21 @@ function handleWorkerMessage({ data }) {
     setBusy(false);
     const blob = new Blob([data.buffer], { type: data.mime });
     state.outputUrl = URL.createObjectURL(blob);
-    if (["uhdr", "png", "avif"].includes(data.format)) {
+    if (["uhdr", "png", "avif", "jxl"].includes(data.format)) {
       const image = new Image();
       image.alt = "Converted HDR output";
+      image.addEventListener("error", () => {
+        if (image.parentNode === elements.preview) {
+          state.previewState = "unavailable";
+          renderPreviewPlaceholder();
+        }
+      }, { once: true });
       image.src = state.outputUrl;
       elements.preview.replaceChildren(image);
+      state.previewState = "image";
     } else {
-      elements.preview.innerHTML = `<span class="preview-placeholder">${tr("previewUnavailable")}</span>`;
+      state.previewState = "unavailable";
+      renderPreviewPlaceholder();
     }
     const stem = state.file.name.replace(/\.[^.]+$/, "");
     const suffixes = {
