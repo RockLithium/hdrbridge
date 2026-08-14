@@ -1,4 +1,6 @@
 let corePromise;
+const coreUrl = new URL(
+  "../public/codecs/hdrbridge/hdrbridge-core.wasm", import.meta.url).href;
 
 const formatIds = { uhdr: 0, png: 1, jxl: 2, jxr: 3, avif: 4, tiff: 5 };
 const formatInfo = {
@@ -10,13 +12,43 @@ const formatInfo = {
   tiff: { extension: "tiff", mime: "image/tiff" },
 };
 
-async function getCore() {
+async function downloadCore() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(coreUrl, {
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Conversion core download failed (HTTP ${response.status}).`);
+    }
+    return await response.arrayBuffer();
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Conversion core download timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function getCore(embeddedWasm) {
   if (!corePromise) {
-    corePromise = import("../public/codecs/hdrbridge/hdrbridge-core.mjs")
-      .then(({ default: createCore }) => createCore({
+    corePromise = (async () => {
+      const wasmBinary = embeddedWasm || await downloadCore();
+      const { default: createCore } = await import(
+        "../public/codecs/hdrbridge/hdrbridge-core.mjs");
+      return createCore({
+        wasmBinary: new Uint8Array(wasmBinary),
         locateFile: (name) => new URL(
           `../public/codecs/hdrbridge/${name}`, import.meta.url).href,
-      }));
+      });
+    })().catch((error) => {
+      corePromise = undefined;
+      throw error;
+    });
   }
   return corePromise;
 }
@@ -45,8 +77,7 @@ function withCString(core, value, operation) {
   }
 }
 
-async function withInput(buffer, operation) {
-  const core = await getCore();
+async function withInput(core, buffer, operation) {
   const input = new Uint8Array(buffer);
   const pointer = core._malloc(input.byteLength);
   if (!pointer) throw new Error("The browser could not allocate enough memory.");
@@ -59,10 +90,14 @@ async function withInput(buffer, operation) {
 }
 
 self.addEventListener("message", async ({ data }) => {
+  let stage = "core";
   try {
+    const core = await getCore(data.wasmBinary);
+    self.postMessage({ type: "core-ready", requestId: data.requestId });
+    stage = data.type;
     const extension = extensionOf(data.fileName);
     if (data.type === "inspect") {
-      const info = await withInput(data.buffer, (core, pointer, size) =>
+      const info = await withInput(core, data.buffer, (core, pointer, size) =>
         withCString(core, extension, (extensionPointer) => {
           if (core._hb_inspect_asset(pointer, size, extensionPointer) !== 0) {
             throw new Error(readCString(core, core._hb_last_error()));
@@ -74,7 +109,7 @@ self.addEventListener("message", async ({ data }) => {
     }
     if (data.type === "convert") {
       if (!(data.format in formatIds)) throw new Error("Unknown output format.");
-      const result = await withInput(data.buffer, (core, pointer, size) =>
+      const result = await withInput(core, data.buffer, (core, pointer, size) =>
         withCString(core, extension, (extensionPointer) => {
           const status = core._hb_convert_asset(
             pointer, size, extensionPointer, formatIds[data.format],
@@ -108,6 +143,7 @@ self.addEventListener("message", async ({ data }) => {
     self.postMessage({
       type: "error",
       requestId: data.requestId,
+      stage,
       message: error instanceof Error ? error.message : String(error),
     });
   }

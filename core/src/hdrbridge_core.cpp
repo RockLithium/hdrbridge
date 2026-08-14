@@ -599,7 +599,7 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
                           (result.info.primaries == 1 || result.info.primaries == 9 ||
                            result.info.primaries == 12);
   if (!direct_pq && !direct_hlg) {
-    throw std::runtime_error("HEIF/AVIF input is not supported direct PQ or BT.2100 HLG HDR");
+    return result;
   }
   if (result.info.color_signaling_conflict) {
     report(progress, 7,
@@ -1953,21 +1953,29 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
   png_read_info(png, info);
   png_uint_32 width = 0, height = 0; int bit_depth = 0, color_type = 0, interlace = 0, compression = 0, filter = 0;
   png_get_IHDR(png, info, &width, &height, &bit_depth, &color_type, &interlace, &compression, &filter);
-  if (bit_depth != 16 || color_type != PNG_COLOR_TYPE_RGB) png_error(png, "HDR PNG input must be RGB16");
-#if defined(_WIN32) || defined(__EMSCRIPTEN__)
-  png_set_swap(png);
-#endif
-  png_read_update_info(png, info);
   DecodedImage decoded;
   decoded.info.path = path;
   decoded.info.format = "PNG";
   decoded.info.container_brand = "PNG";
-  decoded.info.asset_kind = "direct-hdr";
+  decoded.info.asset_kind = "non-HDR";
   decoded.info.width = width; decoded.info.height = height;
-  decoded.info.codec = "PNG/DEFLATE"; decoded.info.profile = "RGB16";
-  decoded.info.pixel_format = "RGB16 integer";
+  decoded.info.codec = "PNG/DEFLATE";
+  const char* color_layout = "Unknown";
+  switch (color_type) {
+    case PNG_COLOR_TYPE_GRAY: color_layout = "Grayscale"; break;
+    case PNG_COLOR_TYPE_PALETTE: color_layout = "Indexed"; break;
+    case PNG_COLOR_TYPE_RGB: color_layout = "RGB"; break;
+    case PNG_COLOR_TYPE_GRAY_ALPHA: color_layout = "Grayscale + alpha"; break;
+    case PNG_COLOR_TYPE_RGB_ALPHA: color_layout = "RGBA"; break;
+    default: break;
+  }
+  decoded.info.profile = std::string(color_layout) + std::to_string(bit_depth);
+  decoded.info.pixel_format = std::to_string(bit_depth) + "-bit " + color_layout;
   decoded.info.color_signal_kind = "Unknown";
-  decoded.info.bit_depth = 16; decoded.info.chroma = "4:4:4 RGB";
+  decoded.info.bit_depth = static_cast<uint32_t>(bit_depth);
+  decoded.info.chroma = color_type == PNG_COLOR_TYPE_RGB ? "4:4:4 RGB" :
+                        color_type == PNG_COLOR_TYPE_RGB_ALPHA ? "4:4:4 RGBA" :
+                        color_layout;
   if (has_cicp) {
     decoded.info.native_color_present = true;
     decoded.info.native_primaries = cicp[0];
@@ -1989,10 +1997,6 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
   else if (has_icc && profile_name) decoded.info.profile = profile_name;
   resolve_color_signaling(decoded.info, true);
   decoded.info.color_signal_kind = decoded.info.resolved_signaling_source;
-  if (decoded.info.asset_kind != "direct-hdr") {
-    png_destroy_read_struct(&png, &info, nullptr);
-    throw std::runtime_error("PNG input has no supported direct PQ/HLG color signal");
-  }
   decoded.info.exif_status = "absent";
   decoded.info.xmp_status = "absent";
 #ifdef PNG_eXIf_SUPPORTED
@@ -2009,10 +2013,6 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
     decoded.info.orientation_status = "absent";
   }
 #endif
-  decoded.rgb.resize(static_cast<size_t>(width) * height * 3u);
-  std::vector<png_bytep> rows(height);
-  for (uint32_t y = 0; y < height; ++y) rows[y] = reinterpret_cast<png_bytep>(decoded.rgb.data() + static_cast<size_t>(y) * width * 3u);
-  png_read_image(png, rows.data());
   png_textp texts = nullptr; int text_count = 0;
   if (png_get_text(png, info, &texts, &text_count) > 0) {
     for (int i = 0; i < text_count; ++i) {
@@ -2025,6 +2025,46 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
       }
     }
   }
+  if (decoded.info.asset_kind != "direct-hdr") {
+    // A parsed header alone is not enough to call an SDR PNG decodable.
+    // Consume the complete image stream so truncated/corrupt IDAT data is a
+    // decode error, while avoiding allocation of a canonical HDR raster.
+    const int passes = png_set_interlace_handling(png);
+    png_read_update_info(png, info);
+    const png_size_t row_bytes = png_get_rowbytes(png, info);
+    if (height != 0 && row_bytes > std::numeric_limits<size_t>::max() / height) {
+      png_destroy_read_struct(&png, &info, nullptr);
+      throw std::runtime_error("PNG input dimensions are too large");
+    }
+    if (passes == 1) {
+      std::vector<png_byte> row(row_bytes);
+      for (png_uint_32 y = 0; y < height; ++y) png_read_row(png, row.data(), nullptr);
+    } else {
+      // Adam7 rows must retain earlier-pass data for libpng's combine step.
+      std::vector<png_byte> raster(static_cast<size_t>(row_bytes) * height);
+      for (int pass = 0; pass < passes; ++pass) {
+        for (png_uint_32 y = 0; y < height; ++y) {
+          png_read_row(png, raster.data() + static_cast<size_t>(y) * row_bytes, nullptr);
+        }
+      }
+    }
+    png_read_end(png, info);
+    png_destroy_read_struct(&png, &info, nullptr);
+    return decoded;
+  }
+  if (bit_depth != 16 || color_type != PNG_COLOR_TYPE_RGB) {
+    png_destroy_read_struct(&png, &info, nullptr);
+    throw std::runtime_error("direct HDR PNG input must be RGB16");
+  }
+  decoded.info.pixel_format = "RGB16 integer";
+#if defined(_WIN32) || defined(__EMSCRIPTEN__)
+  png_set_swap(png);
+#endif
+  png_read_update_info(png, info);
+  decoded.rgb.resize(static_cast<size_t>(width) * height * 3u);
+  std::vector<png_bytep> rows(height);
+  for (uint32_t y = 0; y < height; ++y) rows[y] = reinterpret_cast<png_bytep>(decoded.rgb.data() + static_cast<size_t>(y) * width * 3u);
+  png_read_image(png, rows.data());
   png_read_end(png, info);
   png_destroy_read_struct(&png, &info, nullptr);
   if (decoded.info.transfer == 18) {
@@ -2091,7 +2131,7 @@ void encode_tiff(const std::filesystem::path& path, const DecodedImage& decoded,
   const std::string description = p3 ? "HDR Bridge direct RGB16 Display P3 PQ" :
                                        "HDR Bridge direct RGB16 Rec.2020 PQ";
   TIFFSetField(tiff.get(), TIFFTAG_IMAGEDESCRIPTION, description.c_str());
-  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.1.2");
+  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.1.3");
   TIFFSetField(tiff.get(), TIFFTAG_ICCPROFILE, static_cast<uint32_t>(icc.size()), icc.data());
   std::vector<uint8_t> diagnostic_photoshop;
   std::vector<uint8_t> diagnostic_iptc;
@@ -2283,7 +2323,7 @@ DecodedImage decode_tiff_input(const std::filesystem::path& path) {
   if ((decoded.info.transfer != 16 && decoded.info.transfer != 18) ||
       (decoded.info.primaries != 1 && decoded.info.primaries != 9 &&
        decoded.info.primaries != 12)) {
-    throw std::runtime_error("TIFF input has no supported direct PQ/HLG ICC signal");
+    return decoded;
   }
   auto tiff = open_tiff(path, "r");
   uint16_t samples = 0, bits = 0, sample_format = SAMPLEFORMAT_UINT, photometric = 0, planar = 0;
@@ -2828,7 +2868,7 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
   require_hr(decoder->GetFrame(0, &frame), "read JPEG XR input frame");
   DecodedImage decoded;
   decoded.info.path = path; decoded.info.format = "JPEG XR"; decoded.info.container_brand = "JXR ";
-  decoded.info.asset_kind = "direct-hdr"; decoded.info.codec = "JPEG XR";
+  decoded.info.asset_kind = "non-HDR"; decoded.info.codec = "JPEG XR";
   require_hr(frame->GetSize(&decoded.info.width, &decoded.info.height), "read JPEG XR input dimensions");
   WICPixelFormatGUID format{};
   require_hr(frame->GetPixelFormat(&format), "read JPEG XR input pixel format");
@@ -2869,8 +2909,9 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
     }
   }
   const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
-  decoded.rgb.resize(count * 3u);
   if (format == GUID_WICPixelFormat64bppRGBAHalf) {
+    decoded.info.asset_kind = "direct-hdr";
+    decoded.rgb.resize(count * 3u);
     std::vector<uint16_t> rgba(count * 4u);
     require_hr(frame->CopyPixels(nullptr, decoded.info.width * 8u, static_cast<UINT>(rgba.size() * sizeof(uint16_t)),
                                  reinterpret_cast<BYTE*>(rgba.data())), "decode JPEG XR FP16 input");
@@ -2892,6 +2933,8 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
     decoded.info.primaries = 1; decoded.info.transfer = 8;
     decoded.info.matrix = 0; decoded.info.full_range = true; decoded.info.range_known = true;
   } else if (format == GUID_WICPixelFormat32bppBGR101010) {
+    decoded.info.asset_kind = "direct-hdr";
+    decoded.rgb.resize(count * 3u);
     std::vector<uint32_t> words(count);
     require_hr(frame->CopyPixels(nullptr, decoded.info.width * 4u, static_cast<UINT>(words.size() * sizeof(uint32_t)),
                                  reinterpret_cast<BYTE*>(words.data())), "decode packed-10 JPEG XR input");
@@ -2907,6 +2950,22 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
     decoded.info.color_signal_kind = "WIC pixel format + experimental interpretation";
     decoded.info.primaries = 9; decoded.info.transfer = 16;
     decoded.info.matrix = 0; decoded.info.full_range = true; decoded.info.range_known = true;
+  } else if (format == GUID_WICPixelFormat8bppGray ||
+             format == GUID_WICPixelFormat16bppGray ||
+             format == GUID_WICPixelFormat24bppBGR ||
+             format == GUID_WICPixelFormat32bppBGR ||
+             format == GUID_WICPixelFormat32bppBGRA ||
+             format == GUID_WICPixelFormat48bppRGB ||
+             format == GUID_WICPixelFormat64bppRGBA) {
+    decoded.info.profile = "SDR JPEG XR";
+    decoded.info.bit_depth = format == GUID_WICPixelFormat16bppGray ||
+                             format == GUID_WICPixelFormat48bppRGB ||
+                             format == GUID_WICPixelFormat64bppRGBA ? 16u : 8u;
+    decoded.info.chroma = format == GUID_WICPixelFormat8bppGray ||
+                          format == GUID_WICPixelFormat16bppGray
+        ? "grayscale" : "RGB/RGBA";
+    decoded.info.pixel_format = "SDR integer JPEG XR";
+    decoded.info.color_signal_kind = "No validated HDR representation";
   } else {
     throw std::runtime_error("JPEG XR input is neither validated FP16 scRGB nor packed RGB10");
   }
@@ -3106,10 +3165,53 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
     PKPixelFormatGUID source_format{};
     require_jxr(decoder->GetPixelFormat(decoder, &source_format),
                 "read JPEG XR pixel format");
-    if (!IsEqualGUID(source_format, GUID_PKPixelFormat64bppRGBAHalf) &&
-        !IsEqualGUID(source_format, GUID_PKPixelFormat64bppRGBHalf) &&
-        !IsEqualGUID(source_format, GUID_PKPixelFormat48bppRGBHalf)) {
+    const bool fp16 = IsEqualGUID(source_format, GUID_PKPixelFormat64bppRGBAHalf) ||
+                      IsEqualGUID(source_format, GUID_PKPixelFormat64bppRGBHalf) ||
+                      IsEqualGUID(source_format, GUID_PKPixelFormat48bppRGBHalf);
+    const bool common_sdr =
+        IsEqualGUID(source_format, GUID_PKPixelFormat8bppGray) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat16bppGray) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat16bppRGB555) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat16bppRGB565) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat24bppBGR) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat24bppRGB) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat32bppBGR) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat32bppBGRA) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat32bppRGB) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat32bppRGBA) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat48bppRGB) ||
+        IsEqualGUID(source_format, GUID_PKPixelFormat64bppRGBA);
+    if (!fp16 && !common_sdr) {
       throw std::runtime_error("JPEG XR input is not a validated FP16 scRGB image");
+    }
+    if (common_sdr) {
+      I32 width = 0, height = 0;
+      require_jxr(decoder->GetSize(decoder, &width, &height),
+                  "read SDR JPEG XR dimensions");
+      if (width <= 0 || height <= 0) throw std::runtime_error("invalid JPEG XR dimensions");
+      DecodedImage decoded;
+      decoded.info.path = path;
+      decoded.info.format = "JPEG XR";
+      decoded.info.container_brand = "JXR ";
+      decoded.info.asset_kind = "non-HDR";
+      decoded.info.codec = "JPEG XR";
+      decoded.info.width = static_cast<uint32_t>(width);
+      decoded.info.height = static_cast<uint32_t>(height);
+      decoded.info.profile = "SDR JPEG XR";
+      decoded.info.bit_depth = IsEqualGUID(source_format, GUID_PKPixelFormat16bppGray) ||
+                               IsEqualGUID(source_format, GUID_PKPixelFormat48bppRGB) ||
+                               IsEqualGUID(source_format, GUID_PKPixelFormat64bppRGBA) ? 16u : 8u;
+      decoded.info.chroma = IsEqualGUID(source_format, GUID_PKPixelFormat8bppGray) ||
+                            IsEqualGUID(source_format, GUID_PKPixelFormat16bppGray)
+          ? "grayscale" : "RGB/RGBA";
+      decoded.info.pixel_format = "SDR integer JPEG XR";
+      decoded.info.color_signal_kind = "No validated HDR representation";
+      decoded.info.exif_status = "unsupported";
+      decoded.info.xmp_status = "unsupported";
+      decoded.info.icc_status = "unsupported";
+      decoded.info.orientation_status = "unsupported";
+      cleanup();
+      return decoded;
     }
     require_jxr(codecs->CreateFormatConverter(&converter),
                 "create JPEG XR input converter");
@@ -3553,11 +3655,14 @@ SourceInfo inspect_ultrahdr_input(const std::filesystem::path& path) {
 SourceInfo inspect_plain_jpeg(const std::filesystem::path& path) {
   const auto bytes = read_file(path);
   const auto probe = jpeg::inspect(bytes.data(), bytes.size());
+  if (probe.width == 0 || probe.height == 0 || probe.bit_depth == 0 || probe.channels == 0) {
+    throw std::runtime_error("JPEG input decode failed");
+  }
   SourceInfo info;
   info.path = path;
   info.format = "JPEG";
   info.container_brand = "JPEG";
-  info.asset_kind = "non-PQ/unknown";
+  info.asset_kind = "non-HDR";
   info.width = probe.width;
   info.height = probe.height;
   info.bit_depth = probe.bit_depth;
@@ -3587,7 +3692,12 @@ DecodedImage decode_ultrahdr_input(const std::filesystem::path& path) {
   const auto bytes = read_file(path);
   if (bytes.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
       !is_uhdr_image(const_cast<uint8_t*>(bytes.data()), static_cast<int>(bytes.size()))) {
-    throw std::runtime_error("JPEG input is not a standard Ultra HDR gain-map asset");
+    DecodedImage decoded;
+    decoded.info = inspect_plain_jpeg(path);
+    const auto probe = jpeg::inspect(bytes.data(), bytes.size());
+    decoded.exif = probe.exif;
+    decoded.xmp = probe.xmp;
+    return decoded;
   }
   uhdr_compressed_image_t input{};
   input.data = const_cast<uint8_t*>(bytes.data()); input.data_sz = input.capacity = bytes.size();
@@ -3751,7 +3861,8 @@ DecodedImage decode_input_uncached(const std::filesystem::path& path,
   check_cancel(cancel);
   if (decoded.timings.decode_ms == 0.0) decoded.timings.decode_ms = elapsed_ms(decode_start);
   const auto orientation_start = Clock::now();
-  if (decoded.info.original_orientation != 1 && !decoded.info.orientation_normalized) {
+  if (!decoded.rgb.empty() && decoded.info.original_orientation != 1 &&
+      !decoded.info.orientation_normalized) {
     const auto transformed = orientation::normalize_rgb16(
         decoded.rgb, decoded.info.width, decoded.info.height,
         decoded.info.original_orientation);

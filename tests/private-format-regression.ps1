@@ -61,8 +61,7 @@ Assert-True ([math]::Abs($acrTiff.gainMapMetadata.alternateHdrHeadroom - $acrAvi
 foreach ($negativeJpeg in @("SDR_JPEG.jpg")) {
     $negativePath = Join-Path $Corpus $negativeJpeg
     $negativeInfo = Invoke-Inspect $negativePath
-    Assert-True (($negativeInfo.assetKind -eq "non-HDR" -or
-                  $negativeInfo.assetKind -eq "non-PQ/unknown") -and
+    Assert-True (($negativeInfo.assetKind -eq "non-HDR") -and
         -not $negativeInfo.gainMapPresent) "ordinary JPEG is inspectable but not misclassified as Ultra HDR: $negativeJpeg"
 }
 

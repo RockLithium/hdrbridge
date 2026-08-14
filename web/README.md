@@ -34,3 +34,9 @@ pwsh web/scripts/assemble-site.ps1
 The module is single-threaded so GitHub Pages does not need cross-origin
 isolation headers. Large images are processed in a worker, but browser and device
 WebAssembly memory limits still apply.
+
+The assembled site also contains `/bundled/`, a compatibility entry whose HTML
+embeds the exact same WebAssembly binary. The standard page offers this entry
+when the separate core download fails or times out. `assemble-site` generates
+the Base64 payload automatically and verifies that it decodes byte-for-byte to
+the compiled module; the payload is never maintained by hand.

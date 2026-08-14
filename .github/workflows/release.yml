@@ -52,10 +52,9 @@ jobs:
           Windows x64 portable release of HDR Bridge.
 
           ### Changes
-          - Improved HDR color-signaling inspection and source classification
-          - Improved PNG and TIFF interoperability
-          - Refined Source Inspector details and the default desktop layout
-          - Updated measured compatibility results
+          - Correctly classify decodable SDR inputs without treating them as HDR decode failures
+          - Preserve validated Direct HDR and gain-map detection across supported containers
+          - Add a self-contained Web compatibility mode for networks that block lazy-loaded WASM
 
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 

@@ -9,7 +9,8 @@ const translations = {
     faithful: "Faithful / Auto", lossless: "Lossless",
     peak: "Peak", preserve: "Preserve", convert: "Start Processing", stop: "Stop Processing", complete: "Processing Complete",
     selectBegin: "Select a supported HDR image to begin.", preview: "PREVIEW", noFile: "No file loaded", download: "DOWNLOAD",
-    previewUnavailable: "Preview unavailable in this browser", inspecting: "Inspecting the HDR container locally...",
+    previewUnavailable: "Preview unavailable in this browser", coreLoading: "Loading the local conversion core...", inspecting: "Inspecting the HDR container locally...",
+    coreLoadFailed: "The conversion core could not be downloaded. Open Compatibility Mode? You will need to select the image again.",
     ready: "Ready to convert locally.", detected: "HDR source detected. Ready to convert locally.", noHdr: "No supported HDR data was found.",
     unavailable: "This browser codec is not enabled yet.", processing: "Loading the required codecs and reconstructing the HDR raster locally...",
     aborted: "Processing aborted.", noneReported: "None reported", directHdr: "Direct HDR", gainMapHdr: "Gain-map HDR", localFile: "local file",
@@ -30,7 +31,8 @@ const translations = {
     faithful: "保真 / 自动", lossless: "无损",
     peak: "峰值", preserve: "保留", convert: "开始转换", stop: "停止转换", complete: "转换完成",
     selectBegin: "请选择受支持的 HDR 图像。", preview: "预览", noFile: "未加载文件", download: "下载",
-    previewUnavailable: "此浏览器无法预览该格式", inspecting: "正在本地检查 HDR 容器...",
+    previewUnavailable: "此浏览器无法预览该格式", coreLoading: "正在加载本地转换核心...", inspecting: "正在本地检查 HDR 容器...",
+    coreLoadFailed: "无法下载转换核心。是否打开兼容模式？你需要重新选择图像。",
     ready: "可以开始本地转换。", detected: "已检测到 HDR 源，可以开始本地转换。", noHdr: "未找到受支持的 HDR 数据。",
     unavailable: "此浏览器尚未启用该编解码器。", processing: "正在加载所需编解码器并在本地重建 HDR 图像...",
     aborted: "处理已中止。", noneReported: "未报告", directHdr: "Direct HDR", gainMapHdr: "Gain-map HDR", localFile: "本地文件",
@@ -51,7 +53,8 @@ const translations = {
     faithful: "Fidèle / Auto", lossless: "Sans perte",
     peak: "Pic", preserve: "Conserver", convert: "Lancer la conversion", stop: "Arrêter", complete: "Terminé",
     selectBegin: "Choisissez une image HDR prise en charge.", preview: "APERÇU", noFile: "Aucun fichier", download: "TÉLÉCHARGER",
-    previewUnavailable: "Aperçu indisponible dans ce navigateur", inspecting: "Analyse locale du conteneur HDR...",
+    previewUnavailable: "Aperçu indisponible dans ce navigateur", coreLoading: "Chargement du moteur de conversion local...", inspecting: "Analyse locale du conteneur HDR...",
+    coreLoadFailed: "Impossible de télécharger le moteur de conversion. Ouvrir le mode de compatibilité ? Vous devrez sélectionner de nouveau l’image.",
     ready: "Prêt pour la conversion locale.", detected: "Source HDR détectée. Prêt pour la conversion locale.", noHdr: "Aucune donnée HDR prise en charge.",
     unavailable: "Ce codec n’est pas encore activé dans ce navigateur.", processing: "Chargement des codecs et reconstruction locale de l’image HDR...",
     aborted: "Annulé.", noneReported: "Non indiqué", directHdr: "HDR direct", gainMapHdr: "HDR avec gain map", localFile: "fichier local",
@@ -72,7 +75,8 @@ const translations = {
     faithful: "Точно / Авто", lossless: "Без потерь",
     peak: "Пик", preserve: "Сохранить", convert: "Запустить", stop: "Остановить", complete: "Готово",
     selectBegin: "Выберите поддерживаемое HDR-изображение.", preview: "ПРЕДПРОСМОТР", noFile: "Файл не выбран", download: "СКАЧАТЬ",
-    previewUnavailable: "Предпросмотр недоступен в этом браузере", inspecting: "Локальная проверка HDR-контейнера...",
+    previewUnavailable: "Предпросмотр недоступен в этом браузере", coreLoading: "Загрузка локального ядра преобразования...", inspecting: "Локальная проверка HDR-контейнера...",
+    coreLoadFailed: "Не удалось загрузить ядро преобразования. Открыть режим совместимости? Изображение потребуется выбрать снова.",
     ready: "Готово к локальному преобразованию.", detected: "Обнаружен HDR-источник. Можно преобразовывать.", noHdr: "Поддерживаемые HDR-данные не найдены.",
     unavailable: "Этот кодек пока не включён в браузере.", processing: "Загрузка кодеков и локальная реконструкция HDR-растра...",
     aborted: "Отменено.", noneReported: "Нет данных", directHdr: "Прямой HDR", gainMapHdr: "HDR с картой усиления", localFile: "локальный файл",
@@ -110,6 +114,9 @@ const state = {
   statusMessage: { key: "selectBegin", kind: "", replacements: {} },
   inspectInfo: null,
   previewState: "no-file",
+  workerNeedsEmbeddedCore: false,
+  coreReady: false,
+  compatibilityPromptShown: false,
 };
 
 const elements = {
@@ -183,8 +190,57 @@ function codecWorker() {
       type: "module",
     });
     state.worker.addEventListener("message", handleWorkerMessage);
+    state.worker.addEventListener("error", (event) => {
+      setBusy(false);
+      setStatus(event.message || "Conversion worker failed.", "error");
+      if (!state.coreReady) offerCompatibilityMode();
+      state.worker = null;
+      state.coreReady = false;
+    });
+    state.worker.addEventListener("messageerror", () => {
+      setBusy(false);
+      setStatus("The conversion worker could not receive the image.", "error");
+    });
+    state.workerNeedsEmbeddedCore = true;
+    state.coreReady = false;
   }
   return state.worker;
+}
+
+function embeddedCoreBuffer() {
+  const element = document.querySelector("#hdrbridge-embedded-core");
+  if (!element) return null;
+  const encoded = element.textContent.replace(/\s/g, "");
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes.buffer;
+}
+
+function postCodecMessage(message, transfers) {
+  const worker = codecWorker();
+  if (state.workerNeedsEmbeddedCore) {
+    const wasmBinary = embeddedCoreBuffer();
+    if (wasmBinary) {
+      message.wasmBinary = wasmBinary;
+      transfers.push(wasmBinary);
+    }
+    state.workerNeedsEmbeddedCore = false;
+  }
+  worker.postMessage(message, transfers);
+}
+
+function offerCompatibilityMode() {
+  if (document.querySelector("#hdrbridge-embedded-core") ||
+      state.compatibilityPromptShown) return;
+  state.compatibilityPromptShown = true;
+  if (window.confirm(tr("coreLoadFailed"))) {
+    const target = new URL("./bundled/", window.location.href);
+    target.searchParams.set("lang", state.language);
+    window.location.assign(target.href);
+  }
 }
 
 function humanBytes(bytes) {
@@ -339,10 +395,10 @@ function selectFormat(format) {
 
 async function inspectFile(file) {
   const requestId = ++state.requestId;
-  setTranslatedStatus("inspecting");
+  setTranslatedStatus(state.coreReady ? "inspecting" : "coreLoading");
   try {
     const buffer = await file.arrayBuffer();
-    codecWorker().postMessage({
+    postCodecMessage({
       type: "inspect", requestId, buffer, fileName: file.name,
     }, [buffer]);
   } catch (error) {
@@ -353,6 +409,7 @@ async function inspectFile(file) {
 function selectFile(file) {
   if (!file) return;
   state.file = file;
+  state.compatibilityPromptShown = false;
   state.sourceSupported = false;
   clearOutput();
   elements.fileName.textContent = file.name;
@@ -396,9 +453,15 @@ function showInspector(info) {
 
 function handleWorkerMessage({ data }) {
   if (data.requestId !== state.requestId) return;
+  if (data.type === "core-ready") {
+    state.coreReady = true;
+    if (!state.busy) setTranslatedStatus("inspecting");
+    return;
+  }
   if (data.type === "error") {
     setBusy(false);
     setStatus(data.message, "error");
+    if (data.stage === "core") offerCompatibilityMode();
     return;
   }
   if (data.type === "inspected") {
@@ -456,6 +519,7 @@ async function convert() {
     state.requestId += 1;
     if (state.worker) state.worker.terminate();
     state.worker = null;
+    state.coreReady = false;
     setBusy(false);
     setTranslatedStatus("aborted");
     return;
@@ -467,7 +531,7 @@ async function convert() {
   const requestId = ++state.requestId;
   try {
     const buffer = await state.file.arrayBuffer();
-    codecWorker().postMessage({
+    postCodecMessage({
       type: "convert",
       requestId,
       buffer,
@@ -562,4 +626,5 @@ elements.download.addEventListener("click", async () => {
 elements.language.addEventListener("change", () => applyLanguage(elements.language.value));
 
 configureParameters();
-applyLanguage("en-US");
+const requestedLanguage = new URLSearchParams(window.location.search).get("lang");
+applyLanguage(requestedLanguage || "en-US");

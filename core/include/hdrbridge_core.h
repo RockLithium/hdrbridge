@@ -19,7 +19,9 @@ enum class HdrTransfer : uint8_t {
 struct SourceInfo {
   std::filesystem::path path;
   std::string format;
-  std::string asset_kind = "direct-hdr";
+  // Inputs are non-HDR until a direct-HDR or gain-map representation has
+  // been positively resolved from source signaling.
+  std::string asset_kind = "non-HDR";
   bool gain_map_present = false;
   std::string gain_map_family;
   uint32_t base_item_id = 0;
