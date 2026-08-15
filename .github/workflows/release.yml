@@ -10,8 +10,23 @@ permissions:
 jobs:
   windows-portable:
     runs-on: windows-latest
+    env:
+      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore pinned vcpkg tool
+        uses: actions/cache@v4
+        with:
+          path: .tools/vcpkg
+          key: vcpkg-tool-${{ runner.os }}-${{ hashFiles('scripts/bootstrap-vcpkg-local.ps1') }}
+
+      - name: Enable vcpkg GitHub Actions binary cache
+        uses: actions/github-script@v8
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
       - name: Bootstrap pinned vcpkg
         shell: pwsh
