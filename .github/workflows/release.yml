@@ -10,23 +10,25 @@ permissions:
 jobs:
   windows-portable:
     runs-on: windows-latest
-    env:
-      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
     steps:
       - uses: actions/checkout@v4
 
-      - name: Restore pinned vcpkg tool
+      - name: Detect MSVC toolset
+        id: msvc
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $version = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationVersion
+          if (-not $version) { throw 'MSVC toolset was not found.' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Restore installed vcpkg dependencies
         uses: actions/cache@v4
         with:
-          path: .tools/vcpkg
-          key: vcpkg-tool-${{ runner.os }}-${{ hashFiles('scripts/bootstrap-vcpkg-local.ps1') }}
-
-      - name: Enable vcpkg GitHub Actions binary cache
-        uses: actions/github-script@v8
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+          path: vcpkg_installed
+          key: vcpkg-installed-${{ runner.os }}-${{ runner.arch }}-${{ steps.msvc.outputs.version }}-${{ hashFiles('vcpkg.json', 'ports-overlay/**', 'scripts/bootstrap-vcpkg-local.ps1') }}
 
       - name: Bootstrap pinned vcpkg
         shell: pwsh
