@@ -39,6 +39,7 @@ constexpr UINT_PTR kProgressResetTimer = 1;
 constexpr wchar_t kLayoutRegistryPath[] = L"Software\\HDR Bridge\\Desktop";
 constexpr UINT ID_CONTEXT_OPEN = 4001;
 constexpr UINT ID_CONTEXT_FOLDER = 4002;
+constexpr UINT ID_CONTEXT_REMOVE = 4003;
 constexpr UINT ID_TASK_CLEAR_STATUS = 4010;
 constexpr UINT ID_TASK_DELETE = 4011;
 constexpr UINT ID_TASK_OPEN_SOURCE = 4012;
@@ -98,6 +99,7 @@ enum ControlId {
   ,IDC_FILES_SPLITTER
   ,IDC_REMOVE_ALL_TASKS
   ,IDC_TIFF_COMPRESSION
+  ,IDC_GAINMAP_EXPORT_FORMAT
 };
 
 enum class QueueStatus { pending, running, success, skipped, failed };
@@ -182,6 +184,7 @@ struct AppState {
   HWND gainmap_channels = nullptr;
   HWND peak = nullptr;
   HWND tiff_compression = nullptr;
+  HWND gainmap_export_format = nullptr;
   HWND source_folder = nullptr;
   HWND choose_folder = nullptr;
   HWND folder_path = nullptr;
@@ -415,6 +418,8 @@ void load_conversion_settings(AppState* state) {
   state->tiff_compressed = saved_index(L"TiffCompressed", 1, 1) != 0;
   SendMessageW(state->tiff_compression, CB_SETCURSEL,
                state->tiff_compressed ? 0 : 1, 0);
+  SendMessageW(state->gainmap_export_format, CB_SETCURSEL,
+               saved_index(L"GainMapExportFormat", 0, 3), 0);
   SendMessageW(state->lossless, BM_SETCHECK,
                state->lossless_setting ? BST_CHECKED : BST_UNCHECKED, 0);
   SendMessageW(state->copy_exif, BM_SETCHECK,
@@ -440,6 +445,7 @@ void reset_conversion_settings(AppState* state) {
   state->lossless_setting = true;
   state->tiff_compressed = true;
   SendMessageW(state->tiff_compression, CB_SETCURSEL, 0, 0);
+  SendMessageW(state->gainmap_export_format, CB_SETCURSEL, 0, 0);
   SendMessageW(state->format, CB_SETCURSEL, 0, 0);
   SendMessageW(state->representation, CB_SETCURSEL, 0, 0);
   SendMessageW(state->transfer, CB_SETCURSEL, 0, 0);
@@ -490,6 +496,9 @@ void save_layout(AppState* state) {
   write_layout_value(key, L"TargetPeak", static_cast<DWORD>(SendMessageW(state->peak, CB_GETCURSEL, 0, 0)));
   write_layout_value(key, L"Lossless", state->lossless_setting);
   write_layout_value(key, L"TiffCompressed", state->tiff_compressed);
+  write_layout_value(key, L"GainMapExportFormat", static_cast<DWORD>(
+      std::max(0, static_cast<int>(SendMessageW(
+          state->gainmap_export_format, CB_GETCURSEL, 0, 0)))));
   write_layout_value(key, L"CopyExif", SendMessageW(state->copy_exif, BM_GETCHECK, 0, 0) == BST_CHECKED);
   write_layout_value(key, L"CopyXmp", SendMessageW(state->copy_xmp, BM_GETCHECK, 0, 0) == BST_CHECKED);
   write_layout_value(key, L"UseSuffix", SendMessageW(state->use_suffix, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -781,7 +790,7 @@ std::wstring mode_for_index(int index) {
     case 3: return L"jxl-pq16";
     case 4: return L"jxr-scrgb-fp16";
     case 5: return L"avif-pq10";
-    case 6: return L"jxr-rgb10-experimental";
+    case 6: return L"gainmap-extract";
     default: return L"ultrahdr";
   }
 }
@@ -792,7 +801,7 @@ int index_for_mode(const std::wstring& mode) {
   if (mode == L"jxl-pq16") return 3;
   if (mode == L"jxr-scrgb-fp16") return 4;
   if (mode == L"avif-pq10") return 5;
-  if (mode == L"jxr-rgb10-experimental") return 6;
+  if (mode == L"gainmap-extract") return 6;
   return 0;
 }
 
@@ -803,7 +812,7 @@ std::wstring format_label_for_mode(const std::wstring& mode) {
   if (mode == L"jxr-scrgb-fp16") return L"JPEG XR FP16";
   if (mode == L"avif-pq10") return L"HDR AVIF";
   if (mode == L"tiff-pq16") return L"HDR TIFF";
-  return L"JPEG XR RGB10";
+  return L"Gain Map";
 }
 
 std::wstring source_format_label(const std::filesystem::path& path) {
@@ -849,7 +858,7 @@ std::wstring suffix_for_mode(const std::wstring& mode, bool hlg = false,
   if (mode == L"tiff-pq16") return L"_hdr-pq16.tif";
   if (mode == L"avif-pq10") return gainmap ? L"_gainmap.avif" :
       hlg ? L"_direct-hlg10.avif" : L"_direct-pq10.avif";
-  if (mode == L"jxr-rgb10-experimental") return L"_rgb10-experimental.jxr";
+  if (mode == L"gainmap-extract") return L"_gainmap";
   return gainmap ? L"_gainmap.jxl" : hlg ? L"_hlg16.jxl" : L"_pq16.jxl";
 }
 
@@ -873,6 +882,10 @@ void update_output_preview(AppState* state) {
     request.suffix = SendMessageW(state->use_suffix, BM_GETCHECK, 0, 0) == BST_CHECKED
         ? control_text(state->name_suffix) : L"";
     request.mode = mode_for_index(static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0)));
+    const int gainmap_format = static_cast<int>(SendMessageW(
+        state->gainmap_export_format, CB_GETCURSEL, 0, 0));
+    request.gainmap_export_format = gainmap_format == 1 ? L"png" :
+        gainmap_format == 2 ? L"tiff" : gainmap_format == 3 ? L"jpeg" : L"original";
     request.collision = SendMessageW(state->collision, CB_GETCURSEL, 0, 0) == 1
         ? hdrbridge::desktop::CollisionPolicy::overwrite
         : hdrbridge::desktop::CollisionPolicy::auto_number;
@@ -920,6 +933,10 @@ TaskOptions capture_task_options(AppState* state) {
   options.target_peak_nits = peaks[std::clamp(static_cast<int>(
       SendMessageW(state->peak, CB_GETCURSEL, 0, 0)), 0, 4)];
   options.overwrite = SendMessageW(state->collision, CB_GETCURSEL, 0, 0) == 1;
+  const int gainmap_format = static_cast<int>(SendMessageW(
+      state->gainmap_export_format, CB_GETCURSEL, 0, 0));
+  options.gainmap_export_format = gainmap_format == 1 ? "png" :
+      gainmap_format == 2 ? "tiff" : gainmap_format == 3 ? "jpeg" : "original";
   captured.use_source_folder = state->use_source_folder;
   captured.selected_folder = state->selected_folder;
   captured.base_name = state->inputs.size() > 1u ? L"" : control_text(state->base_name);
@@ -939,6 +956,7 @@ std::filesystem::path task_output_path(const std::filesystem::path& source,
   request.base_name = options.base_name.empty() ? source.stem().wstring() : options.base_name;
   request.suffix = options.use_suffix ? options.suffix : L"";
   request.mode = options.mode;
+  request.gainmap_export_format = widen(options.conversion.gainmap_export_format);
   request.collision = options.collision;
   return hdrbridge::desktop::resolve_output_path(request);
 }
@@ -1020,7 +1038,7 @@ void update_mode_ui(AppState* state) {
   else if (index == 4) note = L"FP16 linear scRGB • Windows workflow";
   else if (index == 5) note = representation_index == 1 ? L"ISO gain map • compact delivery" :
       hlg ? L"HLG • compact delivery" : L"PQ • compact delivery";
-  else note = L"Packed RGB10 • experimental";
+  else note = L"Extract embedded Gain Map • original payload when available";
   SetWindowTextW(state->format_note, note.c_str());
   const bool ultrahdr_output = index == 0;
   const bool gainmap_output = ultrahdr_output ||
@@ -1035,6 +1053,7 @@ void update_mode_ui(AppState* state) {
   ShowWindow(state->gainmap_resolution, gainmap_output ? SW_SHOW : SW_HIDE);
   ShowWindow(state->gainmap_channels, gainmap_output ? SW_SHOW : SW_HIDE);
   ShowWindow(state->tiff_compression, index == 2 ? SW_SHOW : SW_HIDE);
+  ShowWindow(state->gainmap_export_format, index == 6 ? SW_SHOW : SW_HIDE);
   ShowWindow(state->gamut, (ultrahdr_output || index == 1 || index == 2 ||
                             index == 3 || index == 5) ? SW_SHOW : SW_HIDE);
   SendMessageW(state->gamut, CB_RESETCONTENT, 0, 0);
@@ -1086,7 +1105,7 @@ void update_mode_ui(AppState* state) {
   SendMessageW(state->lossless, BM_SETCHECK,
                (index == 1 || index == 2 || state->lossless_setting)
                    ? BST_CHECKED : BST_UNCHECKED, 0);
-  EnableWindow(state->lossless, index == 3 || index == 4 || index == 6);
+  EnableWindow(state->lossless, index == 3 || index == 4);
   if (state->last_encoding_format_index != index) {
     if (state->last_encoding_format_index >= 0 && state->last_encoding_format_index <
         static_cast<int>(state->encoding_values.size())) {
@@ -1106,14 +1125,22 @@ void update_mode_ui(AppState* state) {
                      SendMessageW(state->lossless, BM_GETCHECK, 0, 0) != BST_CHECKED;
   const bool compression = index == 1 || index == 2;
   const bool compression_level_enabled = index != 2 || state->tiff_compressed;
-  EnableWindow(state->quality, (lossy || compression) && compression_level_enabled);
-  EnableWindow(state->quality_value, (lossy || compression) && compression_level_enabled);
+  const bool gainmap_jpeg = index == 6 &&
+      SendMessageW(state->gainmap_export_format, CB_GETCURSEL, 0, 0) == 3;
+  EnableWindow(state->quality, ((lossy || compression) && index != 6 || gainmap_jpeg) &&
+                               compression_level_enabled);
+  EnableWindow(state->quality_value, ((lossy || compression) && index != 6 || gainmap_jpeg) &&
+                                     compression_level_enabled);
   if (state->last_format_index != index || state->last_transfer_index != transfer_index) {
     const auto mode = mode_for_index(index);
     const auto complete_suffix = suffix_for_mode(mode, hlg && transfer_output,
                                                   gainmap_output && !ultrahdr_output);
-    const auto extension = hdrbridge::desktop::extension_for_mode(mode);
-    SetWindowTextW(state->name_suffix,
+    const int gainmap_format = static_cast<int>(SendMessageW(
+        state->gainmap_export_format, CB_GETCURSEL, 0, 0));
+    const auto extension = hdrbridge::desktop::extension_for_mode(
+        mode, gainmap_format == 1 ? L"png" : gainmap_format == 2 ? L"tiff" :
+              gainmap_format == 3 ? L"jpeg" : L"original", state->input);
+    SetWindowTextW(state->name_suffix, mode == L"gainmap-extract" ? L"_gainmap" :
                    complete_suffix.substr(0, complete_suffix.size() - extension.size()).c_str());
     state->last_format_index = index;
     state->last_transfer_index = transfer_index;
@@ -1198,6 +1225,7 @@ void layout(AppState* s, int width, int height) {
              right_x + gainmap_option_width + gainmap_option_gap,
              parameter_row_y, gainmap_option_width, 150, TRUE);
   MoveWindow(s->tiff_compression, right_x, content_top + 134, right_width, 150, TRUE);
+  MoveWindow(s->gainmap_export_format, right_x, content_top + 100, right_width, 150, TRUE);
   const int lower_offset = representation_offset;
   const int option_gap = 8;
   const int option_width = (right_width - option_gap * 2) / 3;
@@ -1540,6 +1568,7 @@ void set_running(AppState* state, bool running) {
   EnableWindow(state->representation, !running);
   EnableWindow(state->gainmap_resolution, !running);
   EnableWindow(state->gainmap_channels, !running);
+  EnableWindow(state->gainmap_export_format, !running);
   EnableWindow(state->peak, !running);
   EnableWindow(state->source_folder, !running);
   EnableWindow(state->choose_folder, !running);
@@ -1759,6 +1788,9 @@ void start_task_queue(AppState* state) {
                     reinterpret_cast<LPARAM>(new TaskProgressPayload{
                         index, value, overall, std::move(text)}));
               }, &state->cancel);
+          PostMessageW(window, WM_APP_TASK_OUTPUT, 0,
+              reinterpret_cast<LPARAM>(new TaskOutputPayload{
+                  index, result.output_path}));
           results.push_back(std::move(result));
           ++succeeded;
           PostMessageW(window, WM_APP_ITEM_STATUS, 0,
@@ -1829,7 +1861,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                                 L"Master — JPEG XL",
                                 L"Windows — FP16 scRGB JPEG XR",
                                 L"Compact — AVIF",
-                                L"Experimental — JPEG XR RGB10"}) {
+                                L"Inspect — Extract Gain Map"}) {
       SendMessageW(owned->format, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
     }
     SendMessageW(owned->format, CB_SETCURSEL, 0, 0);
@@ -1864,6 +1896,18 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                  reinterpret_cast<LPARAM>(L"Compression: Uncompressed"));
     SendMessageW(owned->tiff_compression, CB_SETCURSEL, 0, 0);
     ShowWindow(owned->tiff_compression, SW_HIDE);
+    owned->gainmap_export_format = add_control(
+        window, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL,
+        IDC_GAINMAP_EXPORT_FORMAT);
+    for (const wchar_t* item : {L"Format: Original — default",
+                                L"Format: PNG",
+                                L"Format: TIFF",
+                                L"Format: JPEG"}) {
+      SendMessageW(owned->gainmap_export_format, CB_ADDSTRING, 0,
+                   reinterpret_cast<LPARAM>(item));
+    }
+    SendMessageW(owned->gainmap_export_format, CB_SETCURSEL, 0, 0);
+    ShowWindow(owned->gainmap_export_format, SW_HIDE);
     owned->lossless = add_control(window, L"BUTTON", L"Lossless", BS_AUTOCHECKBOX, IDC_LOSSLESS);
     owned->copy_exif = add_control(window, L"BUTTON", L"Exif", BS_AUTOCHECKBOX, IDC_COPY_EXIF);
     owned->copy_xmp = add_control(window, L"BUTTON", L"XMP", BS_AUTOCHECKBOX, IDC_COPY_XMP);
@@ -1942,15 +1986,35 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       if (point.x == -1 && point.y == -1) GetCursorPos(&point);
       if (target == state->queue) {
+        POINT client_point = point;
+        ScreenToClient(state->queue, &client_point);
+        const int hit = static_cast<int>(SendMessageW(
+            state->queue, LB_ITEMFROMPOINT, 0,
+            MAKELPARAM(client_point.x, client_point.y)));
+        if (HIWORD(hit) == 0) {
+          const int clicked = LOWORD(hit);
+          if (SendMessageW(state->queue, LB_GETSEL, clicked, 0) <= 0) {
+            SendMessageW(state->queue, LB_SETSEL, FALSE, -1);
+            SendMessageW(state->queue, LB_SETSEL, TRUE, clicked);
+          }
+          SendMessageW(state->queue, LB_SETCARETINDEX, clicked, FALSE);
+        }
         const int selected = static_cast<int>(SendMessageW(state->queue, LB_GETCARETINDEX, 0, 0));
         if (selected == LB_ERR || static_cast<size_t>(selected) >= state->inputs.size()) return 0;
         HMENU menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, ID_CONTEXT_OPEN, L"Open file");
         AppendMenuW(menu, MF_STRING, ID_CONTEXT_FOLDER, L"Open containing folder");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, state->running ? MF_STRING | MF_GRAYED : MF_STRING,
+                    ID_CONTEXT_REMOVE, L"Remove");
         const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                                             point.x, point.y, 0, window, nullptr);
         DestroyMenu(menu);
-        const auto& source = state->inputs[static_cast<size_t>(selected)];
+        if (command == ID_CONTEXT_REMOVE) {
+          remove_selected_source(state);
+          return 0;
+        }
+        const auto source = state->inputs[static_cast<size_t>(selected)];
         if (command == ID_CONTEXT_OPEN) ShellExecuteW(window, L"open", source.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         if (command == ID_CONTEXT_FOLDER) open_folder_for(window, source, true);
         return 0;
@@ -2275,6 +2339,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             SendMessageW(state->gainmap_resolution, CB_SETCURSEL, scale_index, 0);
             SendMessageW(state->gainmap_channels, CB_SETCURSEL,
                          task.options.conversion.multi_channel_gainmap ? 1 : 0, 0);
+            const auto& gm_format = task.options.conversion.gainmap_export_format;
+            SendMessageW(state->gainmap_export_format, CB_SETCURSEL,
+                         gm_format == "png" ? 1 : gm_format == "tiff" ? 2 :
+                         gm_format == "jpeg" ? 3 : 0, 0);
             constexpr float peaks[] = {0.0f, 1000.0f, 2000.0f, 4000.0f, 10000.0f};
             int peak_index = 0;
             for (int i = 1; i < 5; ++i) {
@@ -2342,6 +2410,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           if (HIWORD(wparam) == CBN_SELCHANGE) {
             state->tiff_compressed = SendMessageW(state->tiff_compression,
                                                    CB_GETCURSEL, 0, 0) != 1;
+            update_mode_ui(state);
+          }
+          break;
+        case IDC_GAINMAP_EXPORT_FORMAT:
+          if (HIWORD(wparam) == CBN_SELCHANGE) {
+            state->last_format_index = -1;
             update_mode_ui(state);
           }
           break;
@@ -2639,8 +2713,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   cls.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
   cls.lpszClassName = kWindowClass;
-  cls.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-  cls.hIconSm = cls.hIcon;
+  cls.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(101));
+  if (!cls.hIcon) cls.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+  cls.hIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(101),
+      IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+  if (!cls.hIconSm) cls.hIconSm = cls.hIcon;
   if (!RegisterClassExW(&cls)) {
     CoUninitialize();
     return 1;

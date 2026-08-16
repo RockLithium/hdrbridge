@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cwctype>
 #include <cmath>
 #include <chrono>
 #include <cstring>
@@ -45,6 +46,11 @@
 #include <tiffio.h>
 #include <ultrahdr_api.h>
 #include <zlib.h>
+#ifdef _WIN32
+extern "C" {
+#include <jpeglib.h>
+}
+#endif
 #ifndef _WIN32
 extern "C" {
 #include <JXRGlue.h>
@@ -1826,6 +1832,132 @@ std::vector<uint8_t> encode_png(const DecodedImage& decoded, const ConversionOpt
   return std::move(writer.bytes);
 }
 
+std::vector<uint8_t> encode_gainmap_png(const gainmap::GainMapRaster& raster,
+                                        uint32_t) {
+  png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+  if (!png) throw std::runtime_error("cannot create gain-map PNG writer");
+  png_infop info = png_create_info_struct(png);
+  if (!info) { png_destroy_write_struct(&png, nullptr); throw std::runtime_error("cannot create gain-map PNG info"); }
+  if (setjmp(png_jmpbuf(png))) {
+    png_destroy_write_struct(&png, &info);
+    throw std::runtime_error("libpng gain-map encoding failed");
+  }
+  PngMemoryWriter writer;
+  png_set_write_fn(png, &writer, png_write_memory, png_flush_memory);
+  const bool rgb = raster.channels == 3;
+  png_set_IHDR(png, info, raster.width, raster.height, 16,
+               rgb ? PNG_COLOR_TYPE_RGB : PNG_COLOR_TYPE_GRAY,
+               PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
+  png_set_compression_level(png, 4);
+  png_write_info(png, info);
+#if defined(_WIN32) || defined(__EMSCRIPTEN__)
+  png_set_swap(png);
+#endif
+  std::vector<uint16_t> plane;
+  if (!rgb) {
+    plane.resize(static_cast<size_t>(raster.width) * raster.height);
+    for (size_t p = 0; p < plane.size(); ++p) plane[p] = raster.rgb16[p * 3u];
+  }
+  std::vector<png_bytep> rows(raster.height);
+  for (uint32_t y = 0; y < raster.height; ++y) {
+    rows[y] = reinterpret_cast<png_bytep>(rgb
+        ? const_cast<uint16_t*>(raster.rgb16.data() + static_cast<size_t>(y) * raster.width * 3u)
+        : plane.data() + static_cast<size_t>(y) * raster.width);
+  }
+  png_write_image(png, rows.data());
+  png_write_end(png, info);
+  png_destroy_write_struct(&png, &info);
+  return std::move(writer.bytes);
+}
+
+void encode_gainmap_tiff(const std::filesystem::path& path,
+                         const gainmap::GainMapRaster& raster, uint32_t) {
+  TIFF* raw = nullptr;
+#ifdef _WIN32
+  raw = TIFFOpenW(path.c_str(), "w");
+#else
+  raw = TIFFOpen(path.string().c_str(), "w");
+#endif
+  if (!raw) throw std::runtime_error("cannot create gain-map TIFF");
+  std::unique_ptr<TIFF, void(*)(TIFF*)> tiff(raw, TIFFClose);
+  TIFFSetField(tiff.get(), TIFFTAG_IMAGEWIDTH, raster.width);
+  TIFFSetField(tiff.get(), TIFFTAG_IMAGELENGTH, raster.height);
+  const bool rgb = raster.channels == 3;
+  TIFFSetField(tiff.get(), TIFFTAG_SAMPLESPERPIXEL, rgb ? 3 : 1);
+  TIFFSetField(tiff.get(), TIFFTAG_BITSPERSAMPLE, 16);
+  TIFFSetField(tiff.get(), TIFFTAG_SAMPLEFORMAT, SAMPLEFORMAT_UINT);
+  TIFFSetField(tiff.get(), TIFFTAG_PHOTOMETRIC,
+               rgb ? PHOTOMETRIC_RGB : PHOTOMETRIC_MINISBLACK);
+  TIFFSetField(tiff.get(), TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+  TIFFSetField(tiff.get(), TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+  TIFFSetField(tiff.get(), TIFFTAG_COMPRESSION, COMPRESSION_ADOBE_DEFLATE);
+  TIFFSetField(tiff.get(), TIFFTAG_ROWSPERSTRIP, raster.height);
+  std::vector<uint16_t> plane;
+  const uint16_t* samples = raster.rgb16.data();
+  size_t sample_count = raster.rgb16.size();
+  if (!rgb) {
+    plane.resize(static_cast<size_t>(raster.width) * raster.height);
+    for (size_t p = 0; p < plane.size(); ++p) plane[p] = raster.rgb16[p * 3u];
+    samples = plane.data();
+    sample_count = plane.size();
+  }
+  if (TIFFWriteEncodedStrip(tiff.get(), 0, const_cast<uint16_t*>(samples),
+      static_cast<tmsize_t>(sample_count * sizeof(uint16_t))) < 0) {
+    throw std::runtime_error("cannot write gain-map TIFF");
+  }
+}
+
+std::vector<uint8_t> encode_gainmap_jpeg(const gainmap::GainMapRaster& raster,
+                                         uint32_t, int quality) {
+#ifndef _WIN32
+  (void)raster; (void)quality;
+  throw std::runtime_error("gain-map JPEG export is unavailable on this platform");
+#else
+  jpeg_compress_struct encoder{};
+  jpeg_error_mgr error{};
+  encoder.err = jpeg_std_error(&error);
+  jpeg_create_compress(&encoder);
+  unsigned char* memory = nullptr;
+  unsigned long size = 0;
+  jpeg_mem_dest(&encoder, &memory, &size);
+  encoder.image_width = raster.width;
+  encoder.image_height = raster.height;
+  const bool rgb = raster.channels == 3;
+  encoder.input_components = rgb ? 3 : 1;
+  encoder.in_color_space = rgb ? JCS_RGB : JCS_GRAYSCALE;
+  jpeg_set_defaults(&encoder);
+  if (rgb) {
+    for (int component = 0; component < 3; ++component) {
+      encoder.comp_info[component].h_samp_factor = 1;
+      encoder.comp_info[component].v_samp_factor = 1;
+    }
+  }
+  jpeg_set_quality(&encoder, std::clamp(quality, 1, 100), TRUE);
+  jpeg_start_compress(&encoder, TRUE);
+  std::vector<uint8_t> row(static_cast<size_t>(raster.width) * encoder.input_components);
+  while (encoder.next_scanline < encoder.image_height) {
+    const size_t base = static_cast<size_t>(encoder.next_scanline) * raster.width;
+    for (uint32_t x = 0; x < raster.width; ++x) {
+      if (rgb) {
+        for (uint32_t channel = 0; channel < 3; ++channel) {
+          row[static_cast<size_t>(x) * 3u + channel] = static_cast<uint8_t>(
+              (raster.rgb16[(base + x) * 3u + channel] + 128u) / 257u);
+        }
+      } else {
+        row[x] = static_cast<uint8_t>((raster.rgb16[(base + x) * 3u] + 128u) / 257u);
+      }
+    }
+    JSAMPROW pointer = row.data();
+    jpeg_write_scanlines(&encoder, &pointer, 1);
+  }
+  jpeg_finish_compress(&encoder);
+  std::vector<uint8_t> bytes(memory, memory + size);
+  std::free(memory);
+  jpeg_destroy_compress(&encoder);
+  return bytes;
+#endif
+}
+
 struct PngMemoryReader { const uint8_t* data; size_t size; size_t offset = 0; };
 
 void png_read_memory(png_structp png, png_bytep output, png_size_t length) {
@@ -2131,7 +2263,7 @@ void encode_tiff(const std::filesystem::path& path, const DecodedImage& decoded,
   const std::string description = p3 ? "HDR Bridge direct RGB16 Display P3 PQ" :
                                        "HDR Bridge direct RGB16 Rec.2020 PQ";
   TIFFSetField(tiff.get(), TIFFTAG_IMAGEDESCRIPTION, description.c_str());
-  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.1.3");
+  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.2.0");
   TIFFSetField(tiff.get(), TIFFTAG_ICCPROFILE, static_cast<uint32_t>(icc.size()), icc.data());
   std::vector<uint8_t> diagnostic_photoshop;
   std::vector<uint8_t> diagnostic_iptc;
@@ -4113,6 +4245,103 @@ json verification_json(const Verification& v) {
           {"checks", v.checks}};
 }
 
+ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
+                                         const std::filesystem::path& output,
+                                         const ConversionOptions& options,
+                                         ProgressCallback progress,
+                                         std::atomic_bool* cancel) {
+  const auto total_start = Clock::now();
+  if (std::filesystem::exists(output) && !options.overwrite) {
+    throw std::runtime_error("output exists; overwrite not enabled");
+  }
+  if (!output.parent_path().empty()) std::filesystem::create_directories(output.parent_path());
+  const auto temp = output.parent_path() / (output.filename().wstring() + L".partial");
+  std::error_code ec;
+  std::filesystem::remove(temp, ec);
+  try {
+    check_cancel(cancel);
+    report(progress, 8, "Parsing Gain Map container and metadata");
+    const auto decode_start = Clock::now();
+    const bool request_original = options.gainmap_export_format == "original";
+    std::wstring input_extension = input.extension().wstring();
+    std::transform(input_extension.begin(), input_extension.end(), input_extension.begin(), std::towlower);
+    const bool exact_source = input_extension == L".jxl" || input_extension == L".jpg" ||
+                              input_extension == L".jpeg" || input_extension == L".jpe";
+    auto raster = gainmap::extract_gain_map(input, cancel, !(request_original && exact_source));
+    const double decode_ms = elapsed_ms(decode_start);
+    std::string format = options.gainmap_export_format;
+    if (format != "original" && format != "png" && format != "tiff" && format != "jpeg") {
+      throw std::runtime_error("unknown gain-map export format");
+    }
+    const bool exact_original = format == "original" && !raster.original_bytes.empty();
+    if (format == "original" && !exact_original) {
+      const auto ext = output.extension().wstring();
+      format = (ext == L".tif" || ext == L".tiff") ? "tiff" : "png";
+    }
+    report(progress, 70, exact_original ? "Copying original Gain Map image" :
+           "Writing decoded Gain Map image");
+    const auto encode_start = Clock::now();
+    std::vector<uint8_t> bytes;
+    if (exact_original) bytes = raster.original_bytes;
+    else if (format == "png") bytes = encode_gainmap_png(raster, 0);
+    else if (format == "jpeg") bytes = encode_gainmap_jpeg(raster, 0, options.base_quality);
+    if (format == "tiff") {
+      encode_gainmap_tiff(temp, raster, 0);
+      bytes = read_file(temp);
+    } else {
+      write_file(temp, bytes);
+    }
+    check_cancel(cancel);
+    if (std::filesystem::exists(output)) std::filesystem::remove(output);
+    std::filesystem::rename(temp, output);
+    const double encode_ms = elapsed_ms(encode_start);
+    Verification verification;
+    verification.passed = true;
+    verification.width = raster.width;
+    verification.height = raster.height;
+    verification.bit_depth = raster.bit_depth;
+    verification.pixel_format = raster.channels == 3 ?
+        "RGB Gain Map image" : "Mono Gain Map image";
+    verification.color_encoding = raster.encoding;
+    verification.gain_map_width = raster.width;
+    verification.gain_map_height = raster.height;
+    verification.gain_map_channels = raster.channels;
+    verification.min_value = raster.rgb16.empty() ? 0.0 : std::numeric_limits<double>::infinity();
+    verification.max_value = raster.rgb16.empty() ? 1.0 : -std::numeric_limits<double>::infinity();
+    for (const uint16_t value : raster.rgb16) {
+      verification.min_value = std::min(verification.min_value, value / 65535.0);
+      verification.max_value = std::max(verification.max_value, value / 65535.0);
+    }
+    verification.checks.push_back("Gain Map metadata parsed from source container");
+    verification.checks.push_back("Gain Map image decoded without HDR reconstruction");
+    verification.checks.push_back(exact_original ?
+        (raster.original_extension == ".jpg" ?
+         "Original JPEG scan data copied without re-encoding; parent-container metadata removed" :
+         "Original embedded Gain Map payload copied byte-for-byte") :
+        (format == "jpeg" ? "Decoded Gain Map exported as 8-bit lossy JPEG" :
+         "Decoded Gain Map samples exported losslessly"));
+    if (raster.channels == 3 && !exact_original) {
+      verification.checks.push_back("RGB Gain Map retained as one three-channel image");
+    }
+    report(progress, 100, "Gain Map export committed");
+    ConversionResult result;
+    result.success = true;
+    result.output_path = output;
+    result.output_bytes = static_cast<uint64_t>(bytes.size());
+    result.mode = "gainmap-extract";
+    result.sha256 = sha256(bytes);
+    result.verification = std::move(verification);
+    result.timings.decode_ms = decode_ms;
+    result.timings.gain_map_decode_ms = decode_ms;
+    result.timings.encode_ms = encode_ms;
+    result.timings.total_ms = elapsed_ms(total_start);
+    return result;
+  } catch (...) {
+    std::filesystem::remove(temp, ec);
+    throw;
+  }
+}
+
 }  // namespace
 
 SourceInfo inspect(const std::filesystem::path& path) {
@@ -4128,6 +4357,9 @@ ConversionResult convert(const std::filesystem::path& input,
                          std::atomic_bool* cancel) {
   const auto total_start = Clock::now();
   TimingDiagnostics timings;
+  if (options.mode == "gainmap-extract") {
+    return convert_gainmap_extract(input, output, options, progress, cancel);
+  }
   if (std::filesystem::exists(output) && !options.overwrite) throw std::runtime_error("output exists; overwrite not enabled");
   if (options.target_peak_nits != 0.0f &&
       (options.target_peak_nits < 203.0f || options.target_peak_nits > 10000.0f)) {
@@ -4257,20 +4489,6 @@ ConversionResult convert(const std::filesystem::path& input,
 #else
       verification = decode_jxr(temp, options.lossless ? &half : nullptr);
 #endif
-      timings.verification_ms = elapsed_ms(verification_start);
-      bytes = read_file(temp);
-    } else if (options.mode == "jxr-rgb10-experimental") {
-      const auto color_start = Clock::now();
-      auto packed = pq16_to_bgr101010(decoded);
-      timings.color_conversion_ms += elapsed_ms(color_start);
-      report(progress, 65, "Encoding experimental packed 10-bit JPEG XR with Windows WIC");
-      const auto encode_start = Clock::now();
-      encode_jxr_rgb10(temp, decoded.info.width, decoded.info.height, packed, options);
-      timings.encode_ms = elapsed_ms(encode_start);
-      check_cancel(cancel);
-      report(progress, 88, "Verifying packed 10-bit JPEG XR through WIC");
-      const auto verification_start = Clock::now();
-      verification = decode_jxr_rgb10(temp, options.lossless ? &packed : nullptr);
       timings.verification_ms = elapsed_ms(verification_start);
       bytes = read_file(temp);
     } else if (options.mode == "ultrahdr") {
@@ -4443,7 +4661,6 @@ ConversionResult convert(const std::filesystem::path& input,
 Verification verify(const std::filesystem::path& output, const std::string& mode) {
   if (mode == "jxl-pq16") return decode_jxl(read_file(output), nullptr);
   if (mode == "jxr-scrgb-fp16") return decode_jxr(output, nullptr);
-  if (mode == "jxr-rgb10-experimental") return decode_jxr_rgb10(output, nullptr);
   if (mode == "ultrahdr") return decode_ultrahdr(read_file(output));
   if (mode == "png-pq16") {
     const auto bytes = read_file(output);

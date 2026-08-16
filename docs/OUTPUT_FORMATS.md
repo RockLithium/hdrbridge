@@ -28,9 +28,9 @@ Linear scRGB FP16, encoded through Windows WIC, with 1.0 representing 80 nits. I
 
 10-bit 4:4:4 PQ or HLG using AV1, with Rec.2020 by default and optional Display P3. PQ is the default. This is a compact lossy HDR output whose application support is less universal than its container and color signaling suggest. ISO gain-map AVIF is an alternate representation with Rec.709, Display P3 or Rec.2020 SDR bases. It uses a true RGB gain map only and defaults to half resolution.
 
-## JPEG XR RGB10 — Experimental
+## Gain Map extraction
 
-Packed `GUID_WICPixelFormat32bppBGR101010`. WIC preserves the packed high-bit-depth representation, but tested applications often interpret it incorrectly. It is not included in the Web product.
+Exports the embedded gain-map image without reconstructing the HDR master. Original is the default: JPEG keeps its compressed scan data without re-encoding while removing parent-container metadata, JPEG XL is copied byte-for-byte, TIFF remains TIFF, and auxiliary AVIF/HEIC items that are not independently usable fall back to lossless PNG. PNG and TIFF preserve decoded 16-bit samples; JPEG is an optional lossy 8-bit export. A three-channel gain map remains one RGB image; a mono map remains single-channel.
 
 ## Naming and output safety
 

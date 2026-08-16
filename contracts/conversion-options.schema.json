@@ -25,8 +25,7 @@
         "avif-pq10",
         "jxl-pq16",
         "jxr-scrgb-fp16",
-        "jxr-rgb10-experimental",
-        "jxr-pq16-experimental"
+        "gainmap-extract"
       ]
     },
     "preset": {
@@ -73,6 +72,10 @@
     "multiChannelGainMap": {
       "type": "boolean",
       "default": false
+    },
+    "gainMapExportFormat": {
+      "enum": ["original", "png", "tiff", "jpeg"],
+      "default": "original"
     },
     "targetPeakNits": {
       "description": "Zero means Faithful/Auto; otherwise an explicit libultrahdr target peak.",

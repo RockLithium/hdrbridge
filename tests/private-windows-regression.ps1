@@ -43,8 +43,7 @@ New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $cases = @(
     @{ Mode = "jxl-pq16"; Name = "acceptance_pq16.jxl" },
     @{ Mode = "jxr-scrgb-fp16"; Name = "acceptance_scrgb-fp16.jxr" },
-    @{ Mode = "ultrahdr"; Name = "acceptance_ultrahdr.jpg" },
-    @{ Mode = "jxr-rgb10-experimental"; Name = "acceptance_rgb10-experimental.jxr" }
+    @{ Mode = "ultrahdr"; Name = "acceptance_ultrahdr.jpg" }
 )
 
 $summary = @()
@@ -70,10 +69,6 @@ foreach ($case in $cases) {
     if ($case.Mode -eq "jxr-scrgb-fp16") {
         Assert-Equal $result.verification.pixelFormat "GUID_WICPixelFormat64bppRGBAHalf" "JXR FP16 pixel format"
         Assert-Equal $result.verification.exactRoundtrip $true "JXR FP16 exact roundtrip"
-    }
-    if ($case.Mode -eq "jxr-rgb10-experimental") {
-        Assert-Equal $result.verification.pixelFormat "GUID_WICPixelFormat32bppBGR101010" "JXR RGB10 pixel format"
-        Assert-Equal $result.verification.exactRoundtrip $true "JXR RGB10 exact roundtrip"
     }
     $summary += [pscustomobject]@{
         mode = $case.Mode

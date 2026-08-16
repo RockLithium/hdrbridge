@@ -145,6 +145,8 @@ struct ConversionOptions {
   bool copy_exif = true;
   bool copy_xmp = true;
   bool overwrite = false;
+  // Gain-map inspection/export only: original, png, tiff, or jpeg.
+  std::string gainmap_export_format = "original";
 };
 
 struct TimingDiagnostics {

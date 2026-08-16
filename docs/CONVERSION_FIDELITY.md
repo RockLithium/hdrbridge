@@ -32,6 +32,6 @@ An ordinary SDR file without gain-map, PQ or HLG data is rejected as an HDR sour
 | FP16 scRGB JPEG XR       | High-fidelity linear edit/master representation within FP16 range                                      | Lossless mode is exact for the target FP16 representation                                |
 | 10-bit PQ/HLG AVIF       | Compact HDR with 10-bit quantization and AV1 compression                                               | Not lossless                                                                             |
 | RGB ISO gain-map AVIF    | Display-adaptive HDR with an SDR base and half-resolution RGB map by default                           | Not lossless; RGB is required because the mono path is not offered as a validated output |
-| packed RGB10 JPEG XR     | Quantized and experimentally interpreted by applications                                               | May preserve the packed target buffer; the full conversion is not lossless               |
+| Gain-map extraction      | Exposes the encoded map rather than reconstructing an HDR image                                        | Original JXL is byte-exact; original JPEG preserves compressed scan data while removing parent metadata; PNG/TIFF preserve decoded samples; JPEG re-encode is lossy |
 
 Each encoder is followed by a format-appropriate readback check. Verification covers structure, color signaling, dimensions, numerical range and, where applicable, exact quality with the encoder input buffer.

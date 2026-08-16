@@ -43,6 +43,6 @@ The archive contains the GUI, required runtime DLLs, license texts and public do
 | libpng + zlib | HDR PNG |
 | libtiff + liblzma | HDR and gain-map TIFF |
 | Little CMS | ICC parsing and profile generation |
-| Windows Imaging Component | FP16 and experimental RGB10 JPEG XR |
+| Windows Imaging Component | FP16 scRGB JPEG XR |
 
 Exact license texts are collected into the portable archive. The tested dependency versions are recorded in `vcpkg.json`, the vcpkg lock revision and the libjxl overlay.

@@ -69,9 +69,12 @@ jobs:
           Windows x64 portable release of HDR Bridge.
 
           ### Changes
-          - Correctly classify decodable SDR inputs without treating them as HDR decode failures
-          - Preserve validated Direct HDR and gain-map detection across supported containers
-          - Add a self-contained Web compatibility mode for networks that block lazy-loaded WASM
+          - Add embedded Gain Map extraction with Original, PNG, TIFF and JPEG output
+            - Preserve mono maps as mono images and RGB maps as single three-channel images
+            - Copy JPEG/JXL Gain Maps without pixel re-encoding where possible
+            - Sanitize detached Apple/Ultra HDR JPEG Gain Maps for standalone viewer compatibility
+            - Replace the experimental RGB10 JPEG XR output while retaining FP16 scRGB JPEG XR
+          - Add HDR Bridge branding to the Windows application and Web converter
 
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 

@@ -14,6 +14,10 @@
 #include <jxl/resizable_parallel_runner_cxx.h>
 #include <tiffio.h>
 #include <ultrahdr_api.h>
+#ifdef _WIN32
+#include <jpeglib.h>
+#include <setjmp.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -26,6 +30,12 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <wincodec.h>
+#include <wrl/client.h>
+#endif
 
 namespace hdrbridge::gainmap {
 
@@ -2286,6 +2296,360 @@ ReconstructedHdr reconstruct_iso_gainmap_jxl(const std::filesystem::path& path,
   output.info.transfer = 16; output.info.matrix = 0; output.info.full_range = true;
   output.info.range_known = true;
   return output;
+}
+
+namespace {
+
+void check_gainmap_cancel(std::atomic_bool* cancel) {
+  if (cancel && cancel->load()) throw std::runtime_error("gain-map extraction cancelled");
+}
+
+GainMapRaster make_raster(SourceInfo info, uint32_t width, uint32_t height,
+                          uint32_t channels, std::vector<uint16_t> samples,
+                          const char* encoding, std::atomic_bool* cancel) {
+  check_gainmap_cancel(cancel);
+  if (!width || !height || samples.empty()) {
+    throw std::runtime_error("gain-map decoder returned an empty raster");
+  }
+  GainMapRaster result;
+  result.info = std::move(info);
+  result.channels = channels == 1 ? 1u : 3u;
+  result.encoding = encoding ? encoding : "decoded gain-map raster";
+  result.width = width;
+  result.height = height;
+  if (result.channels == 1) {
+    if (samples.size() != static_cast<size_t>(width) * height) {
+      throw std::runtime_error("gain-map mono raster size is inconsistent");
+    }
+    result.rgb16.resize(samples.size() * 3u);
+    for (size_t i = 0; i < samples.size(); ++i) {
+      result.rgb16[i * 3u] = samples[i];
+      result.rgb16[i * 3u + 1u] = samples[i];
+      result.rgb16[i * 3u + 2u] = samples[i];
+    }
+  } else {
+    if (samples.size() != static_cast<size_t>(width) * height * 3u) {
+      throw std::runtime_error("gain-map RGB raster size is inconsistent");
+    }
+    result.rgb16 = std::move(samples);
+  }
+  return result;
+}
+
+void normalize_gainmap_orientation(GainMapRaster& raster, uint8_t orientation) {
+  if (orientation <= 1 || orientation > 8) return;
+  const auto transformed = orientation::normalize_rgb16(
+      raster.rgb16, raster.width, raster.height, orientation);
+  raster.width = transformed.width;
+  raster.height = transformed.height;
+  raster.info.orientation_normalized = true;
+}
+
+std::vector<uint8_t> standalone_gainmap_jpeg(const uint8_t* data, size_t size) {
+  if (!data || size < 4 || data[0] != 0xff || data[1] != 0xd8) {
+    throw std::runtime_error("embedded gain-map JPEG is invalid");
+  }
+  std::vector<uint8_t> output{0xff, 0xd8};
+  size_t cursor = 2;
+  while (cursor < size) {
+    const size_t marker_start = cursor;
+    if (data[cursor++] != 0xff) throw std::runtime_error("invalid gain-map JPEG marker stream");
+    while (cursor < size && data[cursor] == 0xff) ++cursor;
+    if (cursor >= size) throw std::runtime_error("truncated gain-map JPEG marker");
+    const uint8_t marker = data[cursor++];
+    if (marker == 0xda) {
+      output.insert(output.end(), data + marker_start, data + size);
+      return output;
+    }
+    if (marker == 0xd9) {
+      output.push_back(0xff); output.push_back(0xd9);
+      return output;
+    }
+    if (marker == 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+      output.insert(output.end(), data + marker_start, data + cursor);
+      continue;
+    }
+    if (cursor + 2 > size) throw std::runtime_error("truncated gain-map JPEG segment");
+    const size_t segment_size = (static_cast<size_t>(data[cursor]) << 8) | data[cursor + 1];
+    if (segment_size < 2 || segment_size > size - cursor) {
+      throw std::runtime_error("invalid gain-map JPEG segment size");
+    }
+    const size_t segment_end = cursor + segment_size;
+    // APP1/APP2 and the other private APP segments describe the parent
+    // MPF/Ultra-HDR relationship. They are invalid or misleading on the
+    // detached auxiliary JPEG. Keep only ordinary JFIF and Adobe markers.
+    const bool private_metadata = (marker >= 0xe1 && marker <= 0xed) ||
+                                  marker == 0xef || marker == 0xfe;
+    if (!private_metadata) {
+      output.insert(output.end(), data + marker_start, data + segment_end);
+    }
+    cursor = segment_end;
+  }
+  throw std::runtime_error("gain-map JPEG ended before image data");
+}
+
+GainMapRaster extract_avif_gainmap(const std::filesystem::path& path,
+                                   std::atomic_bool* cancel) {
+  const auto begin = Clock::now();
+  const auto bytes = read_file(path);
+  auto decoder = parse_avif(bytes, true);
+  const ItemGraph graph = read_item_graph(path);
+  SourceInfo info = source_info(path, decoder->image, graph);
+  const avifImage* image = decoder->image->gainMap->image;
+  if (!image) throw std::runtime_error("AVIF gain-map item was not decoded");
+  avifRGBImage rgb{};
+  avifRGBImageSetDefaults(&rgb, image);
+  rgb.format = AVIF_RGB_FORMAT_RGB;
+  rgb.depth = 16;
+  rgb.isFloat = AVIF_FALSE;
+  require_avif(avifRGBImageAllocatePixels(&rgb), decoder->diag,
+                "allocate AVIF gain-map RGB raster");
+  struct RgbFree { avifRGBImage* value; ~RgbFree() { avifRGBImageFreePixels(value); } } free{&rgb};
+  require_avif(avifImageYUVToRGB(image, &rgb), decoder->diag,
+               "decode AVIF gain-map RGB raster");
+  std::vector<uint16_t> samples(static_cast<size_t>(image->width) * image->height * 3u);
+  for (uint32_t y = 0; y < image->height; ++y) {
+    check_gainmap_cancel(cancel);
+    const auto* row = reinterpret_cast<const uint16_t*>(
+        rgb.pixels + static_cast<size_t>(y) * rgb.rowBytes);
+    std::copy_n(row, static_cast<size_t>(image->width) * 3u,
+                samples.data() + static_cast<size_t>(y) * image->width * 3u);
+  }
+  auto result = make_raster(std::move(info), image->width, image->height,
+                            decoder->image->gainMap->image->yuvFormat == AVIF_PIXEL_FORMAT_YUV400 ? 1u : 3u,
+                            std::move(samples), "AVIF gain-map image", cancel);
+  normalize_gainmap_orientation(result, result.info.original_orientation);
+  result.decode_ms = elapsed_ms(begin);
+  return result;
+}
+
+GainMapRaster extract_tiff_gainmap(const std::filesystem::path& path,
+                                   std::atomic_bool* cancel) {
+  const auto begin = Clock::now();
+  auto tiff = read_tiff_gain_map(path, true, cancel);
+  const uint32_t map_width = tiff.info.gain_map_width;
+  const uint32_t map_height = tiff.info.gain_map_height;
+  const uint32_t map_channels = tiff.info.gain_map_channels;
+  const uint8_t orientation = tiff.info.original_orientation;
+  auto result = make_raster(std::move(tiff.info), map_width, map_height,
+                            map_channels, std::move(tiff.map),
+                            "TIFF gain-map SubIFD", cancel);
+  normalize_gainmap_orientation(result, orientation);
+  result.decode_ms = elapsed_ms(begin);
+  return result;
+}
+
+GainMapRaster extract_jxl_gainmap(const std::filesystem::path& path,
+                                  std::atomic_bool* cancel,
+                                  bool decode_pixels) {
+  const auto begin = Clock::now();
+  const auto file = read_file(path);
+  const auto bundle = find_jhgm(file);
+  if (!bundle.gain_map) throw std::runtime_error("JPEG XL does not contain a jhgm gain map");
+  if (!decode_pixels) {
+    auto decoder = JxlDecoderMake(nullptr);
+    if (!decoder || JxlDecoderSubscribeEvents(decoder.get(), JXL_DEC_BASIC_INFO) != JXL_DEC_SUCCESS ||
+        JxlDecoderSetInput(decoder.get(), bundle.gain_map, bundle.gain_map_size) != JXL_DEC_SUCCESS) {
+      throw std::runtime_error("cannot inspect embedded JPEG XL gain map");
+    }
+    JxlDecoderCloseInput(decoder.get());
+    JxlBasicInfo basic{};
+    while (true) {
+      const auto status = JxlDecoderProcessInput(decoder.get());
+      if (status == JXL_DEC_BASIC_INFO) {
+        if (JxlDecoderGetBasicInfo(decoder.get(), &basic) != JXL_DEC_SUCCESS) {
+          throw std::runtime_error("cannot read embedded JPEG XL gain-map info");
+        }
+        break;
+      }
+      if (status == JXL_DEC_ERROR || status == JXL_DEC_NEED_MORE_INPUT || status == JXL_DEC_SUCCESS) {
+        throw std::runtime_error("embedded JPEG XL gain-map info is missing");
+      }
+    }
+    GainMapRaster result;
+    result.info.path = path;
+    result.info.format = "JPEG XL";
+    result.info.asset_kind = "gain-map-hdr";
+    result.width = basic.xsize;
+    result.height = basic.ysize;
+    result.channels = basic.num_color_channels == 1 ? 1u : 3u;
+    result.bit_depth = basic.bits_per_sample;
+    result.encoding = "JPEG XL jhgm gain-map codestream";
+    result.original_bytes.assign(bundle.gain_map, bundle.gain_map + bundle.gain_map_size);
+    result.original_extension = ".jxl";
+    result.decode_ms = elapsed_ms(begin);
+    return result;
+  }
+  auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size);
+  auto info = inspect_iso_gainmap_jxl(path);
+  auto result = make_raster(std::move(info), map.width, map.height, map.channels,
+                            std::move(map.pixels), "JPEG XL jhgm gain-map codestream", cancel);
+  result.original_bytes.assign(bundle.gain_map, bundle.gain_map + bundle.gain_map_size);
+  result.original_extension = ".jxl";
+  normalize_gainmap_orientation(result, result.info.original_orientation);
+  result.decode_ms = elapsed_ms(begin);
+  return result;
+}
+
+#ifdef _WIN32
+std::vector<uint16_t> decode_jpeg_rgb16(const uint8_t* bytes, size_t size,
+                                        uint32_t& width, uint32_t& height,
+                                        std::atomic_bool* cancel) {
+  if (!bytes || size == 0 || size > std::numeric_limits<unsigned long>::max()) {
+    throw std::runtime_error("embedded gain-map JPEG is empty or too large");
+  }
+  struct ErrorManager {
+    jpeg_error_mgr base{};
+    jmp_buf jump{};
+    char message[JMSG_LENGTH_MAX]{};
+  } error;
+  jpeg_decompress_struct decoder{};
+  decoder.err = jpeg_std_error(&error.base);
+  error.base.error_exit = [](j_common_ptr common) {
+    auto* manager = reinterpret_cast<ErrorManager*>(common->err);
+    (*common->err->format_message)(common, manager->message);
+    longjmp(manager->jump, 1);
+  };
+  if (setjmp(error.jump)) {
+    jpeg_destroy_decompress(&decoder);
+    throw std::runtime_error(std::string("embedded gain-map JPEG decode failed: ") + error.message);
+  }
+  jpeg_create_decompress(&decoder);
+  jpeg_mem_src(&decoder, const_cast<unsigned char*>(bytes), static_cast<unsigned long>(size));
+  if (jpeg_read_header(&decoder, TRUE) != JPEG_HEADER_OK || !jpeg_start_decompress(&decoder)) {
+    jpeg_destroy_decompress(&decoder);
+    throw std::runtime_error("embedded gain-map JPEG header is invalid");
+  }
+  width = decoder.output_width;
+  height = decoder.output_height;
+  const int components = decoder.output_components;
+  if (!width || !height || (components != 1 && components != 3 && components != 4)) {
+    jpeg_destroy_decompress(&decoder);
+    throw std::runtime_error("embedded gain-map JPEG has an unsupported pixel layout");
+  }
+  std::vector<uint8_t> row(static_cast<size_t>(width) * components);
+  std::vector<uint16_t> samples(static_cast<size_t>(width) * height * 3u);
+  while (decoder.output_scanline < decoder.output_height) {
+    check_gainmap_cancel(cancel);
+    JSAMPROW row_ptr = row.data();
+    jpeg_read_scanlines(&decoder, &row_ptr, 1);
+    const uint32_t y = decoder.output_scanline - 1u;
+    for (uint32_t x = 0; x < width; ++x) {
+      const uint8_t value_r = row[static_cast<size_t>(x) * components];
+      const uint8_t value_g = components == 1 ? value_r : row[static_cast<size_t>(x) * components + 1u];
+      const uint8_t value_b = components == 1 ? value_r : row[static_cast<size_t>(x) * components + 2u];
+      const size_t p = (static_cast<size_t>(y) * width + x) * 3u;
+      samples[p] = static_cast<uint16_t>(value_r) * 257u;
+      samples[p + 1u] = static_cast<uint16_t>(value_g) * 257u;
+      samples[p + 2u] = static_cast<uint16_t>(value_b) * 257u;
+    }
+  }
+  jpeg_finish_decompress(&decoder);
+  jpeg_destroy_decompress(&decoder);
+  return samples;
+}
+#endif
+
+GainMapRaster extract_jpeg_gainmap(const std::filesystem::path& path,
+                                   std::atomic_bool* cancel,
+                                   bool decode_pixels) {
+#ifndef _WIN32
+  (void)path; (void)cancel;
+  throw std::runtime_error("embedded JPEG gain-map extraction requires Windows WIC");
+#else
+  const auto begin = Clock::now();
+  const auto bytes = read_file(path);
+  uhdr_compressed_image_t input{};
+  input.data = const_cast<uint8_t*>(bytes.data());
+  input.data_sz = input.capacity = bytes.size();
+  input.cg = UHDR_CG_UNSPECIFIED;
+  input.ct = UHDR_CT_UNSPECIFIED;
+  input.range = UHDR_CR_UNSPECIFIED;
+  UhdrDecoderPtr decoder(uhdr_create_decoder());
+  if (!decoder) throw std::runtime_error("cannot create gain-map JPEG decoder");
+  require_uhdr(uhdr_dec_set_image(decoder.get(), &input), "set gain-map JPEG input");
+  require_uhdr(uhdr_dec_set_out_img_format(decoder.get(), UHDR_IMG_FMT_64bppRGBAHalfFloat),
+               "set gain-map JPEG precision");
+  require_uhdr(uhdr_dec_set_out_color_transfer(decoder.get(), UHDR_CT_LINEAR),
+               "set gain-map JPEG transfer");
+  require_uhdr(uhdr_dec_probe(decoder.get()), "parse gain-map JPEG");
+  uhdr_mem_block_t* gain = uhdr_dec_get_gainmap_image(decoder.get());
+  if (!gain || !gain->data || !gain->data_sz) throw std::runtime_error("gain-map JPEG image is missing");
+  const auto probe = jpeg::inspect(gain->data, gain->data_sz);
+  if (!decode_pixels) {
+    GainMapRaster result;
+    result.info.path = path;
+    result.info.format = "JPEG";
+    result.info.asset_kind = "gain-map-hdr";
+    result.width = probe.width;
+    result.height = probe.height;
+    result.channels = probe.channels == 1 ? 1u : 3u;
+    result.bit_depth = 8;
+    result.encoding = "embedded JPEG gain-map image";
+    result.original_bytes = standalone_gainmap_jpeg(
+        static_cast<const uint8_t*>(gain->data), gain->data_sz);
+    result.original_extension = ".jpg";
+    result.decode_ms = elapsed_ms(begin);
+    return result;
+  }
+  uint32_t width = 0, height = 0;
+  auto samples = decode_jpeg_rgb16(static_cast<const uint8_t*>(gain->data), gain->data_sz,
+                                   width, height, cancel);
+  SourceInfo info;
+  try {
+    info = inspect_apple_jpeg_gainmap(path);
+  } catch (...) {
+    info = hdrbridge::inspect(path);
+  }
+  if (probe.channels == 1) {
+    std::vector<uint16_t> mono(static_cast<size_t>(width) * height);
+    for (size_t i = 0; i < mono.size(); ++i) mono[i] = samples[i * 3u];
+    samples = std::move(mono);
+  }
+  auto result = make_raster(std::move(info), width, height, probe.channels,
+                            std::move(samples), "embedded JPEG gain-map image", cancel);
+  result.original_bytes = standalone_gainmap_jpeg(
+      static_cast<const uint8_t*>(gain->data), gain->data_sz);
+  result.original_extension = ".jpg";
+  normalize_gainmap_orientation(result, result.info.original_orientation);
+  result.decode_ms = elapsed_ms(begin);
+  return result;
+#endif
+}
+
+GainMapRaster extract_heif_gainmap(const std::filesystem::path& path,
+                                   std::atomic_bool* cancel) {
+  const auto begin = Clock::now();
+  auto asset = extract_apple_heif_gainmap_asset(path, cancel);
+  const uint32_t width = asset.map_storage_width;
+  const uint32_t height = asset.map_storage_height;
+  std::vector<uint16_t> map = std::move(asset.gain_map_rgb16);
+  auto info = std::move(asset.info);
+  auto result = make_raster(std::move(info), width, height, 1u, std::move(map),
+                            "Apple auxiliary HDR gain-map image", cancel);
+  normalize_gainmap_orientation(result, result.info.original_orientation);
+  result.decode_ms = elapsed_ms(begin);
+  return result;
+}
+
+}  // namespace
+
+GainMapRaster extract_gain_map(const std::filesystem::path& path,
+                               std::atomic_bool* cancel,
+                               bool decode_pixels) {
+  const auto extension = path.extension().wstring();
+  std::wstring upper = extension;
+  std::transform(upper.begin(), upper.end(), upper.begin(), towupper);
+  if (upper == L".AVIF" && is_adobe_tmap_avif(path)) return extract_avif_gainmap(path, cancel);
+  if ((upper == L".TIF" || upper == L".TIFF") && is_adobe_gainmap_tiff(path)) return extract_tiff_gainmap(path, cancel);
+  if (upper == L".JXL" && is_iso_gainmap_jxl(path)) return extract_jxl_gainmap(path, cancel, decode_pixels);
+  if (upper == L".HEIF" || upper == L".HEIC" || upper == L".HIF") {
+    if (probe_apple_heif(path).detected) return extract_heif_gainmap(path, cancel);
+  }
+  if (upper == L".JPG" || upper == L".JPEG" || upper == L".JPE") {
+    return extract_jpeg_gainmap(path, cancel, decode_pixels);
+  }
+  throw std::runtime_error("No supported Gain Map was found in this file");
 }
 
 }  // namespace hdrbridge::gainmap

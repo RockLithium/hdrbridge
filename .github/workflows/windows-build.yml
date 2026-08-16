@@ -40,7 +40,19 @@ jobs:
         shell: pwsh
         run: |
           $extensions = '.hif','.heif','.heic','.jpg','.jpeg','.jpe','.png','.tif','.tiff','.avif','.jxl','.jxr','.wdp','.hdp'
-          $bad = Get-ChildItem -Recurse -File | Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() }
+          $publicBranding = @(
+            'assets/branding/hdrbridge-logo-source.png',
+            'assets/branding/hdrbridge-logo.png',
+            'web/public/apple-touch-icon.png',
+            'web/public/favicon-32x32.png',
+            'web/public/icon-192.png',
+            'web/public/icon-512.png'
+          )
+          $bad = git ls-files | Where-Object {
+            $relative = $_.Replace('\\', '/')
+            ($extensions -contains [IO.Path]::GetExtension($relative).ToLowerInvariant()) -and
+              ($publicBranding -notcontains $relative)
+          }
           if ($bad) {
             $bad | ForEach-Object { Write-Host "Unexpected image payload: $($_.FullName)" }
             throw 'Camera fixtures and generated images are not allowed in the public repository.'

@@ -24,7 +24,8 @@ const bundled = source
   .replace("<title>HDR Bridge Web</title>",
     "<title>HDR Bridge Web — Compatibility Mode</title>")
   .replace('href="../tools"', 'href="../../tools"')
-  .replace('href="./src/styles.css?v=6"', 'href="../src/styles.css?v=6"')
+  .replace('href="./src/styles.css?v=7"', 'href="../src/styles.css?v=7"')
+  .replaceAll('href="./public/', 'href="../public/')
   .replace(marker,
     `<script id="hdrbridge-embedded-core" type="application/octet-stream">${encoded}</script>\n` +
     '  <script type="module" src="../src/app.js?v=9"></script>');

@@ -69,6 +69,11 @@ tests/private/
 *.HDP
 *.hdp
 
+# Public branding assets
+!assets/branding/*.png
+!web/public/*.png
+!web/public/assets/*.png
+
 # Optional local env
 .env
 .env.*

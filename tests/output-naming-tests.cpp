@@ -23,7 +23,10 @@ int main() {
       hdrbridge::desktop::extension_for_mode(L"png-pq16") != L".png" ||
       hdrbridge::desktop::extension_for_mode(L"jxr-scrgb-fp16") != L".jxr" ||
       hdrbridge::desktop::extension_for_mode(L"avif-pq10") != L".avif" ||
-      hdrbridge::desktop::extension_for_mode(L"tiff-pq16") != L".tif") {
+      hdrbridge::desktop::extension_for_mode(L"tiff-pq16") != L".tif" ||
+      hdrbridge::desktop::extension_for_mode(L"gainmap-extract", L"original", L"map.jxl") != L".jxl" ||
+      hdrbridge::desktop::extension_for_mode(L"gainmap-extract", L"original", L"map.heic") != L".png" ||
+      hdrbridge::desktop::extension_for_mode(L"gainmap-extract", L"tiff", L"map.avif") != L".tif") {
     std::cerr << "mode extension mismatch\n";
     return 1;
   }

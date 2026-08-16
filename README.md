@@ -25,9 +25,9 @@ Available outputs:
 - FP16 linear scRGB JPEG XR;
 - 10-bit 4:4:4 HDR AVIF in PQ or HLG;
 - RGB gain-map AVIF;
-- packed RGB10 JPEG XR as an experimental option.
+- embedded gain-map extraction to the original payload where possible, or PNG, TIFF and JPEG images.
 
-The desktop order reflects observed interoperability: Ultra HDR JPEG, HDR PNG, HDR TIFF, JPEG XL, FP16 scRGB JPEG XR, AVIF, then experimental RGB10 JPEG XR. Direct HDR TIFF uses an HDR-aware CICP ICC and an application-compatible large-strip layout. Deflate compression is enabled by default and may be disabled.
+The desktop order reflects observed interoperability: Ultra HDR JPEG, HDR PNG, HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and AVIF, followed by the Gain Map inspection/export tool. Direct HDR TIFF uses an HDR-aware CICP ICC and an application-compatible large-strip layout. Deflate compression is enabled by default and may be disabled.
 
 The Inspector reports the encoded source representation, metadata, gain-map components and reconstructed HDR separately. The task queue is sequential so large images do not accumulate in memory; tasks retain independent settings, status and progress, and a bad or non-HDR file does not stop the rest of the queue.
 

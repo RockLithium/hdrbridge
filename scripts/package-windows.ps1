@@ -1,6 +1,6 @@
 param(
     [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build-vs\bin\Release"),
-    [string]$Version = "1.1.3",
+    [string]$Version = "1.2.0",
     [string]$Destination = (Join-Path $PSScriptRoot "..\dist\HDRBridge-v$Version-Windows-x64")
 )
 
@@ -80,6 +80,7 @@ Primary outputs:
 - 10-bit 4:4:4 PQ/HLG AVIF
 - RGB gain-map AVIF
 - RGB16 PQ TIFF
+- Embedded Gain Map extraction (original, PNG, TIFF or JPEG)
 
 The application is unsigned. Windows may show a SmartScreen or unknown-
 publisher warning. See docs/COMPATIBILITY_MATRIX.md for measured application
