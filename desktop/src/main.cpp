@@ -261,7 +261,7 @@ std::string narrow(const std::wstring& input) {
 }
 
 void layout(AppState* state, int width, int height);
-void update_mode_ui(AppState* state);
+void update_mode_ui(AppState* state, bool restore_saved_gamut = true);
 
 void open_folder_for(HWND owner, const std::filesystem::path& path, bool select_file) {
   if (path.empty()) return;
@@ -461,7 +461,7 @@ void reset_conversion_settings(AppState* state) {
   state->last_transfer_index = -1;
   state->last_representation_index = -1;
   state->last_encoding_format_index = -1;
-  update_mode_ui(state);
+  update_mode_ui(state, false);
 }
 
 void save_layout(AppState* state) {
@@ -1017,7 +1017,7 @@ void update_uhdr_format_note(AppState* state) {
   SetWindowTextW(state->format_note, notes[peak_index]);
 }
 
-void update_mode_ui(AppState* state) {
+void update_mode_ui(AppState* state, bool restore_saved_gamut) {
   const int index = static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0));
   if (state->last_format_index >= 0 && state->last_format_index != 1 &&
       state->last_format_index != 2) {
@@ -1087,7 +1087,7 @@ void update_mode_ui(AppState* state) {
     add_gamut(L"Display P3", 12);
   }
   int saved_gamut = -1;
-  if (state->last_format_index < 0) {
+  if (restore_saved_gamut && state->last_format_index < 0) {
     if (const auto value = read_layout_value(L"OutputGamutCicp")) {
       saved_gamut = static_cast<int>(*value);
     }
