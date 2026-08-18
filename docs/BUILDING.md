@@ -34,15 +34,15 @@ The archive contains the GUI, required runtime DLLs, license texts and public do
 
 ## Main dependencies
 
-| Component | Purpose |
-|---|---|
-| libheif + libde265 | HEIF/HIF parsing and HEVC decode |
-| libavif + libaom | AVIF item parsing, decode and encode |
-| libjxl | JPEG XL decode, encode and verification |
+| Component                   | Purpose                                     |
+| --------------------------- | ------------------------------------------- |
+| libheif + libde265          | HEIF/HIF parsing and HEVC decode            |
+| libavif + libaom            | AVIF item parsing, decode and encode        |
+| libjxl                      | JPEG XL decode, encode and verification     |
 | libultrahdr + libjpeg-turbo | Ultra HDR decode, reconstruction and encode |
-| libpng + zlib | HDR PNG |
-| libtiff + liblzma | HDR and gain-map TIFF |
-| Little CMS | ICC parsing and profile generation |
-| Windows Imaging Component | FP16 scRGB JPEG XR |
+| libpng + zlib               | HDR PNG                                     |
+| libtiff + liblzma           | HDR and gain-map TIFF                       |
+| Little CMS                  | ICC parsing and profile generation          |
+| Windows Imaging Component   | FP16 scRGB JPEG XR                          |
 
 Exact license texts are collected into the portable archive. The tested dependency versions are recorded in `vcpkg.json`, the vcpkg lock revision and the libjxl overlay.

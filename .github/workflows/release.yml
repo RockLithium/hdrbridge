@@ -69,12 +69,9 @@ jobs:
           Windows x64 portable release of HDR Bridge.
 
           ### Changes
-          - Add embedded Gain Map extraction with Original, PNG, TIFF and JPEG output
-            - Preserve mono maps as mono images and RGB maps as single three-channel images
-            - Copy JPEG/JXL Gain Maps without pixel re-encoding where possible
-            - Sanitize detached Apple/Ultra HDR JPEG Gain Maps for standalone viewer compatibility
-            - Replace the experimental RGB10 JPEG XR output while retaining FP16 scRGB JPEG XR
-          - Add HDR Bridge branding to the Windows application and Web converter
+          - Keep the Ultra HDR format summary synchronized with the selected Peak option
+          - Avoid an invalid 1.0× gain-map capacity when Auto Peak reaches the 203-nit codec boundary
+          - Apply the same 204-nit boundary handling in the shared Windows and Web conversion core
 
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 

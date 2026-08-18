@@ -2263,7 +2263,7 @@ void encode_tiff(const std::filesystem::path& path, const DecodedImage& decoded,
   const std::string description = p3 ? "HDR Bridge direct RGB16 Display P3 PQ" :
                                        "HDR Bridge direct RGB16 Rec.2020 PQ";
   TIFFSetField(tiff.get(), TIFFTAG_IMAGEDESCRIPTION, description.c_str());
-  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.2.0");
+  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.2.1");
   TIFFSetField(tiff.get(), TIFFTAG_ICCPROFILE, static_cast<uint32_t>(icc.size()), icc.data());
   std::vector<uint8_t> diagnostic_photoshop;
   std::vector<uint8_t> diagnostic_iptc;
@@ -4501,6 +4501,12 @@ ConversionResult convert(const std::filesystem::path& input,
         resized = resize_linear_hdr_to_fit(decoded, 8192u);
         uhdr_source = &*resized;
         uhdr_stats = measure_hdr(*uhdr_source, options.target_peak_nits);
+      }
+      if (uhdr_stats.chosen_target_nits <= 203.0) {
+        uhdr_stats.chosen_target_nits = 204.0;
+        uhdr_stats.reason += uhdr_stats.reason.empty() ? "" : "; ";
+        uhdr_stats.reason +=
+            "adjusted to 204 nits because Ultra HDR capacity max must be greater than 1.0";
       }
       const auto gain_map_start = Clock::now();
       bytes = encode_ultrahdr(*uhdr_source, options, uhdr_stats);

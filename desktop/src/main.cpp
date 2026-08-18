@@ -1004,6 +1004,19 @@ void add_or_update_task(AppState* state) {
   }
 }
 
+void update_uhdr_format_note(AppState* state) {
+  constexpr const wchar_t* notes[] = {
+      L"Faithful / Auto • SDR base + ISO gain map",
+      L"1000-nit target • SDR base + ISO gain map",
+      L"2000-nit target • SDR base + ISO gain map",
+      L"4000-nit target • SDR base + ISO gain map",
+      L"10000-nit target • SDR base + ISO gain map",
+  };
+  const int peak_index = std::clamp(static_cast<int>(
+      SendMessageW(state->peak, CB_GETCURSEL, 0, 0)), 0, 4);
+  SetWindowTextW(state->format_note, notes[peak_index]);
+}
+
 void update_mode_ui(AppState* state) {
   const int index = static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0));
   if (state->last_format_index >= 0 && state->last_format_index != 1 &&
@@ -1030,7 +1043,7 @@ void update_mode_ui(AppState* state) {
   const int representation_index = (index == 3 || index == 5) && transfer_index == 2 ? 1 : 0;
   const bool hlg = transfer_index == 1;
   std::wstring note;
-  if (index == 0) note = L"Faithful / Auto • SDR base + ISO gain map";
+  if (index == 0) update_uhdr_format_note(state);
   else if (index == 1) note = hlg ? L"16-bit HLG • cICP 9/18/0/1" : L"16-bit PQ • cICP 9/16/0/1 • Rec.2100 PQ ICC";
   else if (index == 2) note = L"RGB16 PQ • professional interchange";
   else if (index == 3) note = representation_index == 1 ? L"ISO gain map • edit / master" :
@@ -1039,7 +1052,7 @@ void update_mode_ui(AppState* state) {
   else if (index == 5) note = representation_index == 1 ? L"ISO gain map • compact delivery" :
       hlg ? L"HLG • compact delivery" : L"PQ • compact delivery";
   else note = L"Extract embedded Gain Map • original payload when available";
-  SetWindowTextW(state->format_note, note.c_str());
+  if (index != 0) SetWindowTextW(state->format_note, note.c_str());
   const bool ultrahdr_output = index == 0;
   const bool gainmap_output = ultrahdr_output ||
       (representation_output && representation_index == 1);
@@ -2403,6 +2416,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
               SendMessageW(state->format, CB_GETCURSEL, 0, 0) == 0) {
             state->uhdr_gainmap_channels = std::clamp(static_cast<int>(
                 SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0)), 0, 1);
+          }
+          break;
+        case IDC_PEAK:
+          if (HIWORD(wparam) == CBN_SELCHANGE &&
+              SendMessageW(state->format, CB_GETCURSEL, 0, 0) == 0) {
+            update_uhdr_format_note(state);
           }
           break;
         case IDC_LOSSLESS: update_mode_ui(state); break;
