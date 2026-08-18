@@ -4496,9 +4496,9 @@ ConversionResult convert(const std::filesystem::path& input,
       std::optional<DecodedImage> resized;
       const DecodedImage* uhdr_source = &decoded;
       HdrStats uhdr_stats = stats;
-      if (decoded.info.width > 8192u || decoded.info.height > 8192u) {
-        report(progress, 50, "Resampling linear HDR to the Ultra HDR 8192-pixel codec limit");
-        resized = resize_linear_hdr_to_fit(decoded, 8192u);
+      if (decoded.info.width > 65500u || decoded.info.height > 65500u) {
+        report(progress, 50, "Resampling linear HDR to the JPEG 65500-pixel codec limit");
+        resized = resize_linear_hdr_to_fit(decoded, 65500u);
         uhdr_source = &*resized;
         uhdr_stats = measure_hdr(*uhdr_source, options.target_peak_nits);
       }

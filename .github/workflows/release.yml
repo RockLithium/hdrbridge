@@ -69,10 +69,7 @@ jobs:
           Windows x64 portable release of HDR Bridge.
 
           ### Changes
-          - Keep the Ultra HDR format summary synchronized with the selected Peak option
-          - Avoid an invalid 1.0× gain-map capacity when Auto Peak reaches the 203-nit codec boundary
-          - Apply the same 204-nit boundary handling in the shared Windows and Web conversion core
-          - Restore the default output gamut when Reset settings is used
+          - Preserve Ultra HDR dimensions above 8192 pixels, up to the JPEG codec limit of 65500 pixels
 
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 
