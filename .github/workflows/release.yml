@@ -69,7 +69,7 @@ jobs:
           Windows x64 portable release of HDR Bridge.
 
           ### Changes
-          - Preserve Ultra HDR dimensions above 8192 pixels, up to the JPEG codec limit of 65500 pixels
+          - Support Unicode input and output paths across HIF, HEIF, HEIC and AVIF workflows on Windows
 
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 

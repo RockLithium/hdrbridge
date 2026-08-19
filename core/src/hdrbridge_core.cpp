@@ -445,18 +445,22 @@ void inspect_container_bits(const std::vector<uint8_t>& bytes, SourceInfo& info)
 }
 
 struct OpenedHeif {
+  std::vector<uint8_t> bytes;
   ContextPtr context;
   HandlePtr handle;
 };
 
 OpenedHeif open_heif(const std::filesystem::path& path) {
+  auto bytes = read_file(path);
   ContextPtr context(heif_context_alloc());
   if (!context) throw std::bad_alloc();
   heif_context_set_max_decoding_threads(context.get(), 0);
-  require_heif(heif_context_read_from_file(context.get(), path.string().c_str(), nullptr), "read HEIF");
+  require_heif(heif_context_read_from_memory_without_copy(
+                   context.get(), bytes.data(), bytes.size(), nullptr),
+               "read HEIF");
   heif_image_handle* raw = nullptr;
   require_heif(heif_context_get_primary_image_handle(context.get(), &raw), "get primary image");
-  return {std::move(context), HandlePtr(raw)};
+  return {std::move(bytes), std::move(context), HandlePtr(raw)};
 }
 
 uint8_t heif_container_orientation(const OpenedHeif& opened) {
@@ -2575,7 +2579,28 @@ void encode_avif(const std::filesystem::path& path, const DecodedImage& decoded,
     require_heif(heif_context_add_XMP_metadata(context.get(), handle.get(), decoded.xmp.data(), static_cast<int>(decoded.xmp.size())),
                  "copy XMP to direct PQ AVIF");
   }
-  require_heif(heif_context_write_to_file(context.get(), path.string().c_str()), "write direct PQ AVIF");
+  std::vector<uint8_t> encoded_file;
+  heif_writer writer{};
+  writer.writer_api_version = 1;
+  writer.write = [](heif_context*, const void* data, size_t size,
+                    void* userdata) noexcept -> heif_error {
+    try {
+      auto& output = *static_cast<std::vector<uint8_t>*>(userdata);
+      const auto* begin = static_cast<const uint8_t*>(data);
+      output.insert(output.end(), begin, begin + size);
+      return {heif_error_Ok, heif_suberror_Unspecified, "Success"};
+    } catch (...) {
+      return {heif_error_Encoding_error, heif_suberror_Unspecified,
+              "Cannot buffer encoded AVIF"};
+    }
+  };
+  require_heif(heif_context_write(context.get(), &writer, &encoded_file),
+               "serialize direct PQ AVIF");
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output) throw std::runtime_error("cannot open direct PQ AVIF output");
+  output.write(reinterpret_cast<const char*>(encoded_file.data()),
+               static_cast<std::streamsize>(encoded_file.size()));
+  if (!output) throw std::runtime_error("cannot write direct PQ AVIF output");
 }
 
 void require_avif_result(avifResult result, const avifDiagnostics& diagnostics,

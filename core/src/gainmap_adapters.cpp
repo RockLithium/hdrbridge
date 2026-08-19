@@ -233,9 +233,11 @@ ItemGraph read_item_graph(const heif_context* context) {
 }
 
 ItemGraph read_item_graph(const std::filesystem::path& path) {
+  const auto bytes = read_file(path);
   HeifContextPtr context(heif_context_alloc());
   if (!context) throw std::bad_alloc();
-  require_heif(heif_context_read_from_file(context.get(), path.string().c_str(), nullptr),
+  require_heif(heif_context_read_from_memory_without_copy(
+                   context.get(), bytes.data(), bytes.size(), nullptr),
                "read AVIF item graph");
   return read_item_graph(context.get());
 }
@@ -1136,9 +1138,11 @@ ReconstructedHdr reconstruct_adobe_gainmap_tiff(
 AppleAuxiliaryProbe probe_apple_heif(const std::filesystem::path& path) {
   AppleAuxiliaryProbe probe;
   probe.container = "HEIF/HEIC";
+  const auto bytes = read_file(path);
   HeifContextPtr context(heif_context_alloc());
   if (!context) throw std::bad_alloc();
-  const heif_error read = heif_context_read_from_file(context.get(), path.string().c_str(), nullptr);
+  const heif_error read = heif_context_read_from_memory_without_copy(
+      context.get(), bytes.data(), bytes.size(), nullptr);
   if (read.code != heif_error_Ok) return probe;
   heif_image_handle* raw_primary = nullptr;
   if (heif_context_get_primary_image_handle(context.get(), &raw_primary).code != heif_error_Ok) return probe;
@@ -1195,9 +1199,11 @@ AppleAuxiliaryProbe probe_apple_jpeg(const std::filesystem::path& path) {
 SourceInfo inspect_apple_heif_gainmap(const std::filesystem::path& path) {
   const AppleAuxiliaryProbe probe = probe_apple_heif(path);
   if (!probe.detected) throw std::runtime_error("Apple HDR auxiliary gain map was not found");
+  const auto bytes = read_file(path);
   HeifContextPtr context(heif_context_alloc());
   if (!context) throw std::bad_alloc();
-  require_heif(heif_context_read_from_file(context.get(), path.string().c_str(), nullptr),
+  require_heif(heif_context_read_from_memory_without_copy(
+                   context.get(), bytes.data(), bytes.size(), nullptr),
                "inspect Apple HDR HEIC");
   heif_image_handle* raw_primary = nullptr;
   require_heif(heif_context_get_primary_image_handle(context.get(), &raw_primary),
@@ -1392,9 +1398,11 @@ std::vector<uint16_t> extract_apple_heif_auxiliary_plane(
     throw std::runtime_error("Apple HEIF auxiliary descriptor is not extractable");
   }
   if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
+  const auto bytes = read_file(path);
   HeifContextPtr context(heif_context_alloc());
   if (!context) throw std::bad_alloc();
-  require_heif(heif_context_read_from_file(context.get(), path.string().c_str(), nullptr),
+  require_heif(heif_context_read_from_memory_without_copy(
+                   context.get(), bytes.data(), bytes.size(), nullptr),
                "read Apple gain-map HEIF");
   heif_image_handle* raw_primary = nullptr;
   require_heif(heif_context_get_primary_image_handle(context.get(), &raw_primary),
@@ -1452,6 +1460,7 @@ GainMapAsset extract_apple_heif_gainmap_asset(
   if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
   const auto parse_start = Clock::now();
   const int worker_count = static_cast<int>(codec_worker_count());
+  const auto bytes = read_file(path);
   HeifContextPtr context(heif_context_alloc());
   if (!context) throw std::bad_alloc();
 #if defined(__EMSCRIPTEN__)
@@ -1459,7 +1468,8 @@ GainMapAsset extract_apple_heif_gainmap_asset(
 #else
   heif_context_set_max_decoding_threads(context.get(), worker_count);
 #endif
-  require_heif(heif_context_read_from_file(context.get(), path.string().c_str(), nullptr),
+  require_heif(heif_context_read_from_memory_without_copy(
+                   context.get(), bytes.data(), bytes.size(), nullptr),
                "read Apple HDR HEIC");
   heif_image_handle* raw_primary = nullptr;
   require_heif(heif_context_get_primary_image_handle(context.get(), &raw_primary),
