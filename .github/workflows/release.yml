@@ -57,23 +57,76 @@ jobs:
             -BuildDirectory "${{ github.workspace }}\build\bin\Release" `
             -Destination "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64"
 
+      - name: Install pinned Inno Setup compiler
+        id: inno
+        shell: pwsh
+        run: |
+          $download = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+          $install = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3"
+          Invoke-WebRequest `
+            -Uri "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe" `
+            -OutFile $download
+          $expected = "9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732"
+          $actual = (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "Inno Setup checksum mismatch" }
+          $signature = Get-AuthenticodeSignature -LiteralPath $download
+          if ($signature.Status -ne "Valid" -or
+              $signature.SignerCertificate.Subject -notmatch "Pyrsys B.V.") {
+            throw "Inno Setup Authenticode verification failed"
+          }
+          $process = Start-Process -FilePath $download -Wait -PassThru -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/DIR=$install")
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed" }
+          $iscc = Join-Path $install "ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc)) { throw "ISCC.exe was not installed" }
+          "path=$iscc" >> $env:GITHUB_OUTPUT
+
+      - name: Package and smoke-test Windows installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          .\scripts\package-windows-installer.ps1 `
+            -Version $version `
+            -SourceDirectory "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64" `
+            -IsccPath "${{ steps.inno.outputs.path }}"
+          $setup = "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64-Setup.exe"
+          $install = Join-Path $env:RUNNER_TEMP "HDR Bridge Installer Smoke Test"
+          $process = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$install")
+          if ($process.ExitCode -ne 0 -or
+              -not (Test-Path -LiteralPath (Join-Path $install "hdrbridge.exe"))) {
+            throw "Installer smoke installation failed"
+          }
+          $uninstaller = Join-Path $install "unins000.exe"
+          $process = Start-Process -FilePath $uninstaller -Wait -PassThru -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+          if ($process.ExitCode -ne 0) { throw "Installer smoke uninstall failed" }
+
       - name: Prepare release notes
         id: release
         shell: pwsh
         run: |
           $zip = "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64.zip"
+          $setup = "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64-Setup.exe"
           $exe = "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64\hdrbridge.exe"
           $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          $setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
           $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
           @"
-          Windows x64 portable release of HDR Bridge.
+          $setupHash  HDRBridge-${{ github.ref_name }}-Windows-x64-Setup.exe
+          $zipHash  HDRBridge-${{ github.ref_name }}-Windows-x64.zip
+          $exeHash  hdrbridge.exe
+          "@ | Set-Content -Encoding ASCII "${{ github.workspace }}\dist\SHA256SUMS.txt"
+          @"
+          Windows x64 release of HDR Bridge. Use the installer for normal installation and in-place upgrades, or the ZIP for portable use.
 
           ### Changes
-          - Support Unicode input and output paths across HIF, HEIF, HEIC and AVIF workflows on Windows
+          - Add a standard Windows installer with Program Files installation, in-place upgrades and uninstall support
 
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 
           ### SHA-256
+          - HDRBridge-${{ github.ref_name }}-Windows-x64-Setup.exe: $setupHash
           - HDRBridge-${{ github.ref_name }}-Windows-x64.zip: $zipHash
           - hdrbridge.exe: $exeHash
           "@ | Set-Content -Encoding UTF8 "${{ github.workspace }}\release-notes.md"
@@ -84,7 +137,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh release create "${{ github.ref_name }}"
+          "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64-Setup.exe"
           "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64.zip"
+          "${{ github.workspace }}\dist\SHA256SUMS.txt"
           --repo "${{ github.repository }}"
           --title "HDR Bridge ${{ github.ref_name }}"
           --notes-file "${{ github.workspace }}\release-notes.md"
