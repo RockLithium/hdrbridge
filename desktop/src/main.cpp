@@ -4,20 +4,30 @@
 #include <Windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <d3d11.h>
+#include <d3dcompiler.h>
 #include <dwmapi.h>
+#include <dxgi1_6.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <uxtheme.h>
+#include <wrl/client.h>
 
 #include <atomic>
 #include <algorithm>
+#include <array>
 #include <cwctype>
+#include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,6 +45,8 @@ constexpr UINT WM_APP_ITEM_STATUS = WM_APP + 7;
 constexpr UINT WM_APP_TASK_PROGRESS = WM_APP + 8;
 constexpr UINT WM_APP_TASK_OUTPUT = WM_APP + 9;
 constexpr UINT WM_APP_TASK_REORDER = WM_APP + 20;
+constexpr UINT WM_APP_PREVIEW_READY = WM_APP + 21;
+constexpr UINT WM_APP_PREVIEW_ERROR = WM_APP + 22;
 constexpr UINT_PTR kProgressResetTimer = 1;
 constexpr wchar_t kLayoutRegistryPath[] = L"Software\\HDR Bridge\\Desktop";
 constexpr UINT ID_CONTEXT_OPEN = 4001;
@@ -49,6 +61,8 @@ constexpr UINT ID_TASK_OUTPUT_FOLDER = 4015;
 constexpr UINT ID_TASK_EDIT = 4016;
 constexpr UINT ID_TASK_REMOVE_COMPLETED = 4017;
 constexpr UINT ID_TASK_REMOVE_ALL = 4018;
+constexpr UINT IDC_PREVIEW_ZOOM = 5001;
+constexpr UINT IDC_PREVIEW_FULLSCREEN = 5002;
 
 enum ControlId {
   IDC_OPEN = 100,
@@ -100,9 +114,12 @@ enum ControlId {
   ,IDC_REMOVE_ALL_TASKS
   ,IDC_TIFF_COMPRESSION
   ,IDC_GAINMAP_EXPORT_FORMAT
+  ,IDC_PREVIEW_TOGGLE
 };
 
 enum class QueueStatus { pending, running, success, skipped, failed };
+
+class PreviewRenderer;
 
 struct TaskOptions {
   hdrbridge::ConversionOptions conversion;
@@ -147,6 +164,16 @@ struct TaskProgressPayload {
 struct TaskOutputPayload {
   size_t index = 0;
   std::filesystem::path output;
+};
+
+struct PreviewPayload {
+  uint64_t generation = 0;
+  hdrbridge::PreviewImage image;
+};
+
+struct PreviewErrorPayload {
+  uint64_t generation = 0;
+  std::wstring error;
 };
 
 struct SuccessPayload {
@@ -201,6 +228,7 @@ struct AppState {
   HWND title = nullptr;
   HWND reset_layout = nullptr;
   HWND reset_settings = nullptr;
+  HWND preview_toggle = nullptr;
   HWND vertical_splitter = nullptr;
   HWND horizontal_splitter = nullptr;
   HWND tasks = nullptr;
@@ -242,6 +270,666 @@ struct AppState {
   bool lossless_setting = true;
   bool tiff_compressed = true;
   std::array<int, 7> encoding_values{95, 4, 6, 95, 95, 95, 95};
+  std::unique_ptr<PreviewRenderer> preview_renderer;
+  std::shared_ptr<std::atomic_bool> preview_cancel;
+  uint64_t preview_generation = 0;
+  bool preview_enabled = false;
+};
+
+std::wstring widen(const std::string& input);
+
+class PreviewRenderer {
+ public:
+  explicit PreviewRenderer(HWND owner) : owner_(owner) {}
+  ~PreviewRenderer() {
+    if (window_) DestroyWindow(window_);
+    if (toolbar_font_) DeleteObject(toolbar_font_);
+    if (icon_font_) DeleteObject(icon_font_);
+  }
+
+  HWND create() {
+    static std::once_flag registered;
+    std::call_once(registered, [] {
+      WNDCLASSEXW cls{sizeof(cls)};
+      cls.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+      cls.hInstance = GetModuleHandleW(nullptr);
+      cls.lpfnWndProc = &PreviewRenderer::window_proc;
+      cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+      cls.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101));
+      cls.hIconSm = cls.hIcon;
+      cls.lpszClassName = L"HDRBridgePreviewWindow";
+      RegisterClassExW(&cls);
+    });
+    window_ = CreateWindowExW(
+        0, L"HDRBridgePreviewWindow", L"HDR Bridge — Preview",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+        720, 960, nullptr, nullptr, GetModuleHandleW(nullptr), this);
+    if (!window_) {
+      error_ = L"Could not create the HDR preview window.";
+      return nullptr;
+    }
+    create_toolbar();
+    try {
+      create_device();
+    } catch (const std::exception& error) {
+      error_ = widen(error.what());
+    }
+    apply_window_theme();
+    reset_layout();
+    return window_;
+  }
+
+  HWND window() const { return window_; }
+  bool ready() const { return device_ && swapchain_ && rtv_; }
+  const std::wstring& error() const { return error_; }
+
+  void show(bool visible) {
+    if (!window_) return;
+    if (visible) {
+      reset_layout();
+      ShowWindow(window_, SW_SHOW);
+      render();
+    } else {
+      ShowWindow(window_, SW_HIDE);
+    }
+  }
+
+  void reset_layout() {
+    if (!window_) return;
+    if (fullscreen_) toggle_fullscreen();
+    if (IsZoomed(window_)) ShowWindow(window_, SW_RESTORE);
+    RECT owner_rect{};
+    GetWindowRect(owner_, &owner_rect);
+    HMONITOR monitor = MonitorFromWindow(owner_, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{sizeof(info)};
+    GetMonitorInfoW(monitor, &info);
+    const RECT work = info.rcWork;
+    const int work_height = work.bottom - work.top;
+    const int desired_height = std::clamp(static_cast<int>(owner_rect.bottom - owner_rect.top),
+                                          480, std::max(480, work_height));
+    const int height = std::min(desired_height, work_height);
+    const int width = std::max(360, height * 3 / 4);
+    const int x = owner_rect.right + 8;
+    const int y = std::clamp(static_cast<int>(owner_rect.top),
+                             static_cast<int>(work.top),
+                             static_cast<int>(work.bottom - height));
+    SetWindowPos(window_, nullptr, x, y, width, height,
+                 SWP_NOACTIVATE | SWP_NOZORDER);
+  }
+
+  static const wchar_t* preview_font_family() {
+    static const bool ubuntu = [] {
+      LOGFONTW query{};
+      query.lfCharSet = DEFAULT_CHARSET;
+      wcsncpy_s(query.lfFaceName, L"Ubuntu", _TRUNCATE);
+      bool found = false;
+      HDC dc = GetDC(nullptr);
+      EnumFontFamiliesExW(dc, &query,
+          [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM parameter) -> int {
+            *reinterpret_cast<bool*>(parameter) = true;
+            return 0;
+          }, reinterpret_cast<LPARAM>(&found), 0);
+      ReleaseDC(nullptr, dc);
+      return found;
+    }();
+    return ubuntu ? L"Ubuntu" : L"Segoe UI";
+  }
+
+  void create_toolbar() {
+    zoom_combo_ = CreateWindowExW(
+        0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL,
+        0, 0, 110, 240, window_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PREVIEW_ZOOM)),
+        GetModuleHandleW(nullptr), nullptr);
+    for (const wchar_t* item : {L"Fit", L"25%", L"50%", L"100%", L"200%", L"400%"}) {
+      SendMessageW(zoom_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
+    }
+    SendMessageW(zoom_combo_, CB_SETCURSEL, 0, 0);
+    fullscreen_button_ = CreateWindowExW(
+        0, L"BUTTON", L"\xE740", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        0, 0, 38, 30, window_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PREVIEW_FULLSCREEN)),
+        GetModuleHandleW(nullptr), nullptr);
+    const UINT dpi = GetDpiForWindow(window_);
+    toolbar_font_ = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+        preview_font_family());
+    icon_font_ = CreateFontW(-MulDiv(14, dpi, 72), 0, 0, 0, FW_NORMAL,
+        FALSE, FALSE, FALSE, SYMBOL_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe MDL2 Assets");
+    SendMessageW(zoom_combo_, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(toolbar_font_), TRUE);
+    SendMessageW(fullscreen_button_, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(icon_font_), TRUE);
+    layout_toolbar();
+  }
+
+  void layout_toolbar() {
+    if (!window_) return;
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    const int y = std::max(0, static_cast<int>(rect.bottom) - toolbar_height_ + 6);
+    MoveWindow(fullscreen_button_, std::max(8, static_cast<int>(rect.right) - 46),
+               y, 38, 30, TRUE);
+    MoveWindow(zoom_combo_, std::max(8, static_cast<int>(rect.right) - 164),
+               y, 110, 240, TRUE);
+  }
+
+  void set_image(hdrbridge::PreviewImage image) {
+    try {
+      if (!ready()) create_device();
+      image_width_ = image.width;
+      image_height_ = image.height;
+      fit_ = true;
+      zoom_ = 1.0f;
+      pan_x_ = pan_y_ = 0.0f;
+      if (zoom_combo_) SendMessageW(zoom_combo_, CB_SETCURSEL, 0, 0);
+      texture_.Reset();
+      shader_view_.Reset();
+      D3D11_TEXTURE2D_DESC desc{};
+      desc.Width = image.width;
+      desc.Height = image.height;
+      desc.MipLevels = 1;
+      desc.ArraySize = 1;
+      desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+      desc.SampleDesc.Count = 1;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      D3D11_SUBRESOURCE_DATA data{};
+      data.pSysMem = image.rgba_fp16.data();
+      data.SysMemPitch = image.width * 8u;
+      require_hr(device_->CreateTexture2D(&desc, &data, &texture_),
+                  "create preview texture");
+      require_hr(device_->CreateShaderResourceView(texture_.Get(), nullptr, &shader_view_),
+                  "create preview shader view");
+      error_.clear();
+      const std::wstring title = L"HDR Bridge — Preview — " +
+          std::to_wstring(image_width_) + L" × " + std::to_wstring(image_height_);
+      SetWindowTextW(window_, title.c_str());
+      render();
+    } catch (const std::exception& error) {
+      error_ = widen(error.what());
+      SetWindowTextW(window_, L"HDR Bridge — Preview (unavailable)");
+      texture_.Reset();
+      shader_view_.Reset();
+      if (window_) InvalidateRect(window_, nullptr, TRUE);
+    }
+  }
+
+  void clear() {
+    image_width_ = image_height_ = 0;
+    texture_.Reset();
+    shader_view_.Reset();
+    render();
+  }
+
+ private:
+  using ComPtr = Microsoft::WRL::ComPtr<IUnknown>;
+
+  static void require_hr(HRESULT result, const char* operation) {
+    if (FAILED(result)) {
+      std::ostringstream out;
+      out << operation << " failed (HRESULT 0x" << std::hex
+          << static_cast<uint32_t>(result) << ')';
+      throw std::runtime_error(out.str());
+    }
+  }
+
+  void apply_window_theme() {
+    DWORD light = 1;
+    DWORD size = sizeof(light);
+    const bool dark = RegGetValueW(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size) == ERROR_SUCCESS &&
+        light == 0;
+    const BOOL dark_title = dark ? TRUE : FALSE;
+    DwmSetWindowAttribute(window_, 20, &dark_title, sizeof(dark_title));
+    if (zoom_combo_) SetWindowTheme(zoom_combo_, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+    if (fullscreen_button_) SetWindowTheme(
+        fullscreen_button_, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+  }
+
+  static Microsoft::WRL::ComPtr<ID3DBlob> compile_shader(const char* source,
+                                                          const char* entry,
+                                                          const char* target) {
+    Microsoft::WRL::ComPtr<ID3DBlob> blob;
+    Microsoft::WRL::ComPtr<ID3DBlob> errors;
+    const HRESULT result = D3DCompile(
+        source, std::strlen(source), nullptr, nullptr, nullptr, entry, target,
+        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &blob, &errors);
+    if (FAILED(result)) {
+      std::string message = errors
+          ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
+          : "shader compilation failed";
+      throw std::runtime_error(message);
+    }
+    return blob;
+  }
+
+  void create_device() {
+    if (ready()) return;
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    D3D_FEATURE_LEVEL selected{};
+    HRESULT result = D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels, 2,
+        D3D11_SDK_VERSION, &device_, &selected, &context_);
+    if (FAILED(result)) {
+      result = D3D11CreateDevice(
+          nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, levels, 2,
+          D3D11_SDK_VERSION, &device_, &selected, &context_);
+    }
+    require_hr(result, "create D3D11 device");
+
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    Microsoft::WRL::ComPtr<IDXGIFactory2> factory;
+    require_hr(device_.As(&dxgi_device), "query DXGI device");
+    require_hr(dxgi_device->GetAdapter(&adapter), "query DXGI adapter");
+    require_hr(adapter->GetParent(IID_PPV_ARGS(&factory)), "query DXGI factory");
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SampleDesc.Count = 1;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    require_hr(factory->CreateSwapChainForHwnd(
+                    device_.Get(), window_, &desc, nullptr, nullptr, &swapchain_),
+                "create HDR preview swap chain");
+    factory->MakeWindowAssociation(window_, DXGI_MWA_NO_ALT_ENTER);
+    Microsoft::WRL::ComPtr<IDXGISwapChain3> swapchain3;
+    if (SUCCEEDED(swapchain_.As(&swapchain3))) {
+      UINT support = 0;
+      if (SUCCEEDED(swapchain3->CheckColorSpaceSupport(
+              DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) &&
+          (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT)) {
+        swapchain3->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
+      }
+    }
+
+    static constexpr char vertex_source[] = R"(
+      struct VSOut { float4 position : SV_POSITION; float2 uv : TEXCOORD0; };
+      VSOut main(uint id : SV_VertexID) {
+        float2 p[3] = { float2(-1, -1), float2(-1, 3), float2(3, -1) };
+        VSOut output;
+        output.position = float4(p[id], 0, 1);
+        output.uv = float2((p[id].x + 1) * 0.5, 1 - (p[id].y + 1) * 0.5);
+        return output;
+      }
+    )";
+    static constexpr char pixel_source[] = R"(
+      Texture2D image_texture : register(t0);
+      SamplerState image_sampler : register(s0);
+      cbuffer View : register(b0) { float4 uv_transform; };
+      struct VSOut { float4 position : SV_POSITION; float2 uv : TEXCOORD0; };
+      float4 main(VSOut input) : SV_TARGET {
+        return image_texture.Sample(image_sampler,
+                                    input.uv * uv_transform.xy + uv_transform.zw);
+      }
+    )";
+    auto vertex = compile_shader(vertex_source, "main", "vs_5_0");
+    auto pixel = compile_shader(pixel_source, "main", "ps_5_0");
+    require_hr(device_->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(),
+                                           nullptr, &vertex_shader_), "create preview vertex shader");
+    require_hr(device_->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(),
+                                          nullptr, &pixel_shader_), "create preview pixel shader");
+    D3D11_SAMPLER_DESC sampler_desc{};
+    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+    sampler_desc.AddressU = sampler_desc.AddressV = sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+    require_hr(device_->CreateSamplerState(&sampler_desc, &sampler_), "create preview sampler");
+    D3D11_BUFFER_DESC view_desc{};
+    view_desc.ByteWidth = sizeof(float) * 4;
+    view_desc.Usage = D3D11_USAGE_DEFAULT;
+    view_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    require_hr(device_->CreateBuffer(&view_desc, nullptr, &view_buffer_),
+               "create preview view buffer");
+    create_render_target();
+  }
+
+  void create_render_target() {
+    if (!swapchain_) return;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> back_buffer;
+    require_hr(swapchain_->GetBuffer(0, IID_PPV_ARGS(&back_buffer)), "get preview back buffer");
+    require_hr(device_->CreateRenderTargetView(back_buffer.Get(), nullptr, &rtv_),
+                "create preview render target");
+  }
+
+  void resize() {
+    if (!swapchain_) return;
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    const int content_height = std::max(0, static_cast<int>(rect.bottom) - toolbar_height_);
+    if (rect.right <= 0 || content_height <= 0) return;
+    rtv_.Reset();
+    if (SUCCEEDED(swapchain_->ResizeBuffers(0, static_cast<UINT>(rect.right),
+                                             static_cast<UINT>(rect.bottom),
+                                             DXGI_FORMAT_UNKNOWN, 0))) {
+      create_render_target();
+    }
+  }
+
+  void render() {
+    if (!ready()) {
+      if (window_) InvalidateRect(window_, nullptr, TRUE);
+      return;
+    }
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    const int content_height = std::max(0, static_cast<int>(rect.bottom) - toolbar_height_);
+    if (rect.right <= 0 || content_height <= 0) return;
+    const FLOAT clear[] = {0.015f, 0.017f, 0.02f, 1.0f};
+    context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
+    context_->ClearRenderTargetView(rtv_.Get(), clear);
+    if (shader_view_ && image_width_ && image_height_) {
+      const float fit_scale = std::min(
+          static_cast<float>(rect.right) / image_width_,
+          static_cast<float>(content_height) / image_height_);
+      const float scale = fit_ ? fit_scale : zoom_;
+      const float draw_width = image_width_ * scale;
+      const float draw_height = image_height_ * scale;
+      const float draw_x = (rect.right - draw_width) * 0.5f + pan_x_;
+      const float draw_y = (content_height - draw_height) * 0.5f + pan_y_;
+      const float clip_left = std::max(0.0f, draw_x);
+      const float clip_top = std::max(0.0f, draw_y);
+      const float clip_right = std::min(static_cast<float>(rect.right), draw_x + draw_width);
+      const float clip_bottom = std::min(static_cast<float>(content_height), draw_y + draw_height);
+      if (clip_right <= clip_left || clip_bottom <= clip_top) {
+        swapchain_->Present(1, 0);
+        return;
+      }
+      D3D11_VIEWPORT viewport{};
+      viewport.TopLeftX = clip_left;
+      viewport.TopLeftY = clip_top;
+      viewport.Width = clip_right - clip_left;
+      viewport.Height = clip_bottom - clip_top;
+      viewport.MaxDepth = 1.0f;
+      const float view[4] = {
+          viewport.Width / draw_width, viewport.Height / draw_height,
+          (clip_left - draw_x) / draw_width, (clip_top - draw_y) / draw_height};
+      context_->UpdateSubresource(view_buffer_.Get(), 0, nullptr, view, 0, 0);
+      context_->RSSetViewports(1, &viewport);
+      context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
+      context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
+      context_->PSSetShaderResources(0, 1, shader_view_.GetAddressOf());
+      context_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
+      context_->PSSetConstantBuffers(0, 1, view_buffer_.GetAddressOf());
+      context_->Draw(3, 0);
+    }
+    swapchain_->Present(1, 0);
+  }
+
+  float fitted_scale() const {
+    if (!window_ || image_width_ == 0 || image_height_ == 0) return 1.0f;
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    return std::min(static_cast<float>(std::max<LONG>(1, rect.right)) / image_width_,
+                    static_cast<float>(std::max<LONG>(1, rect.bottom - toolbar_height_)) /
+                        image_height_);
+  }
+
+  void set_zoom(float next, POINT anchor) {
+    if (image_width_ == 0 || image_height_ == 0) return;
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    const float old_scale = fit_ ? fitted_scale() : zoom_;
+    next = std::clamp(next, 0.05f, 16.0f);
+    const float center_x = rect.right * 0.5f;
+    const float center_y = (rect.bottom - toolbar_height_) * 0.5f;
+    const float image_x = (anchor.x - center_x - pan_x_) / old_scale;
+    const float image_y = (anchor.y - center_y - pan_y_) / old_scale;
+    fit_ = false;
+    zoom_ = next;
+    pan_x_ = anchor.x - center_x - image_x * next;
+    pan_y_ = anchor.y - center_y - image_y * next;
+    update_zoom_combo();
+    render();
+  }
+
+  void set_fit() {
+    fit_ = true;
+    pan_x_ = pan_y_ = 0.0f;
+    if (zoom_combo_) {
+      updating_zoom_text_ = true;
+      SetWindowTextW(zoom_combo_, L"Fit");
+      SendMessageW(zoom_combo_, CB_SETCURSEL, 0, 0);
+      updating_zoom_text_ = false;
+    }
+    render();
+  }
+
+  void update_zoom_combo() {
+    if (!zoom_combo_) return;
+    const int percent = static_cast<int>(std::lround(zoom_ * 100.0f));
+    int selection = CB_ERR;
+    const int values[] = {0, 25, 50, 100, 200, 400};
+    for (int index = 1; index < 6; ++index) {
+      if (values[index] == percent) selection = index;
+    }
+    updating_zoom_text_ = true;
+    const std::wstring label = std::to_wstring(percent) + L"%";
+    SetWindowTextW(zoom_combo_, label.c_str());
+    SendMessageW(zoom_combo_, CB_SETCURSEL, selection, 0);
+    if (selection == CB_ERR) SetWindowTextW(zoom_combo_, label.c_str());
+    updating_zoom_text_ = false;
+  }
+
+  void apply_typed_zoom() {
+    if (updating_zoom_text_ || !zoom_combo_) return;
+    wchar_t text[64]{};
+    GetWindowTextW(zoom_combo_, text, 64);
+    std::wstring value(text);
+    value.erase(std::remove_if(value.begin(), value.end(),
+        [](wchar_t ch) { return std::iswspace(ch) != 0; }), value.end());
+    if (!value.empty() && value.back() == L'%') value.pop_back();
+    if (_wcsicmp(value.c_str(), L"fit") == 0) {
+      set_fit();
+      return;
+    }
+    wchar_t* end = nullptr;
+    const double percent = wcstod(value.c_str(), &end);
+    if (end == value.c_str() || *end != L'\0' || percent < 5.0 || percent > 1600.0) return;
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    set_zoom(static_cast<float>(percent / 100.0),
+             POINT{rect.right / 2, (rect.bottom - toolbar_height_) / 2});
+  }
+
+  void select_zoom(int selection) {
+    if (selection <= 0) {
+      set_fit();
+      return;
+    }
+    static constexpr float scales[] = {0.0f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f};
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    set_zoom(scales[std::clamp(selection, 1, 5)],
+             POINT{rect.right / 2, (rect.bottom - toolbar_height_) / 2});
+  }
+
+  void toggle_fullscreen() {
+    if (!window_) return;
+    if (!fullscreen_) {
+      saved_placement_.length = sizeof(saved_placement_);
+      GetWindowPlacement(window_, &saved_placement_);
+      saved_style_ = GetWindowLongPtrW(window_, GWL_STYLE);
+      MONITORINFO info{sizeof(info)};
+      GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &info);
+      SetWindowLongPtrW(window_, GWL_STYLE, saved_style_ & ~WS_OVERLAPPEDWINDOW);
+      SetWindowPos(window_, HWND_TOP, info.rcMonitor.left, info.rcMonitor.top,
+                   info.rcMonitor.right - info.rcMonitor.left,
+                   info.rcMonitor.bottom - info.rcMonitor.top,
+                   SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+      fullscreen_ = true;
+    } else {
+      SetWindowLongPtrW(window_, GWL_STYLE, saved_style_);
+      SetWindowPlacement(window_, &saved_placement_);
+      SetWindowPos(window_, nullptr, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+      fullscreen_ = false;
+    }
+  }
+
+  void draw_fallback(HDC dc) {
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(220, 225, 232));
+    const std::wstring message = error_.empty()
+        ? L"HDR preview is unavailable"
+        : L"HDR preview unavailable\r\n" + error_;
+    DrawTextW(dc, message.c_str(), -1, &rect,
+              DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+  }
+
+  static LRESULT CALLBACK window_proc(HWND window, UINT message,
+                                      WPARAM wparam, LPARAM lparam) {
+    auto* self = reinterpret_cast<PreviewRenderer*>(
+        GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+      auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+      self = static_cast<PreviewRenderer*>(create->lpCreateParams);
+      SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    }
+    if (!self) return DefWindowProcW(window, message, wparam, lparam);
+    switch (message) {
+      case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(window, &paint);
+        if (self->ready()) self->render();
+        else self->draw_fallback(dc);
+        EndPaint(window, &paint);
+        return 0;
+      }
+      case WM_SIZE:
+        self->layout_toolbar();
+        self->resize();
+        self->render();
+        return 0;
+      case WM_COMMAND:
+        if (LOWORD(wparam) == IDC_PREVIEW_ZOOM && HIWORD(wparam) == CBN_SELCHANGE) {
+          self->select_zoom(static_cast<int>(SendMessageW(
+              self->zoom_combo_, CB_GETCURSEL, 0, 0)));
+          return 0;
+        }
+        if (LOWORD(wparam) == IDC_PREVIEW_ZOOM && HIWORD(wparam) == CBN_EDITCHANGE) {
+          self->apply_typed_zoom();
+          return 0;
+        }
+        if (LOWORD(wparam) == IDC_PREVIEW_FULLSCREEN && HIWORD(wparam) == BN_CLICKED) {
+          self->toggle_fullscreen();
+          return 0;
+        }
+        break;
+      case WM_SETCURSOR:
+        if (LOWORD(lparam) == HTCLIENT) {
+          SetCursor(LoadCursorW(nullptr,
+              self->dragging_ ? IDC_SIZEALL :
+              (self->shader_view_ ? IDC_HAND : IDC_ARROW)));
+          return TRUE;
+        }
+        break;
+      case WM_MOUSEWHEEL:
+        if ((GET_KEYSTATE_WPARAM(wparam) & MK_CONTROL) != 0) {
+          POINT anchor{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+          ScreenToClient(window, &anchor);
+          const float current = self->fit_ ? self->fitted_scale() : self->zoom_;
+          self->set_zoom(current * (GET_WHEEL_DELTA_WPARAM(wparam) > 0 ? 1.2f : 1.0f / 1.2f),
+                         anchor);
+          return 0;
+        }
+        break;
+      case WM_LBUTTONDBLCLK: {
+        if (self->fit_) {
+          self->set_zoom(1.0f, POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
+        } else {
+          self->set_fit();
+        }
+        return 0;
+      }
+      case WM_LBUTTONDOWN:
+        self->dragging_ = true;
+        self->drag_origin_ = POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        self->drag_pan_x_ = self->pan_x_;
+        self->drag_pan_y_ = self->pan_y_;
+        SetCapture(window);
+        return 0;
+      case WM_MOUSEMOVE:
+        if (self->dragging_) {
+          if (self->fit_) return 0;
+          self->pan_x_ = self->drag_pan_x_ + GET_X_LPARAM(lparam) - self->drag_origin_.x;
+          self->pan_y_ = self->drag_pan_y_ + GET_Y_LPARAM(lparam) - self->drag_origin_.y;
+          self->render();
+          return 0;
+        }
+        break;
+      case WM_LBUTTONUP:
+        if (self->dragging_) {
+          self->dragging_ = false;
+          if (GetCapture() == window) ReleaseCapture();
+          return 0;
+        }
+        break;
+      case WM_KEYDOWN:
+        if (wparam == VK_ESCAPE && self->fullscreen_) {
+          self->toggle_fullscreen();
+          return 0;
+        }
+        break;
+      case WM_ERASEBKGND:
+        return 1;
+      case WM_CLOSE:
+        ShowWindow(window, SW_HIDE);
+        PostMessageW(self->owner_, WM_COMMAND,
+                     MAKEWPARAM(IDC_PREVIEW_TOGGLE, BN_CLICKED),
+                     reinterpret_cast<LPARAM>(window));
+        return 0;
+      case WM_NCDESTROY:
+        SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        break;
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+  }
+
+  HWND owner_ = nullptr;
+  HWND window_ = nullptr;
+  std::wstring error_;
+  uint32_t image_width_ = 0;
+  uint32_t image_height_ = 0;
+  Microsoft::WRL::ComPtr<ID3D11Device> device_;
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
+  Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain_;
+  Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv_;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> texture_;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shader_view_;
+  Microsoft::WRL::ComPtr<ID3D11VertexShader> vertex_shader_;
+  Microsoft::WRL::ComPtr<ID3D11PixelShader> pixel_shader_;
+  Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> view_buffer_;
+  HWND zoom_combo_ = nullptr;
+  HWND fullscreen_button_ = nullptr;
+  static constexpr int toolbar_height_ = 44;
+  bool fit_ = true;
+  float zoom_ = 1.0f;
+  float pan_x_ = 0.0f;
+  float pan_y_ = 0.0f;
+  bool dragging_ = false;
+  POINT drag_origin_{};
+  float drag_pan_x_ = 0.0f;
+  float drag_pan_y_ = 0.0f;
+  bool fullscreen_ = false;
+  LONG_PTR saved_style_ = 0;
+  WINDOWPLACEMENT saved_placement_{sizeof(WINDOWPLACEMENT)};
+  HFONT toolbar_font_ = nullptr;
+  HFONT icon_font_ = nullptr;
+  bool updating_zoom_text_ = false;
 };
 
 std::wstring widen(const std::string& input) {
@@ -839,6 +1527,8 @@ std::wstring task_summary(const ConversionTask& task) {
 }
 
 void rebuild_task_list(AppState* state) {
+  const LRESULT previous_top = SendMessageW(state->tasks, LB_GETTOPINDEX, 0, 0);
+  const LRESULT previous_selection = SendMessageW(state->tasks, LB_GETCURSEL, 0, 0);
   SendMessageW(state->tasks, LB_RESETCONTENT, 0, 0);
   for (const auto& task : state->conversion_tasks) {
     const auto text = task_summary(task);
@@ -847,6 +1537,15 @@ void rebuild_task_list(AppState* state) {
   }
   SendMessageW(state->tasks, LB_SETITEMHEIGHT, 0,
                MulDiv(52, GetDpiForWindow(state->window), 96));
+  const LRESULT count = SendMessageW(state->tasks, LB_GETCOUNT, 0, 0);
+  if (count > 0) {
+    if (previous_selection != LB_ERR) {
+      SendMessageW(state->tasks, LB_SETCURSEL,
+                   std::min(previous_selection, count - 1), 0);
+    }
+    SendMessageW(state->tasks, LB_SETTOPINDEX,
+                 std::min(std::max<LRESULT>(previous_top, 0), count - 1), 0);
+  }
   InvalidateRect(state->tasks, nullptr, TRUE);
 }
 
@@ -1180,10 +1879,15 @@ void layout(AppState* s, int width, int height) {
   MoveWindow(s->title, margin, 7, 180, 30, TRUE);
   constexpr int reset_button_width = 144;
   constexpr int reset_button_gap = 8;
-  MoveWindow(s->reset_settings, width - margin - reset_button_width, 7,
+  constexpr int preview_button_width = 92;
+  constexpr int preview_button_gap = 8;
+  MoveWindow(s->preview_toggle, width - margin - preview_button_width, 7,
+             preview_button_width, 30, TRUE);
+  MoveWindow(s->reset_settings,
+             width - margin - preview_button_width - preview_button_gap - reset_button_width, 7,
              reset_button_width, 30, TRUE);
   MoveWindow(s->reset_layout,
-             width - margin - reset_button_width * 2 - reset_button_gap, 7,
+             width - margin - reset_button_width * 2 - reset_button_gap - preview_button_width - preview_button_gap, 7,
              reset_button_width, 30, TRUE);
   MoveWindow(s->vertical_splitter, margin + left_width + 8, content_top,
              8, std::max(40, content_bottom - content_top), TRUE);
@@ -1330,6 +2034,31 @@ void replace_queue_summary(HWND queue, int index, const std::wstring& text) {
   if (top != LB_ERR) SendMessageW(queue, LB_SETTOPINDEX, top, 0);
 }
 
+void request_preview(AppState* state, const std::filesystem::path& path) {
+  if (!state->preview_enabled || !state->preview_renderer || path.empty()) return;
+  if (state->preview_cancel) state->preview_cancel->store(true);
+  const uint64_t generation = ++state->preview_generation;
+  const auto cancel = std::make_shared<std::atomic_bool>(false);
+  state->preview_cancel = cancel;
+  state->preview_renderer->show(true);
+  const HWND window = state->window;
+  std::thread([window, path, generation, cancel] {
+    try {
+      auto image = hdrbridge::decode_preview(
+          path, std::numeric_limits<uint32_t>::max(), {}, cancel.get());
+      PostMessageW(window, WM_APP_PREVIEW_READY, 0,
+                   reinterpret_cast<LPARAM>(new PreviewPayload{
+                       generation, std::move(image)}));
+    } catch (const std::exception& error) {
+      if (!cancel->load()) {
+        PostMessageW(window, WM_APP_PREVIEW_ERROR, 0,
+                     reinterpret_cast<LPARAM>(new PreviewErrorPayload{
+                         generation, widen(error.what())}));
+      }
+    }
+  }).detach();
+}
+
 void load_source(AppState* state, const std::filesystem::path& path) {
   try {
     if (!supported_source(path)) {
@@ -1364,6 +2093,7 @@ void load_source(AppState* state, const std::filesystem::path& path) {
       SetWindowTextW(state->folder_path, state->selected_folder.c_str());
     }
     update_mode_ui(state);
+    request_preview(state, path);
     EnableWindow(state->convert, TRUE);
     append_log(state, L"Source inspected: " + std::to_wstring(info.width) + L"×" + std::to_wstring(info.height) +
                       L", " + widen(info.chroma) + L", " + std::to_wstring(info.bit_depth) + L"-bit, CICP " +
@@ -1849,6 +2579,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     owned->title = add_control(window, L"STATIC", L"HDR Bridge", SS_LEFT, IDC_TITLE);
     owned->reset_layout = add_control(window, L"BUTTON", L"Reset layout", BS_PUSHBUTTON, IDC_RESET_LAYOUT);
     owned->reset_settings = add_control(window, L"BUTTON", L"Reset settings", BS_PUSHBUTTON, IDC_RESET_SETTINGS);
+    owned->preview_toggle = add_control(window, L"BUTTON", L"Preview", BS_PUSHBUTTON,
+                                        IDC_PREVIEW_TOGGLE);
+    owned->preview_renderer = std::make_unique<PreviewRenderer>(window);
+    owned->preview_renderer->create();
     owned->vertical_splitter = add_control(window, L"STATIC", L"", SS_NOTIFY, IDC_VERTICAL_SPLITTER);
     owned->horizontal_splitter = add_control(window, L"STATIC", L"", SS_NOTIFY, IDC_HORIZONTAL_SPLITTER);
     owned->files_splitter = add_control(window, L"STATIC", L"", SS_NOTIFY, IDC_FILES_SPLITTER);
@@ -2280,6 +3014,19 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       return 0;
     case WM_COMMAND:
       switch (LOWORD(wparam)) {
+        case IDC_PREVIEW_TOGGLE:
+          state->preview_enabled = !state->preview_enabled;
+          if (state->preview_enabled && !state->input.empty()) {
+            request_preview(state, state->input);
+          } else if (state->preview_enabled && state->preview_renderer) {
+            state->preview_renderer->show(true);
+          } else if (state->preview_renderer) {
+            if (state->preview_cancel) state->preview_cancel->store(true);
+            state->preview_renderer->show(false);
+          }
+          SetWindowTextW(state->preview_toggle,
+                         state->preview_enabled ? L"Hide" : L"Preview");
+          break;
         case IDC_OPEN: choose_source(state); break;
         case IDC_QUEUE:
           if (HIWORD(wparam) == LBN_SELCHANGE) {
@@ -2398,6 +3145,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           RECT rect{};
           GetClientRect(window, &rect);
           layout(state, rect.right, rect.bottom);
+          if (state->preview_renderer) state->preview_renderer->reset_layout();
           save_layout(state);
           break;
         }
@@ -2488,6 +3236,26 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           break;
       }
       return 0;
+    case WM_APP_PREVIEW_READY: {
+      std::unique_ptr<PreviewPayload> payload(
+          reinterpret_cast<PreviewPayload*>(lparam));
+      if (payload->generation == state->preview_generation &&
+          state->preview_renderer && state->preview_enabled) {
+        state->preview_renderer->set_image(std::move(payload->image));
+        state->preview_renderer->show(true);
+      }
+      return 0;
+    }
+    case WM_APP_PREVIEW_ERROR: {
+      std::unique_ptr<PreviewErrorPayload> payload(
+          reinterpret_cast<PreviewErrorPayload*>(lparam));
+      if (payload->generation == state->preview_generation &&
+          state->preview_renderer && state->preview_enabled) {
+        state->preview_renderer->clear();
+        append_log(state, L"PREVIEW  " + payload->error);
+      }
+      return 0;
+    }
     case WM_APP_PROGRESS: {
       std::unique_ptr<std::wstring> stage(reinterpret_cast<std::wstring*>(lparam));
       ShowWindow(state->progress, SW_SHOW);
@@ -2667,6 +3435,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       return 0;
     case WM_DESTROY:
       save_layout(state);
+      if (state->preview_cancel) state->preview_cancel->store(true);
       RemoveWindowSubclass(state->queue, queue_subclass, 1);
       RemoveWindowSubclass(state->tasks, queue_subclass, 2);
       RemoveWindowSubclass(state->vertical_splitter, splitter_subclass, 1);
@@ -2760,6 +3529,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   if (arguments) LocalFree(arguments);
   MSG message{};
   while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+    if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) {
+      HWND root = GetAncestor(message.hwnd, GA_ROOT);
+      wchar_t class_name[64]{};
+      if (root && root != message.hwnd &&
+          GetClassNameW(root, class_name, 64) > 0 &&
+          wcscmp(class_name, L"HDRBridgePreviewWindow") == 0) {
+        SendMessageW(root, WM_KEYDOWN, message.wParam, message.lParam);
+        continue;
+      }
+    }
     TranslateMessage(&message);
     DispatchMessageW(&message);
   }

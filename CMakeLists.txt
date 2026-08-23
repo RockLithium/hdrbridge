@@ -71,7 +71,7 @@ add_executable(hdrbridge WIN32 desktop/src/main.cpp desktop/src/output_naming.cp
 target_compile_definitions(hdrbridge PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(hdrbridge PRIVATE /W4 /permissive- /utf-8)
 target_link_options(hdrbridge PRIVATE /MANIFEST:NO)
-target_link_libraries(hdrbridge PRIVATE hdrbridge_core comctl32 comdlg32 shell32 dwmapi uxtheme)
+target_link_libraries(hdrbridge PRIVATE hdrbridge_core comctl32 comdlg32 shell32 dwmapi uxtheme d3d11 dxgi d3dcompiler)
 
 install(TARGETS hdrbridge RUNTIME DESTINATION .)
 
@@ -96,4 +96,9 @@ if(BUILD_TESTING)
   target_compile_options(hdrbridge-png-input-tests PRIVATE /W4 /permissive- /utf-8)
   target_link_libraries(hdrbridge-png-input-tests PRIVATE hdrbridge_core)
   add_test(NAME png-sdr-classification COMMAND hdrbridge-png-input-tests)
+  add_executable(hdrbridge-preview-ui-smoke tests/preview_ui_smoke.cpp)
+  target_compile_definitions(hdrbridge-preview-ui-smoke PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(hdrbridge-preview-ui-smoke PRIVATE /W4 /permissive- /utf-8)
+  target_link_libraries(hdrbridge-preview-ui-smoke PRIVATE user32)
 endif()

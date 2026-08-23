@@ -209,6 +209,16 @@ struct ConversionResult {
   TimingDiagnostics timings;
 };
 
+// Preview payload produced from the same canonical HDR master used by output
+// encoders. rgba_fp16 is linear scRGB (1.0 = 80 cd/m²), packed RGBA half-floats.
+struct PreviewImage {
+  SourceInfo info;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  std::vector<uint16_t> rgba_fp16;
+  TimingDiagnostics timings;
+};
+
 using ProgressCallback = std::function<void(int, const std::string&)>;
 
 SourceInfo inspect(const std::filesystem::path& path);
@@ -217,6 +227,10 @@ ConversionResult convert(const std::filesystem::path& input,
                          const ConversionOptions& options,
                          ProgressCallback progress = {},
                          std::atomic_bool* cancel = nullptr);
+PreviewImage decode_preview(const std::filesystem::path& input,
+                            uint32_t max_dimension = 1920,
+                            ProgressCallback progress = {},
+                            std::atomic_bool* cancel = nullptr);
 Verification verify(const std::filesystem::path& output,
                     const std::string& mode);
 std::string to_json(const SourceInfo& info);

@@ -68,8 +68,8 @@ to the source directory; a custom directory, base name, suffix, auto-numbering
 and explicit overwrite are available.
 
 The Source Inspector reports encoded source, metadata and gain-map details.
-Image preview is intentionally omitted because this build has no verified HDR
-presentation path.
+Preview uses a verified Windows FP16 scRGB HDR swap-chain presentation path.
+It is off by default and performs no preview decode until opened.
 
 Primary outputs:
 - Ultra HDR JPEG (Faithful/Auto)

@@ -18,6 +18,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -112,6 +113,69 @@ struct DecodedImage {
 };
 
 using Clock = std::chrono::steady_clock;
+
+template <typename Function>
+void parallel_pixel_blocks(size_t count, Function&& function) {
+  constexpr size_t kMinimumPixelsPerWorker = 262144;
+  const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
+  const size_t useful_workers = std::max<size_t>(
+      1, (count + kMinimumPixelsPerWorker - 1) / kMinimumPixelsPerWorker);
+  const size_t workers = std::min<size_t>({hardware, 16u, useful_workers});
+  if (workers <= 1 || count < kMinimumPixelsPerWorker * 2) {
+    function(0, count);
+    return;
+  }
+  std::vector<std::thread> threads;
+  threads.reserve(workers);
+  std::mutex error_mutex;
+  std::exception_ptr error;
+  for (size_t worker = 0; worker < workers; ++worker) {
+    const size_t begin = count * worker / workers;
+    const size_t end = count * (worker + 1) / workers;
+    threads.emplace_back([&, begin, end] {
+      try {
+        function(begin, end);
+      } catch (...) {
+        std::lock_guard lock(error_mutex);
+        if (!error) error = std::current_exception();
+      }
+    });
+  }
+  for (auto& thread : threads) thread.join();
+  if (error) std::rethrow_exception(error);
+}
+
+template <typename Function>
+size_t parallel_indexed_blocks(size_t count, Function&& function) {
+  constexpr size_t kMinimumPixelsPerWorker = 262144;
+  const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
+  const size_t useful_workers = std::max<size_t>(
+      1, (count + kMinimumPixelsPerWorker - 1) / kMinimumPixelsPerWorker);
+  const size_t workers = std::min<size_t>({hardware, 16u, useful_workers});
+  if (workers <= 1 || count < kMinimumPixelsPerWorker * 2) {
+    function(0, 0, count);
+    return 1;
+  }
+  std::vector<std::thread> threads;
+  threads.reserve(workers);
+  std::mutex error_mutex;
+  std::exception_ptr error;
+  for (size_t worker = 0; worker < workers; ++worker) {
+    const size_t begin = count * worker / workers;
+    const size_t end = count * (worker + 1) / workers;
+    threads.emplace_back([&, worker, begin, end] {
+      try {
+        function(worker, begin, end);
+      } catch (...) {
+        std::lock_guard lock(error_mutex);
+        if (!error) error = std::current_exception();
+      }
+    });
+  }
+  for (auto& thread : threads) thread.join();
+  if (error) std::rethrow_exception(error);
+  return workers;
+}
 
 double elapsed_ms(Clock::time_point start) {
   return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
@@ -321,7 +385,8 @@ void resolve_color_signaling(SourceInfo& info, bool native_preferred) {
 }
 
 void convert_rec709_pq_to_rec2020_pq(std::vector<uint16_t>& pixels) {
-  for (size_t p = 0; p < pixels.size() / 3u; ++p) {
+  parallel_pixel_blocks(pixels.size() / 3u, [&](size_t begin, size_t end) {
+  for (size_t p = begin; p < end; ++p) {
     const double r = transfer::pq_to_nits(pixels[p * 3u] / 65535.0);
     const double g = transfer::pq_to_nits(pixels[p * 3u + 1u] / 65535.0);
     const double b = transfer::pq_to_nits(pixels[p * 3u + 2u] / 65535.0);
@@ -333,6 +398,7 @@ void convert_rec709_pq_to_rec2020_pq(std::vector<uint16_t>& pixels) {
         static_cast<uint16_t>(std::llround(transfer::nits_to_pq(
             std::clamp(rec2020[c], 0.0, 10000.0)) * 65535.0));
   }
+  });
 }
 
 void require_heif(const heif_error& e, const char* operation) {
@@ -900,34 +966,54 @@ std::vector<uint8_t> encode_gainmap_jxl(const DecodedImage& decoded,
   const size_t pixel_count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
   std::vector<uint16_t> base(pixel_count * 3u);
   std::vector<double> channel_gain(pixel_count * 3u);
+  std::array<double, 16> local_maximum{};
+  const size_t gain_workers = parallel_indexed_blocks(
+      hdr.size(), [&](size_t worker, size_t begin, size_t end) {
+        double maximum = 1.0;
+        for (size_t i = begin; i < end; ++i) {
+          const double linear = std::max(
+              0.0, transfer::pq_to_nits(hdr[i] / 65535.0) / 203.0);
+          const double base_linear = std::min(linear, 1.0);
+          const double srgb = base_linear <= 0.0031308 ? 12.92 * base_linear
+              : 1.055 * std::pow(base_linear, 1.0 / 2.4) - 0.055;
+          base[i] = static_cast<uint16_t>(
+              std::lround(std::clamp(srgb, 0.0, 1.0) * 65535.0));
+          channel_gain[i] = std::log2(
+              std::max(linear, 1e-8) / std::max(base_linear, 1e-8));
+          maximum = std::max(maximum, channel_gain[i]);
+        }
+        local_maximum[worker] = maximum;
+      });
   double maximum_gain = 1.0;
-  for (size_t i = 0; i < hdr.size(); ++i) {
-    const double linear = std::max(0.0, transfer::pq_to_nits(hdr[i] / 65535.0) / 203.0);
-    const double base_linear = std::min(linear, 1.0);
-    const double srgb = base_linear <= 0.0031308 ? 12.92 * base_linear
-        : 1.055 * std::pow(base_linear, 1.0 / 2.4) - 0.055;
-    base[i] = static_cast<uint16_t>(std::lround(std::clamp(srgb, 0.0, 1.0) * 65535.0));
-    channel_gain[i] = std::log2(std::max(linear, 1e-8) / std::max(base_linear, 1e-8));
-    maximum_gain = std::max(maximum_gain, channel_gain[i]);
+  for (size_t worker = 0; worker < gain_workers; ++worker) {
+    maximum_gain = std::max(maximum_gain, local_maximum[worker]);
   }
   const uint32_t scale = static_cast<uint32_t>(std::clamp(options.gainmap_scale, 1, 4));
   const uint32_t map_width = std::max(1u, (decoded.info.width + scale - 1u) / scale);
   const uint32_t map_height = std::max(1u, (decoded.info.height + scale - 1u) / scale);
   const uint32_t channels = options.multi_channel_gainmap ? 3u : 1u;
   std::vector<uint16_t> map(static_cast<size_t>(map_width) * map_height * channels);
-  for (uint32_t y = 0; y < map_height; ++y) for (uint32_t x = 0; x < map_width; ++x) {
-    const uint32_t sx = std::min(decoded.info.width - 1u, x * scale + scale / 2u);
-    const uint32_t sy = std::min(decoded.info.height - 1u, y * scale + scale / 2u);
-    const size_t source = (static_cast<size_t>(sy) * decoded.info.width + sx) * 3u;
-    if (channels == 1) {
-      const double gain = std::max({channel_gain[source], channel_gain[source + 1u], channel_gain[source + 2u]});
-      map[static_cast<size_t>(y) * map_width + x] = static_cast<uint16_t>(
-          std::lround(std::clamp(gain / maximum_gain, 0.0, 1.0) * 65535.0));
-    } else {
-      for (size_t c = 0; c < 3; ++c) map[(static_cast<size_t>(y) * map_width + x) * 3u + c] =
-          static_cast<uint16_t>(std::lround(std::clamp(channel_gain[source + c] / maximum_gain, 0.0, 1.0) * 65535.0));
+  const size_t map_pixels = static_cast<size_t>(map_width) * map_height;
+  parallel_pixel_blocks(map_pixels, [&](size_t begin, size_t end) {
+    for (size_t target = begin; target < end; ++target) {
+      const uint32_t x = static_cast<uint32_t>(target % map_width);
+      const uint32_t y = static_cast<uint32_t>(target / map_width);
+      const uint32_t sx = std::min(decoded.info.width - 1u, x * scale + scale / 2u);
+      const uint32_t sy = std::min(decoded.info.height - 1u, y * scale + scale / 2u);
+      const size_t source = (static_cast<size_t>(sy) * decoded.info.width + sx) * 3u;
+      if (channels == 1) {
+        const double gain = std::max({channel_gain[source], channel_gain[source + 1u],
+                                     channel_gain[source + 2u]});
+        map[target] = static_cast<uint16_t>(
+            std::lround(std::clamp(gain / maximum_gain, 0.0, 1.0) * 65535.0));
+      } else {
+        for (size_t c = 0; c < 3; ++c) {
+          map[target * 3u + c] = static_cast<uint16_t>(std::lround(
+              std::clamp(channel_gain[source + c] / maximum_gain, 0.0, 1.0) * 65535.0));
+        }
+      }
     }
-  }
+  });
   JxlColorEncoding base_color{}; base_color.color_space = JXL_COLOR_SPACE_RGB;
   base_color.white_point = JXL_WHITE_POINT_D65;
   base_color.primaries = options.output_gamut == "rec709" ? JXL_PRIMARIES_SRGB :
@@ -1178,7 +1264,8 @@ DecodedImage decode_jxl_input(const std::filesystem::path& path) {
   }
   if (decoded.info.transfer == 18) {
     const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
-    for (size_t p = 0; p < count; ++p) {
+    parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
+    for (size_t p = begin; p < end; ++p) {
       const auto nits = transfer::hlg_to_linear_nits({
           decoded.rgb[p * 3u] / 65535.0,
           decoded.rgb[p * 3u + 1u] / 65535.0,
@@ -1186,6 +1273,7 @@ DecodedImage decode_jxl_input(const std::filesystem::path& path) {
       for (size_t c = 0; c < 3; ++c) decoded.rgb[p * 3u + c] =
           static_cast<uint16_t>(std::llround(transfer::nits_to_pq(nits[c]) * 65535.0));
     }
+    });
   } else if (decoded.info.primaries == 12) {
     convert_p3_pq_to_rec2020_pq(decoded.rgb);
   } else if (decoded.info.primaries == 1) {
@@ -1280,16 +1368,40 @@ HdrStats measure_hdr(const DecodedImage& decoded, float requested_target_nits = 
   std::array<uint64_t, 10001> channel_histogram{};
   const auto& lut = pq_nits_lut();
   const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
-  for (size_t p = 0; p < count; ++p) {
-    const double r = lut[decoded.rgb[p * 3u]];
-    const double g = lut[decoded.rgb[p * 3u + 1u]];
-    const double b = lut[decoded.rgb[p * 3u + 2u]];
-    const double channel = std::max({r, g, b});
-    const double luminance = std::max(0.0, 0.2627 * r + 0.6780 * g + 0.0593 * b);
-    stats.max_channel_nits = std::max(stats.max_channel_nits, channel);
-    stats.max_luminance_nits = std::max(stats.max_luminance_nits, luminance);
-    ++luminance_histogram[static_cast<size_t>(std::clamp(std::llround(luminance), 0ll, 10000ll))];
-    ++channel_histogram[static_cast<size_t>(std::clamp(std::llround(channel), 0ll, 10000ll))];
+  struct PartialStats {
+    double max_channel = 0.0;
+    double max_luminance = 0.0;
+    std::array<uint64_t, 10001> luminance{};
+    std::array<uint64_t, 10001> channel{};
+  };
+  std::vector<PartialStats> partials(16);
+  const size_t workers = parallel_indexed_blocks(
+      count, [&](size_t worker, size_t begin, size_t end) {
+        auto& partial = partials[worker];
+        for (size_t p = begin; p < end; ++p) {
+          const double r = lut[decoded.rgb[p * 3u]];
+          const double g = lut[decoded.rgb[p * 3u + 1u]];
+          const double b = lut[decoded.rgb[p * 3u + 2u]];
+          const double channel = std::max({r, g, b});
+          const double luminance = std::max(
+              0.0, 0.2627 * r + 0.6780 * g + 0.0593 * b);
+          partial.max_channel = std::max(partial.max_channel, channel);
+          partial.max_luminance = std::max(partial.max_luminance, luminance);
+          ++partial.luminance[static_cast<size_t>(
+              std::clamp(std::llround(luminance), 0ll, 10000ll))];
+          ++partial.channel[static_cast<size_t>(
+              std::clamp(std::llround(channel), 0ll, 10000ll))];
+        }
+      });
+  for (size_t worker = 0; worker < workers; ++worker) {
+    stats.max_channel_nits = std::max(
+        stats.max_channel_nits, partials[worker].max_channel);
+    stats.max_luminance_nits = std::max(
+        stats.max_luminance_nits, partials[worker].max_luminance);
+    for (size_t bin = 0; bin < luminance_histogram.size(); ++bin) {
+      luminance_histogram[bin] += partials[worker].luminance[bin];
+      channel_histogram[bin] += partials[worker].channel[bin];
+    }
   }
   stats.p999_nits = histogram_percentile(luminance_histogram, count, 0.999);
   stats.p9999_nits = histogram_percentile(luminance_histogram, count, 0.9999);
@@ -1317,12 +1429,19 @@ HdrStats measure_hdr(const DecodedImage& decoded, float requested_target_nits = 
     }
     stats.chosen_target_nits = std::clamp(stats.chosen_target_nits, 203.0, 10000.0);
   }
-  uint64_t clipped = 0;
-  for (size_t p = 0; p < count; ++p) {
-    if (lut[decoded.rgb[p * 3u]] > stats.chosen_target_nits ||
-        lut[decoded.rgb[p * 3u + 1u]] > stats.chosen_target_nits ||
-        lut[decoded.rgb[p * 3u + 2u]] > stats.chosen_target_nits) ++clipped;
-  }
+  std::array<uint64_t, 16> clipped_parts{};
+  const size_t clipped_workers = parallel_indexed_blocks(
+      count, [&](size_t worker, size_t begin, size_t end) {
+        uint64_t clipped = 0;
+        for (size_t p = begin; p < end; ++p) {
+          if (lut[decoded.rgb[p * 3u]] > stats.chosen_target_nits ||
+              lut[decoded.rgb[p * 3u + 1u]] > stats.chosen_target_nits ||
+              lut[decoded.rgb[p * 3u + 2u]] > stats.chosen_target_nits) ++clipped;
+        }
+        clipped_parts[worker] = clipped;
+      });
+  const uint64_t clipped = std::accumulate(
+      clipped_parts.begin(), clipped_parts.begin() + clipped_workers, uint64_t{0});
   stats.clipped_fraction = count ? static_cast<double>(clipped) / static_cast<double>(count) : 0.0;
   return stats;
 }
@@ -1612,7 +1731,8 @@ std::vector<uint16_t> convert_rec2020_pq_to_p3_pq(const DecodedImage& decoded) {
   const auto& lut = pq_nits_lut();
   std::vector<uint16_t> output(decoded.rgb.size());
   const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
-  for (size_t p = 0; p < count; ++p) {
+  parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
+  for (size_t p = begin; p < end; ++p) {
     const double r = lut[decoded.rgb[p * 3u]];
     const double g = lut[decoded.rgb[p * 3u + 1u]];
     const double b = lut[decoded.rgb[p * 3u + 2u]];
@@ -1625,6 +1745,7 @@ std::vector<uint16_t> convert_rec2020_pq_to_p3_pq(const DecodedImage& decoded) {
           forward_pq(std::clamp(p3[c], 0.0, 10000.0)) * 65535.0));
     }
   }
+  });
   return output;
 }
 
@@ -1632,7 +1753,8 @@ std::vector<uint16_t> convert_rec2020_pq_to_rec709_pq(const DecodedImage& decode
   const auto& lut = pq_nits_lut();
   std::vector<uint16_t> output(decoded.rgb.size());
   const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
-  for (size_t p = 0; p < count; ++p) {
+  parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
+  for (size_t p = begin; p < end; ++p) {
     const double r = lut[decoded.rgb[p * 3u]];
     const double g = lut[decoded.rgb[p * 3u + 1u]];
     const double b = lut[decoded.rgb[p * 3u + 2u]];
@@ -1645,6 +1767,7 @@ std::vector<uint16_t> convert_rec2020_pq_to_rec709_pq(const DecodedImage& decode
           forward_pq(std::clamp(rec709[c], 0.0, 10000.0)) * 65535.0));
     }
   }
+  });
   return output;
 }
 
@@ -1653,7 +1776,8 @@ std::vector<uint16_t> convert_rec2020_pq_to_hlg(const DecodedImage& decoded,
   const auto& lut = pq_nits_lut();
   std::vector<uint16_t> output(decoded.rgb.size());
   const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
-  for (size_t p = 0; p < count; ++p) {
+  parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
+  for (size_t p = begin; p < end; ++p) {
     const double r = lut[decoded.rgb[p * 3u]];
     const double g = lut[decoded.rgb[p * 3u + 1u]];
     const double b = lut[decoded.rgb[p * 3u + 2u]];
@@ -1673,6 +1797,7 @@ std::vector<uint16_t> convert_rec2020_pq_to_hlg(const DecodedImage& decoded,
       output[p * 3u + c] = static_cast<uint16_t>(std::llround(signal[c] * 65535.0));
     }
   }
+  });
   return output;
 }
 
@@ -2055,7 +2180,8 @@ Verification decode_png(const std::vector<uint8_t>& bytes,
 
 void convert_p3_pq_to_rec2020_pq(std::vector<uint16_t>& pixels) {
   const auto& lut = pq_nits_lut();
-  for (size_t p = 0; p < pixels.size() / 3u; ++p) {
+  parallel_pixel_blocks(pixels.size() / 3u, [&](size_t begin, size_t end) {
+  for (size_t p = begin; p < end; ++p) {
     const double r = lut[pixels[p * 3u]];
     const double g = lut[pixels[p * 3u + 1u]];
     const double b = lut[pixels[p * 3u + 2u]];
@@ -2068,6 +2194,7 @@ void convert_p3_pq_to_rec2020_pq(std::vector<uint16_t>& pixels) {
           forward_pq(std::clamp(rec2020[c], 0.0, 10000.0)) * 65535.0));
     }
   }
+  });
 }
 
 DecodedImage decode_png_input(const std::filesystem::path& path) {
@@ -2205,14 +2332,16 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
   png_destroy_read_struct(&png, &info, nullptr);
   if (decoded.info.transfer == 18) {
     const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
-    for (size_t p = 0; p < count; ++p) {
-      const auto nits = transfer::hlg_to_linear_nits({
-          decoded.rgb[p * 3u] / 65535.0,
-          decoded.rgb[p * 3u + 1u] / 65535.0,
-          decoded.rgb[p * 3u + 2u] / 65535.0});
-      for (size_t c = 0; c < 3; ++c) decoded.rgb[p * 3u + c] =
-          static_cast<uint16_t>(std::llround(forward_pq(nits[c]) * 65535.0));
-    }
+    parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
+      for (size_t p = begin; p < end; ++p) {
+        const auto nits = transfer::hlg_to_linear_nits({
+            decoded.rgb[p * 3u] / 65535.0,
+            decoded.rgb[p * 3u + 1u] / 65535.0,
+            decoded.rgb[p * 3u + 2u] / 65535.0});
+        for (size_t c = 0; c < 3; ++c) decoded.rgb[p * 3u + c] =
+            static_cast<uint16_t>(std::llround(forward_pq(nits[c]) * 65535.0));
+      }
+    });
   } else if (decoded.info.primaries == 12) {
     convert_p3_pq_to_rec2020_pq(decoded.rgb);
   } else if (decoded.info.primaries == 1) {
@@ -2495,14 +2624,17 @@ DecodedImage decode_tiff_input(const std::filesystem::path& path) {
   orientation::set_xmp_orientation_to_one(decoded.xmp);
   if (decoded.info.transfer == 18) {
     const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
-    for (size_t p = 0; p < count; ++p) {
-      const auto nits = transfer::hlg_to_linear_nits({
-          decoded.rgb[p * 3u] / 65535.0,
-          decoded.rgb[p * 3u + 1u] / 65535.0,
-          decoded.rgb[p * 3u + 2u] / 65535.0});
-      for (size_t c = 0; c < 3; ++c) decoded.rgb[p * 3u + c] =
-          static_cast<uint16_t>(std::llround(transfer::nits_to_pq(nits[c]) * 65535.0));
-    }
+    parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
+      for (size_t p = begin; p < end; ++p) {
+        const auto nits = transfer::hlg_to_linear_nits({
+            decoded.rgb[p * 3u] / 65535.0,
+            decoded.rgb[p * 3u + 1u] / 65535.0,
+            decoded.rgb[p * 3u + 2u] / 65535.0});
+        for (size_t c = 0; c < 3; ++c) decoded.rgb[p * 3u + c] =
+            static_cast<uint16_t>(std::llround(
+                transfer::nits_to_pq(nits[c]) * 65535.0));
+      }
+    });
   }
   if (decoded.info.primaries == 12) convert_p3_pq_to_rec2020_pq(decoded.rgb);
   else if (decoded.info.primaries == 1) convert_rec709_pq_to_rec2020_pq(decoded.rgb);
@@ -2785,10 +2917,10 @@ std::vector<uint16_t> pq2020_to_scrgb_half(const DecodedImage& decoded,
                                             std::atomic_bool* cancel) {
   const size_t pixels = static_cast<size_t>(decoded.info.width) * decoded.info.height;
   std::vector<uint16_t> rgba(pixels * 4u);
-  for (uint32_t y = 0; y < decoded.info.height; ++y) {
+  report(progress, 44, "Transforming Rec.2020/PQ to linear FP16 scRGB");
+  parallel_pixel_blocks(pixels, [&](size_t begin, size_t end) {
     check_cancel(cancel);
-    for (uint32_t x = 0; x < decoded.info.width; ++x) {
-      const size_t p = static_cast<size_t>(y) * decoded.info.width + x;
+    for (size_t p = begin; p < end; ++p) {
       const double r = inverse_pq(decoded.rgb[p * 3u] / 65535.0) / 80.0;
       const double g = inverse_pq(decoded.rgb[p * 3u + 1u] / 65535.0) / 80.0;
       const double b = inverse_pq(decoded.rgb[p * 3u + 2u] / 65535.0) / 80.0;
@@ -2800,8 +2932,8 @@ std::vector<uint16_t> pq2020_to_scrgb_half(const DecodedImage& decoded,
       rgba[p * 4u + 2u] = float_to_half(sb);
       rgba[p * 4u + 3u] = float_to_half(1.0f);
     }
-    if (progress && (y % 128u == 0)) progress(44 + static_cast<int>(y * 18u / decoded.info.height), "Transforming Rec.2020/PQ to linear FP16 scRGB");
-  }
+  });
+  report(progress, 62, "Linear FP16 scRGB transform complete");
   return rgba;
 }
 
@@ -3072,7 +3204,8 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
     std::vector<uint16_t> rgba(count * 4u);
     require_hr(frame->CopyPixels(nullptr, decoded.info.width * 8u, static_cast<UINT>(rgba.size() * sizeof(uint16_t)),
                                  reinterpret_cast<BYTE*>(rgba.data())), "decode JPEG XR FP16 input");
-    for (size_t p = 0; p < count; ++p) {
+    parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
+    for (size_t p = begin; p < end; ++p) {
       const double r = static_cast<double>(half_to_float(rgba[p * 4u])) * 80.0;
       const double g = static_cast<double>(half_to_float(rgba[p * 4u + 1u])) * 80.0;
       const double b = static_cast<double>(half_to_float(rgba[p * 4u + 2u])) * 80.0;
@@ -3083,6 +3216,7 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
       for (size_t c = 0; c < 3; ++c) decoded.rgb[p * 3u + c] = static_cast<uint16_t>(std::llround(
           forward_pq(std::clamp(rec2020[c], 0.0, 10000.0)) * 65535.0));
     }
+    });
     decoded.info.profile = "FP16 linear scRGB (1.0 = 80 cd/m2)";
     decoded.info.bit_depth = 16; decoded.info.chroma = "4:4:4 RGBA FP16";
     decoded.info.pixel_format = "GUID_WICPixelFormat64bppRGBAHalf";
@@ -3095,12 +3229,14 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
     std::vector<uint32_t> words(count);
     require_hr(frame->CopyPixels(nullptr, decoded.info.width * 4u, static_cast<UINT>(words.size() * sizeof(uint32_t)),
                                  reinterpret_cast<BYTE*>(words.data())), "decode packed-10 JPEG XR input");
-    for (size_t p = 0; p < count; ++p) {
+    parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
+    for (size_t p = begin; p < end; ++p) {
       const uint32_t word = words[p];
       decoded.rgb[p * 3u] = static_cast<uint16_t>((((word >> 20) & 1023u) * 65535u + 511u) / 1023u);
       decoded.rgb[p * 3u + 1u] = static_cast<uint16_t>((((word >> 10) & 1023u) * 65535u + 511u) / 1023u);
       decoded.rgb[p * 3u + 2u] = static_cast<uint16_t>(((word & 1023u) * 65535u + 511u) / 1023u);
     }
+    });
     decoded.info.profile = "packed RGB10 Rec.2020/PQ interpretation (Experimental)";
     decoded.info.bit_depth = 10; decoded.info.chroma = "4:4:4 RGB";
     decoded.info.pixel_format = "GUID_WICPixelFormat32bppBGR101010";
@@ -4373,6 +4509,32 @@ SourceInfo inspect(const std::filesystem::path& path) {
   auto info = inspect_any(path);
   finalize_source_metadata(info);
   return info;
+}
+
+PreviewImage decode_preview(const std::filesystem::path& input,
+                            uint32_t max_dimension,
+                            ProgressCallback progress,
+                            std::atomic_bool* cancel) {
+  if (max_dimension == 0) throw std::runtime_error("preview dimensions must be non-zero");
+  TimingDiagnostics timings;
+  const auto decoded = decode_input(input, progress, cancel, timings);
+  if (decoded->info.asset_kind != "direct-hdr" &&
+      decoded->info.asset_kind != "gain-map-hdr") {
+    throw std::runtime_error("No HDR data");
+  }
+  std::optional<DecodedImage> resized;
+  const DecodedImage* preview = decoded.get();
+  if (decoded->info.width > max_dimension || decoded->info.height > max_dimension) {
+    resized = resize_linear_hdr_to_fit(*decoded, max_dimension);
+    preview = &*resized;
+  }
+  PreviewImage result;
+  result.info = preview->info;
+  result.width = preview->info.width;
+  result.height = preview->info.height;
+  result.timings = timings;
+  result.rgba_fp16 = pq2020_to_scrgb_half(*preview, progress, cancel);
+  return result;
 }
 
 ConversionResult convert(const std::filesystem::path& input,
