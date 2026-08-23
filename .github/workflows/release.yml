@@ -91,8 +91,8 @@ jobs:
             -IsccPath "${{ steps.inno.outputs.path }}"
           $setup = "${{ github.workspace }}\dist\HDRBridge-${{ github.ref_name }}-Windows-x64-Setup.exe"
           $install = Join-Path $env:RUNNER_TEMP "HDR Bridge Installer Smoke Test"
-          $process = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
-            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$install")
+          $installArguments = "/CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$install`""
+          $process = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList $installArguments
           if ($process.ExitCode -ne 0 -or
               -not (Test-Path -LiteralPath (Join-Path $install "hdrbridge.exe"))) {
             throw "Installer smoke installation failed"
