@@ -102,6 +102,10 @@ using AvifEncoderPtr = std::unique_ptr<avifEncoder, AvifEncoderDeleter>;
 struct DecodedImage {
   SourceInfo info;
   std::vector<uint16_t> rgb;
+  // Straight, full-range alpha retained independently from the canonical RGB
+  // master. RGB color math remains unchanged; output policy decides whether
+  // alpha is preserved or composited.
+  std::vector<uint16_t> alpha;
   std::vector<uint8_t> exif;
   std::vector<uint8_t> xmp;
   TimingDiagnostics timings;
@@ -1456,6 +1460,27 @@ void attach_hdr_stats(Verification& verification, const HdrStats& stats) {
   verification.peak_choice_reason = stats.reason;
 }
 
+void composite_straight_alpha_over_black(DecodedImage& decoded) {
+  const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
+  if (decoded.alpha.size() != count || decoded.rgb.size() != count * 3u) {
+    throw std::runtime_error("invalid RGBA16 canonical raster");
+  }
+  const auto& lut = pq_nits_lut();
+  parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
+    for (size_t p = begin; p < end; ++p) {
+      const double alpha = decoded.alpha[p] / 65535.0;
+      for (size_t c = 0; c < 3; ++c) {
+        const double nits = lut[decoded.rgb[p * 3u + c]] * alpha;
+        decoded.rgb[p * 3u + c] = static_cast<uint16_t>(std::llround(
+            forward_pq(std::clamp(nits, 0.0, 10000.0)) * 65535.0));
+      }
+    }
+  });
+  decoded.alpha.clear();
+  decoded.info.pixel_format = "RGB16 integer (source alpha composited over black in linear light)";
+  decoded.info.chroma = "4:4:4 RGB";
+}
+
 std::vector<uint8_t> make_pq_icc(bool display_p3,
                                  const std::string& description_override = {},
                                  bool include_cicp = false) {
@@ -1894,7 +1919,10 @@ std::vector<uint8_t> encode_png(const DecodedImage& decoded, const ConversionOpt
   }
   PngMemoryWriter writer;
   png_set_write_fn(png, &writer, png_write_memory, png_flush_memory);
-  png_set_IHDR(png, info, decoded.info.width, decoded.info.height, 16, PNG_COLOR_TYPE_RGB,
+  const bool rgba = decoded.alpha.size() ==
+      static_cast<size_t>(decoded.info.width) * decoded.info.height;
+  png_set_IHDR(png, info, decoded.info.width, decoded.info.height, 16,
+               rgba ? PNG_COLOR_TYPE_RGB_ALPHA : PNG_COLOR_TYPE_RGB,
                PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
   png_set_compression_level(png, std::clamp(options.png_compression_level, 1, 9));
   const bool p3 = options.output_gamut == "p3";
@@ -1949,12 +1977,28 @@ std::vector<uint8_t> encode_png(const DecodedImage& decoded, const ConversionOpt
 #if defined(_WIN32) || defined(__EMSCRIPTEN__)
   png_set_swap(png);
 #endif
-  std::vector<png_bytep> rows(decoded.info.height);
-  for (uint32_t y = 0; y < decoded.info.height; ++y) {
-    rows[y] = reinterpret_cast<png_bytep>(const_cast<uint16_t*>(
-        pixels.data() + static_cast<size_t>(y) * decoded.info.width * 3u));
+  if (rgba) {
+    std::vector<uint16_t> row(static_cast<size_t>(decoded.info.width) * 4u);
+    for (uint32_t y = 0; y < decoded.info.height; ++y) {
+      const size_t pixel_offset = static_cast<size_t>(y) * decoded.info.width;
+      for (uint32_t x = 0; x < decoded.info.width; ++x) {
+        const size_t source = (pixel_offset + x) * 3u;
+        const size_t target = static_cast<size_t>(x) * 4u;
+        row[target] = pixels[source];
+        row[target + 1u] = pixels[source + 1u];
+        row[target + 2u] = pixels[source + 2u];
+        row[target + 3u] = decoded.alpha[pixel_offset + x];
+      }
+      png_write_row(png, reinterpret_cast<png_bytep>(row.data()));
+    }
+  } else {
+    std::vector<png_bytep> rows(decoded.info.height);
+    for (uint32_t y = 0; y < decoded.info.height; ++y) {
+      rows[y] = reinterpret_cast<png_bytep>(const_cast<uint16_t*>(
+          pixels.data() + static_cast<size_t>(y) * decoded.info.width * 3u));
+    }
+    png_write_image(png, rows.data());
   }
-  png_write_image(png, rows.data());
   png_write_end(png, info);
   png_destroy_write_struct(&png, &info);
   if (!options.diagnostic_icc_only) insert_png_cicp_after_ihdr(writer.bytes, cicp);
@@ -2114,7 +2158,8 @@ bool find_png_cicp(const std::vector<uint8_t>& bytes, std::array<uint8_t, 4>& ci
 Verification decode_png(const std::vector<uint8_t>& bytes,
                         const std::vector<uint16_t>* expected = nullptr,
                         bool expect_icc = true,
-                        bool expect_icc_only = false) {
+                        bool expect_icc_only = false,
+                        const std::vector<uint16_t>* expected_alpha = nullptr) {
   Verification v;
   png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
   if (!png) throw std::runtime_error("cannot create PNG reader");
@@ -2131,15 +2176,37 @@ Verification decode_png(const std::vector<uint8_t>& bytes,
   png_uint_32 width = 0, height = 0;
   png_get_IHDR(png, info, &width, &height, &bit_depth, &color_type, &interlace, &compression, &filter);
   v.width = width; v.height = height; v.bit_depth = static_cast<uint32_t>(bit_depth);
-  v.pixel_format = color_type == PNG_COLOR_TYPE_RGB ? "PNG RGB16" : "unexpected PNG color type";
+  const bool rgba = color_type == PNG_COLOR_TYPE_RGB_ALPHA;
+  v.pixel_format = rgba ? "PNG RGBA16" :
+                   color_type == PNG_COLOR_TYPE_RGB ? "PNG RGB16" :
+                                                      "unexpected PNG color type";
 #if defined(_WIN32) || defined(__EMSCRIPTEN__)
   png_set_swap(png);
 #endif
   png_read_update_info(png, info);
-  std::vector<uint16_t> pixels(static_cast<size_t>(width) * height * 3u);
-  std::vector<png_bytep> rows(height);
-  for (uint32_t y = 0; y < height; ++y) rows[y] = reinterpret_cast<png_bytep>(pixels.data() + static_cast<size_t>(y) * width * 3u);
-  png_read_image(png, rows.data());
+  const size_t pixel_count = static_cast<size_t>(width) * height;
+  std::vector<uint16_t> pixels(pixel_count * 3u);
+  std::vector<uint16_t> alpha;
+  if (rgba) {
+    alpha.resize(pixel_count);
+    std::vector<uint16_t> row(static_cast<size_t>(width) * 4u);
+    for (uint32_t y = 0; y < height; ++y) {
+      png_read_row(png, reinterpret_cast<png_bytep>(row.data()), nullptr);
+      const size_t offset = static_cast<size_t>(y) * width;
+      for (uint32_t x = 0; x < width; ++x) {
+        const size_t source = static_cast<size_t>(x) * 4u;
+        const size_t target = (offset + x) * 3u;
+        pixels[target] = row[source];
+        pixels[target + 1u] = row[source + 1u];
+        pixels[target + 2u] = row[source + 2u];
+        alpha[offset + x] = row[source + 3u];
+      }
+    }
+  } else {
+    std::vector<png_bytep> rows(height);
+    for (uint32_t y = 0; y < height; ++y) rows[y] = reinterpret_cast<png_bytep>(pixels.data() + static_cast<size_t>(y) * width * 3u);
+    png_read_image(png, rows.data());
+  }
   png_read_end(png, info);
   png_charp profile_name = nullptr; int profile_compression = 0; png_bytep profile = nullptr; png_uint_32 profile_size = 0;
   const bool has_icc = png_get_iCCP(png, info, &profile_name, &profile_compression, &profile, &profile_size) != 0 && profile_size > 0;
@@ -2157,11 +2224,17 @@ Verification decode_png(const std::vector<uint8_t>& bytes,
                      expect_icc_only && has_icc ? "direct HDR from ICC; cICP absent" :
                      "unexpected/missing PNG cICP";
   v.exact_roundtrip = expected && expected->size() == pixels.size() &&
-                      std::memcmp(expected->data(), pixels.data(), pixels.size() * sizeof(uint16_t)) == 0;
+                      std::memcmp(expected->data(), pixels.data(), pixels.size() * sizeof(uint16_t)) == 0 &&
+                      (!expected_alpha || (expected_alpha->size() == alpha.size() &&
+                       std::memcmp(expected_alpha->data(), alpha.data(),
+                                   alpha.size() * sizeof(uint16_t)) == 0));
   auto [minimum, maximum] = std::minmax_element(pixels.begin(), pixels.end());
   if (minimum != pixels.end()) { v.min_value = *minimum; v.max_value = *maximum; }
   v.checks.push_back(width && height ? "PNG dimensions parse" : "PNG dimensions missing");
-  v.checks.push_back(bit_depth == 16 && color_type == PNG_COLOR_TYPE_RGB ? "lossless RGB 16-bit storage" : "PNG is not RGB16");
+  v.checks.push_back(bit_depth == 16 &&
+      (color_type == PNG_COLOR_TYPE_RGB || rgba)
+      ? (rgba ? "lossless RGBA 16-bit storage" : "lossless RGB 16-bit storage")
+      : "PNG is not RGB16/RGBA16");
   v.checks.push_back(rec2020 || p3 || hlg
       ? (hlg ? "HLG cICP present with RGB matrix=0 and full range"
              : "PQ cICP present with RGB matrix=0 and full range")
@@ -2171,8 +2244,11 @@ Verification decode_png(const std::vector<uint8_t>& bytes,
                          ? (has_icc ? "compatible HDR PQ ICC profile embedded" : "HDR ICC profile missing")
                          : (!has_icc ? "cICP-only A/B variant contains no ICC profile"
                                      : "cICP-only A/B variant unexpectedly contains ICC"));
-  if (expected) v.checks.push_back(v.exact_roundtrip ? "exact RGB16 pixel roundtrip" : "RGB16 pixel roundtrip mismatch");
-  v.passed = width > 0 && height > 0 && bit_depth == 16 && color_type == PNG_COLOR_TYPE_RGB &&
+  if (expected) v.checks.push_back(v.exact_roundtrip
+      ? (rgba ? "exact RGBA16 pixel and alpha roundtrip" : "exact RGB16 pixel roundtrip")
+      : (rgba ? "RGBA16 pixel or alpha roundtrip mismatch" : "RGB16 pixel roundtrip mismatch"));
+  v.passed = width > 0 && height > 0 && bit_depth == 16 &&
+             (color_type == PNG_COLOR_TYPE_RGB || rgba) &&
              (expect_icc_only ? (!has_cicp && has_icc) : (rec2020 || p3 || hlg)) &&
              (has_icc == expect_icc) && (!expected || v.exact_roundtrip);
   return v;
@@ -2315,19 +2391,40 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
     png_destroy_read_struct(&png, &info, nullptr);
     return decoded;
   }
-  if (bit_depth != 16 || color_type != PNG_COLOR_TYPE_RGB) {
+  if (bit_depth != 16 || (color_type != PNG_COLOR_TYPE_RGB &&
+                          color_type != PNG_COLOR_TYPE_RGB_ALPHA)) {
     png_destroy_read_struct(&png, &info, nullptr);
-    throw std::runtime_error("direct HDR PNG input must be RGB16");
+    throw std::runtime_error("direct HDR PNG input must be RGB16 or RGBA16");
   }
-  decoded.info.pixel_format = "RGB16 integer";
+  const bool rgba = color_type == PNG_COLOR_TYPE_RGB_ALPHA;
+  decoded.info.pixel_format = rgba ? "RGBA16 integer (straight alpha)" : "RGB16 integer";
 #if defined(_WIN32) || defined(__EMSCRIPTEN__)
   png_set_swap(png);
 #endif
   png_read_update_info(png, info);
-  decoded.rgb.resize(static_cast<size_t>(width) * height * 3u);
-  std::vector<png_bytep> rows(height);
-  for (uint32_t y = 0; y < height; ++y) rows[y] = reinterpret_cast<png_bytep>(decoded.rgb.data() + static_cast<size_t>(y) * width * 3u);
-  png_read_image(png, rows.data());
+  const size_t pixel_count = static_cast<size_t>(width) * height;
+  decoded.rgb.resize(pixel_count * 3u);
+  if (rgba) {
+    decoded.alpha.resize(pixel_count);
+    std::vector<uint16_t> row(static_cast<size_t>(width) * 4u);
+    for (uint32_t y = 0; y < height; ++y) {
+      png_read_row(png, reinterpret_cast<png_bytep>(row.data()), nullptr);
+      const size_t offset = static_cast<size_t>(y) * width;
+      for (uint32_t x = 0; x < width; ++x) {
+        const size_t source = static_cast<size_t>(x) * 4u;
+        const size_t target = (offset + x) * 3u;
+        decoded.rgb[target] = row[source];
+        decoded.rgb[target + 1u] = row[source + 1u];
+        decoded.rgb[target + 2u] = row[source + 2u];
+        decoded.alpha[offset + x] = row[source + 3u];
+      }
+    }
+  } else {
+    std::vector<png_bytep> rows(height);
+    for (uint32_t y = 0; y < height; ++y) rows[y] = reinterpret_cast<png_bytep>(
+        decoded.rgb.data() + static_cast<size_t>(y) * width * 3u);
+    png_read_image(png, rows.data());
+  }
   png_read_end(png, info);
   png_destroy_read_struct(&png, &info, nullptr);
   if (decoded.info.transfer == 18) {
@@ -2930,7 +3027,9 @@ std::vector<uint16_t> pq2020_to_scrgb_half(const DecodedImage& decoded,
       rgba[p * 4u] = float_to_half(sr);
       rgba[p * 4u + 1u] = float_to_half(sg);
       rgba[p * 4u + 2u] = float_to_half(sb);
-      rgba[p * 4u + 3u] = float_to_half(1.0f);
+      const float alpha = decoded.alpha.size() == pixels
+          ? decoded.alpha[p] / 65535.0f : 1.0f;
+      rgba[p * 4u + 3u] = float_to_half(alpha);
     }
   });
   report(progress, 62, "Linear FP16 scRGB transform complete");
@@ -3201,6 +3300,7 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
   if (format == GUID_WICPixelFormat64bppRGBAHalf) {
     decoded.info.asset_kind = "direct-hdr";
     decoded.rgb.resize(count * 3u);
+    decoded.alpha.resize(count);
     std::vector<uint16_t> rgba(count * 4u);
     require_hr(frame->CopyPixels(nullptr, decoded.info.width * 8u, static_cast<UINT>(rgba.size() * sizeof(uint16_t)),
                                  reinterpret_cast<BYTE*>(rgba.data())), "decode JPEG XR FP16 input");
@@ -3215,8 +3315,15 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
           0.0163910 * r + 0.0880130 * g + 0.8955950 * b};
       for (size_t c = 0; c < 3; ++c) decoded.rgb[p * 3u + c] = static_cast<uint16_t>(std::llround(
           forward_pq(std::clamp(rec2020[c], 0.0, 10000.0)) * 65535.0));
+      decoded.alpha[p] = static_cast<uint16_t>(std::llround(
+          std::clamp(static_cast<double>(half_to_float(rgba[p * 4u + 3u])),
+                     0.0, 1.0) * 65535.0));
     }
     });
+    if (std::all_of(decoded.alpha.begin(), decoded.alpha.end(),
+                    [](uint16_t value) { return value == 65535u; })) {
+      decoded.alpha.clear();
+    }
     decoded.info.profile = "FP16 linear scRGB (1.0 = 80 cd/m2)";
     decoded.info.bit_depth = 16; decoded.info.chroma = "4:4:4 RGBA FP16";
     decoded.info.pixel_format = "GUID_WICPixelFormat64bppRGBAHalf";
@@ -4156,9 +4263,15 @@ DecodedImage decode_input_uncached(const std::filesystem::path& path,
   const auto orientation_start = Clock::now();
   if (!decoded.rgb.empty() && decoded.info.original_orientation != 1 &&
       !decoded.info.orientation_normalized) {
+    const uint32_t source_width = decoded.info.width;
+    const uint32_t source_height = decoded.info.height;
     const auto transformed = orientation::normalize_rgb16(
         decoded.rgb, decoded.info.width, decoded.info.height,
         decoded.info.original_orientation);
+    if (!decoded.alpha.empty()) {
+      orientation::normalize_plane16(decoded.alpha, source_width, source_height,
+                                     decoded.info.original_orientation);
+    }
     decoded.info.width = transformed.width;
     decoded.info.height = transformed.height;
   }
@@ -4522,10 +4635,16 @@ PreviewImage decode_preview(const std::filesystem::path& input,
       decoded->info.asset_kind != "gain-map-hdr") {
     throw std::runtime_error("No HDR data");
   }
-  std::optional<DecodedImage> resized;
+  std::optional<DecodedImage> alpha_composited;
   const DecodedImage* preview = decoded.get();
+  if (!decoded->alpha.empty()) {
+    alpha_composited = *decoded;
+    composite_straight_alpha_over_black(*alpha_composited);
+    preview = &*alpha_composited;
+  }
+  std::optional<DecodedImage> resized;
   if (decoded->info.width > max_dimension || decoded->info.height > max_dimension) {
-    resized = resize_linear_hdr_to_fit(*decoded, max_dimension);
+    resized = resize_linear_hdr_to_fit(*preview, max_dimension);
     preview = &*resized;
   }
   PreviewImage result;
@@ -4593,7 +4712,24 @@ ConversionResult convert(const std::filesystem::path& input,
   try {
     check_cancel(cancel);
     auto decoded_pointer = decode_input(input, progress, cancel, timings);
-    const DecodedImage& decoded = *decoded_pointer;
+    std::optional<DecodedImage> composited_source;
+    const bool preserves_alpha = options.mode == "png-pq16" ||
+                                 options.mode == "jxr-scrgb-fp16";
+    if (!decoded_pointer->alpha.empty()) {
+      if (options.mode == "ultrahdr") {
+        report(progress, 44,
+               "Compositing source alpha over black in linear light for JPEG output");
+        composited_source = *decoded_pointer;
+        composite_straight_alpha_over_black(*composited_source);
+      } else if (!preserves_alpha) {
+        report(progress, 44,
+               "Compositing source alpha over black in linear light for RGB-only encoder path");
+        composited_source = *decoded_pointer;
+        composite_straight_alpha_over_black(*composited_source);
+      }
+    }
+    const DecodedImage& decoded = composited_source ? *composited_source
+                                                    : *decoded_pointer;
     if (decoded.info.asset_kind != "direct-hdr" &&
         decoded.info.asset_kind != "gain-map-hdr") {
       throw std::runtime_error("No HDR data");
@@ -4707,11 +4843,12 @@ ConversionResult convert(const std::filesystem::path& input,
       verification = decode_ultrahdr(bytes, uhdr_source, &uhdr_stats, &options);
       timings.verification_ms = elapsed_ms(verification_start);
     } else if (options.mode == "png-pq16") {
+      const char* png_layout = decoded.alpha.empty() ? "RGB16" : "RGBA16";
       report(progress, 52, options.output_transfer == "hlg"
-          ? "Encoding direct HDR PNG RGB16 with BT.2100 HLG cICP"
+          ? std::string("Encoding direct HDR PNG ") + png_layout + " with BT.2100 HLG cICP"
           : options.embed_hdr_icc
-          ? "Encoding direct HDR PNG RGB16 with PQ cICP and ICC"
-          : "Encoding PNG A/B variant B with standard PQ cICP only");
+          ? std::string("Encoding direct HDR PNG ") + png_layout + " with PQ cICP and ICC"
+          : std::string("Encoding PNG ") + png_layout + " with standard PQ cICP only");
       const auto color_start = Clock::now();
       auto converted = options.output_transfer == "hlg"
           ? convert_rec2020_pq_to_hlg(decoded, options.output_gamut)
@@ -4725,12 +4862,14 @@ ConversionResult convert(const std::filesystem::path& input,
       timings.encode_ms = elapsed_ms(encode_start);
       check_cancel(cancel);
       write_file(temp, bytes);
-      report(progress, 88, "Verifying PNG RGB16 equality and cICP signaling");
+      report(progress, 88, std::string("Verifying PNG ") + png_layout +
+                           " equality and cICP signaling");
       const auto verification_start = Clock::now();
       verification = decode_png(bytes, &pixels,
                                 options.diagnostic_icc_only ||
                                     (options.output_transfer == "pq" && options.embed_hdr_icc),
-                                options.diagnostic_icc_only);
+                                options.diagnostic_icc_only,
+                                decoded.alpha.empty() ? nullptr : &decoded.alpha);
       timings.verification_ms = elapsed_ms(verification_start);
       attach_hdr_stats(verification, stats);
     } else if (options.mode == "tiff-pq16") {

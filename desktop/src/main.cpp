@@ -61,6 +61,7 @@ constexpr UINT ID_TASK_OUTPUT_FOLDER = 4015;
 constexpr UINT ID_TASK_EDIT = 4016;
 constexpr UINT ID_TASK_REMOVE_COMPLETED = 4017;
 constexpr UINT ID_TASK_REMOVE_ALL = 4018;
+constexpr UINT ID_TASK_START = 4019;
 constexpr UINT IDC_PREVIEW_ZOOM = 5001;
 constexpr UINT IDC_PREVIEW_FULLSCREEN = 5002;
 
@@ -2471,7 +2472,8 @@ void start_conversion(AppState* state) {
   }).detach();
 }
 
-void start_task_queue(AppState* state) {
+void start_task_queue(AppState* state,
+                      std::optional<size_t> selected_task = std::nullopt) {
   if (state->running || state->conversion_tasks.empty()) return;
   state->cancel.store(false);
   KillTimer(state->window, kProgressResetTimer);
@@ -2480,8 +2482,12 @@ void start_task_queue(AppState* state) {
   set_running(state, true);
   const auto tasks = state->conversion_tasks;
   std::vector<size_t> runnable;
-  for (size_t index = 0; index < tasks.size(); ++index) {
-    if (tasks[index].status != QueueStatus::success) runnable.push_back(index);
+  if (selected_task && *selected_task < tasks.size()) {
+    runnable.push_back(*selected_task);
+  } else {
+    for (size_t index = 0; index < tasks.size(); ++index) {
+      if (tasks[index].status == QueueStatus::pending) runnable.push_back(index);
+    }
   }
   if (runnable.empty()) {
     ShowWindow(state->progress, SW_HIDE);
@@ -2816,6 +2822,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         const auto& task = state->conversion_tasks[static_cast<size_t>(selected)];
         const bool output_ready = task.status == QueueStatus::success && std::filesystem::exists(task.output);
         HMENU menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING | (state->running ? MF_GRAYED : 0),
+                    ID_TASK_START, L"Start task");
         AppendMenuW(menu, MF_STRING, ID_TASK_CLEAR_STATUS, L"Clear task status");
         AppendMenuW(menu, MF_STRING | (state->running ? MF_GRAYED : 0), ID_TASK_DELETE, L"Delete task");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -2826,7 +2834,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                                             point.x, point.y, 0, window, nullptr);
         DestroyMenu(menu);
-        if (command == ID_TASK_CLEAR_STATUS) {
+        if (command == ID_TASK_START) {
+          start_task_queue(state, static_cast<size_t>(selected));
+        } else if (command == ID_TASK_CLEAR_STATUS) {
           state->conversion_tasks[static_cast<size_t>(selected)].status = QueueStatus::pending;
           state->conversion_tasks[static_cast<size_t>(selected)].progress = 0;
           state->conversion_tasks[static_cast<size_t>(selected)].reason.clear();

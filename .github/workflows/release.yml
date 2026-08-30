@@ -121,9 +121,8 @@ jobs:
           Windows x64 release of HDR Bridge. Use the installer for normal installation and in-place upgrades, or the ZIP for portable use.
 
           ### Changes
-          - Add an optional native Windows HDR preview
-          - Improve HDR conversion and preview performance
-          - Improve desktop UI behavior
+          - Add RGBA16 HDR PNG input with alpha-aware output handling
+          - Improve task retry controls
 
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 
