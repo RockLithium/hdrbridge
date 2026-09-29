@@ -1,6 +1,6 @@
 # HDR Bridge
 
-HDR Bridge is a local HDR still-image converter for Windows. It understands both direct PQ/HLG images and gain-map formats, reconstructs a high-precision linear HDR master, then writes formats suited to sharing, video, editing, or compact delivery.
+HDR Bridge is a local HDR still-image converter for Windows. It understands both direct PQ/HLG images and gain-map formats, normalizes them to a high-precision Rec.2020/PQ RGB16 working image, then writes formats suited to sharing, video, editing, or compact delivery. HDR reconstruction and color transforms are calculated in linear light.
 
 The desktop application does not upload images and does not present an SDR simulation as an HDR preview.
 

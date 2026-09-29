@@ -7,16 +7,18 @@ HDR fidelity and lossless compression are different claims.
 
 ## Input reconstruction
 
-| Input                            | Path to the canonical HDR master                                                                  | Characterization                                                                          |
+Accepted HDR inputs become an oriented Rec.2020/PQ RGB16 working image. Linear-light values are used during reconstruction and color conversion, then encoded to PQ16. Those conversions can introduce quantization even when the source and destination codecs are lossless.
+
+| Input                            | Path to the working HDR image                                                                     | Characterization                                                                          |
 | -------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | Ultra HDR JPEG                   | SDR base plus ISO mono/RGB gain map reconstruction                                                | Preserves HDR intent within JPEG, map resolution and metadata precision; not lossless     |
 | Apple HDR HEIC/JPEG              | Apple auxiliary or MPF gain map and metadata reconstructed in the correct base gamut              | High-precision reconstruction, not a bit-exact recovery of an unavailable original master |
 | Gain-map AVIF                    | `tmap` item graph plus ISO metadata                                                               | High-precision metadata-defined reconstruction; source encoding limits remain             |
 | Gain-map JPEG XL (`jhgm`)        | SDR base plus `jhgm` gain-map codestream and ISO metadata; this is not the AVIF `tmap` item graph | Metadata-defined HDR reconstruction; base/map codec loss and resampling remain            |
 | Gain-map TIFF                    | TIFF SubIFD plus ISO metadata                                                                     | High-precision metadata-defined reconstruction; source encoding limits remain             |
-| Direct PQ HEIF/AVIF/PNG/TIFF/JXL | ST 2084 to absolute linear light; optional linear gamut conversion                                | Mathematically defined and high-fidelity; source codec losses cannot be recovered         |
-| Direct HLG HEIF/PNG/AVIF/JXL     | inverse HLG OETF and BT.2100 OOTF using the signaled or 1000-nit reference model                  | High-fidelity for the same display model, not code-value lossless                         |
-| FP16 scRGB JXR                   | linear scRGB at 80 nit reference white to the canonical gamut                                     | Preserves extended and negative values to FP16 precision                                  |
+| Direct PQ HEIF/AVIF/PNG/TIFF/JXL | Rec.2020/PQ samples retained where possible; other gamuts transformed in linear light to PQ16   | Mathematically defined and high-fidelity; source codec losses cannot be recovered         |
+| Direct HLG HEIF/PNG/AVIF/JXL     | inverse HLG OETF and BT.2100 OOTF, then Rec.2020/PQ RGB16 using the reference display model       | High-fidelity for the same display model, not code-value lossless                         |
+| FP16 scRGB JXR                   | linear scRGB at 80 nit reference white, converted to Rec.2020/PQ RGB16                            | Negative or out-of-range Rec.2020 values are clipped; source FP16 is not retained         |
 
 An ordinary SDR file without gain-map, PQ or HLG data is rejected as an HDR source rather than silently promoted.
 
@@ -29,7 +31,7 @@ An ordinary SDR file without gain-map, PQ or HLG data is rejected as an HDR sour
 | RGB16 PQ TIFF            | High precision with HDR-aware CICP ICC signaling and an application-compatible large-strip layout      | Deflate and uncompressed modes are both exact for the target RGB16 buffer                |
 | RGB16 PQ/HLG JPEG XL     | High precision; optional lossy modes affect it                                                         | Lossless mode is exact for the target RGB16 buffer                                       |
 | RGB ISO gain-map JPEG XL | Display-adaptive HDR with an SDR base and half-resolution RGB map by default                           | Not lossless; RGB is required because the mono path is not offered as a validated output |
-| FP16 scRGB JPEG XR       | High-fidelity linear edit/master representation within FP16 range                                      | Lossless mode is exact for the target FP16 representation                                |
+| FP16 scRGB JPEG XR       | High-fidelity linear representation of the PQ16 working image within FP16 range                       | Lossless mode is exact for the target FP16 representation                                |
 | 10-bit PQ/HLG AVIF       | Compact HDR with 10-bit quantization and AV1 compression                                               | Not lossless                                                                             |
 | RGB ISO gain-map AVIF    | Display-adaptive HDR with an SDR base and half-resolution RGB map by default                           | Not lossless; RGB is required because the mono path is not offered as a validated output |
 | Gain-map extraction      | Exposes the encoded map rather than reconstructing an HDR image                                        | Original JXL is byte-exact; original JPEG preserves compressed scan data while removing parent metadata; PNG/TIFF preserve decoded samples; JPEG re-encode is lossy |
