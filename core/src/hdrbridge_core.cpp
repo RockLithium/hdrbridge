@@ -2493,7 +2493,7 @@ void encode_tiff(const std::filesystem::path& path, const DecodedImage& decoded,
   const std::string description = p3 ? "HDR Bridge direct RGB16 Display P3 PQ" :
                                        "HDR Bridge direct RGB16 Rec.2020 PQ";
   TIFFSetField(tiff.get(), TIFFTAG_IMAGEDESCRIPTION, description.c_str());
-  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.2.1");
+  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.3.1");
   TIFFSetField(tiff.get(), TIFFTAG_ICCPROFILE, static_cast<uint32_t>(icc.size()), icc.data());
   std::vector<uint8_t> diagnostic_photoshop;
   std::vector<uint8_t> diagnostic_iptc;
