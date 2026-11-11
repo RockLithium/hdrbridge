@@ -146,6 +146,25 @@
       <button id="download-button" class="main-btn download-button" type="button" disabled data-i18n="download">DOWNLOAD</button>
     </div>
   </main>
+  <script>
+    // Reload only before the user interacts, and only once per tab and URL.
+    if (!globalThis.crossOriginIsolated && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
+      let interacted = false;
+      for (const type of ['pointerdown', 'keydown', 'drop', 'change']) {
+        addEventListener(type, () => { interacted = true; }, { once: true, capture: true });
+      }
+      const base = new URL(/\/bundled\/(?:index\.html)?$/.test(location.pathname) ? '../' : './', location.href);
+      const key = 'hdrbridge-isolation-reloaded';
+      navigator.serviceWorker.register(new URL('isolation-sw.js', base), { scope: base.pathname })
+        .then(() => navigator.serviceWorker.ready)
+        .then(() => {
+          if (!interacted && !globalThis.crossOriginIsolated && !sessionStorage.getItem(key)) {
+            sessionStorage.setItem(key, '1');
+            location.reload();
+          }
+        }).catch(() => {});
+    }
+  </script>
   <script type="module" src="./src/app.js?v=9"></script>
 </body>
 </html>

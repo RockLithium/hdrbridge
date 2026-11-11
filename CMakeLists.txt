@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 set(VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_LIST_DIR}/ports-overlay" CACHE STRING "HDR Bridge vcpkg overlay ports")
-project(hdrbridge VERSION 1.3.1 LANGUAGES CXX)
+project(hdrbridge VERSION 1.3.2 LANGUAGES CXX)
 include(CTest)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -96,6 +96,10 @@ if(BUILD_TESTING)
   target_compile_options(hdrbridge-png-input-tests PRIVATE /W4 /permissive- /utf-8)
   target_link_libraries(hdrbridge-png-input-tests PRIVATE hdrbridge_core)
   add_test(NAME png-sdr-classification COMMAND hdrbridge-png-input-tests)
+  add_executable(hdrbridge-cache-tests tests/cache-tests.cpp)
+  target_compile_options(hdrbridge-cache-tests PRIVATE /W4 /permissive- /utf-8)
+  target_link_libraries(hdrbridge-cache-tests PRIVATE hdrbridge_core)
+  add_test(NAME canonical-input-cache COMMAND hdrbridge-cache-tests)
   add_executable(hdrbridge-preview-ui-smoke tests/preview_ui_smoke.cpp)
   target_compile_definitions(hdrbridge-preview-ui-smoke PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

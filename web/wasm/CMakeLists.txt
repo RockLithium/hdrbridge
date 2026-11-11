@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.25)
 
 project(hdrbridge_web_core LANGUAGES C CXX)
 
+option(HDRBRIDGE_PTHREADS "Build with WebAssembly threads" OFF)
+if(HDRBRIDGE_PTHREADS)
+  add_compile_options(-pthread)
+  add_link_options(-pthread "-sPTHREAD_POOL_SIZE=(navigator.hardwareConcurrency||4)" -sPTHREAD_POOL_SIZE_STRICT=2)
+endif()
+
 if(NOT EMSCRIPTEN)
   message(FATAL_ERROR "Configure this target with Emscripten (emcmake cmake).")
 endif()
@@ -91,6 +97,11 @@ target_link_libraries(hdrbridge-web PRIVATE
   "${LZMA_LIBRARY}"
   lcms2::lcms2)
 
+if(HDRBRIDGE_PTHREADS)
+  set(HDRBRIDGE_RUNTIME_METHODS "['HEAPU8','stringToUTF8','lengthBytesUTF8','PThread']")
+else()
+  set(HDRBRIDGE_RUNTIME_METHODS "['HEAPU8','stringToUTF8','lengthBytesUTF8']")
+endif()
 target_link_options(hdrbridge-web PRIVATE
   -O3
   -lembind
@@ -105,7 +116,7 @@ target_link_options(hdrbridge-web PRIVATE
   -sFILESYSTEM=1
   -sASSERTIONS=0
   -sEXPORTED_FUNCTIONS=['_malloc','_free','_hb_inspect_asset','_hb_convert_asset','_hb_output_data','_hb_output_size','_hb_info_json','_hb_last_error','_hb_clear_result']
-  -sEXPORTED_RUNTIME_METHODS=['HEAPU8','stringToUTF8','lengthBytesUTF8']
+  "-sEXPORTED_RUNTIME_METHODS=${HDRBRIDGE_RUNTIME_METHODS}"
   --no-entry)
 
 set_target_properties(hdrbridge-web PROPERTIES

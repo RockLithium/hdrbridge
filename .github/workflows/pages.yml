@@ -37,9 +37,7 @@ jobs:
             web/.cache/downloads
             web/.cache/vcpkg_installed
             web/.cache/build
-          key: wasm32-v1-${{ hashFiles('web/vcpkg-overlay/**') }}
-          restore-keys: |
-            wasm32-
+          key: wasm32-v2-${{ hashFiles('web/vcpkg-overlay/**', 'web/vcpkg-triplets/**') }}
       - name: Build the HDR Bridge Web module
         id: web-build
         continue-on-error: true

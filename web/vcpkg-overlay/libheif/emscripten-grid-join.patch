@@ -1,0 +1,65 @@
+diff --git a/libheif/image-items/grid.cc b/libheif/image-items/grid.cc
+index 048b768..63c6ffa 100644
+--- a/libheif/image-items/grid.cc
++++ b/libheif/image-items/grid.cc
+@@ -24,6 +24,8 @@
+ #include <cstring>
+ #include <deque>
+ #include <future>
++#include <thread>
++#include <functional>
+ #include <mutex>
+ #include <set>
+ #include <algorithm>
+@@ -235,7 +237,22 @@ Result<std::shared_ptr<HeifPixelImage>> ImageItem_Grid::decode_compressed_image(
+ // which is the meaningful cross-check (grid-header size vs signaled size).
+ 
+ #if ENABLE_PARALLEL_TILE_DECODING
+-static void wait_for_jobs(std::deque<std::future<Error> >* jobs) {
++#if defined(__EMSCRIPTEN_PTHREADS__)
++// Join each tile thread synchronously so Emscripten can recycle its worker
++// before the next tile is dispatched, even while the calling worker is busy.
++struct GridJob {
++  std::future<Error> result;
++  std::thread thread;
++  explicit GridJob(std::packaged_task<Error()>&& task)
++    : result(task.get_future()), thread(std::move(task)) {}
++  GridJob(GridJob&&) = default;
++  ~GridJob() { if (thread.joinable()) thread.join(); }
++  Error get() { if (thread.joinable()) thread.join(); return result.get(); }
++};
++#else
++using GridJob = std::future<Error>;
++#endif
++static void wait_for_jobs(std::deque<GridJob>* jobs) {
+   if (jobs->empty()) {
+     return;
+   }
+@@ -294,7 +311,7 @@ Result<std::shared_ptr<HeifPixelImage>> ImageItem_Grid::decode_full_grid_image(c
+   if (get_context()->get_max_decoding_threads() > 0)
+     tiles.resize(static_cast<size_t>(grid.get_rows()) * static_cast<size_t>(grid.get_columns()));
+ 
+-  std::deque<std::future<Error> > errs;
++  std::deque<GridJob> errs;
+ #endif
+ 
+   uint32_t tile_width = 0;
+@@ -433,10 +450,18 @@ Result<std::shared_ptr<HeifPixelImage>> ImageItem_Grid::decode_full_grid_image(c
+       tile_data data = tiles.front();
+       tiles.pop_front();
+ 
++#if defined(__EMSCRIPTEN_PTHREADS__)
++      std::packaged_task<Error()> task(std::bind(
++                                &ImageItem_Grid::decode_and_paste_tile_image, this,
++                                data.tileID, data.x_origin, data.y_origin, std::ref(img), options,
++                                std::ref(progress_counter), warnings, processed_ids));
++      errs.emplace_back(std::move(task));
++#else
+       errs.push_back(std::async(std::launch::async,
+                                 &ImageItem_Grid::decode_and_paste_tile_image, this,
+                                 data.tileID, data.x_origin, data.y_origin, std::ref(img), options,
+                                 std::ref(progress_counter), warnings, processed_ids));
++#endif
+     }
+ 
+     // check for decoding errors in remaining tiles

@@ -31,7 +31,7 @@ The desktop order reflects observed interoperability: Ultra HDR JPEG, HDR PNG, H
 
 The Inspector reports the encoded source representation, metadata, gain-map components and reconstructed HDR separately. The task queue is sequential so large images do not accumulate in memory; tasks retain independent settings, status and progress, and a bad or non-HDR file does not stop the rest of the queue.
 
-Download the unsigned portable Windows x64 build from [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases). Windows may show a SmartScreen or unknown-publisher warning.
+Download the Windows x64 installer or portable ZIP from [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases). The installer supports in-place upgrades. Both builds are unsigned; Windows may show a SmartScreen or unknown-publisher warning.
 
 ## Build on Windows
 

@@ -1,6 +1,4 @@
 let corePromise;
-const coreUrl = new URL(
-  "../public/codecs/hdrbridge/hdrbridge-core.wasm", import.meta.url).href;
 
 const formatIds = { uhdr: 0, png: 1, jxl: 2, jxr: 3, avif: 4, tiff: 5 };
 const formatInfo = {
@@ -12,11 +10,11 @@ const formatInfo = {
   tiff: { extension: "tiff", mime: "image/tiff" },
 };
 
-async function downloadCore() {
+async function downloadCore(threaded) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
   try {
-    const response = await fetch(coreUrl, {
+    const response = await fetch(new URL(threaded ? "../public/codecs/hdrbridge/threaded/hdrbridge-core.wasm" : "../public/codecs/hdrbridge/hdrbridge-core.wasm", import.meta.url), {
       credentials: "same-origin",
       signal: controller.signal,
     });
@@ -34,17 +32,29 @@ async function downloadCore() {
   }
 }
 
-async function getCore(embeddedWasm) {
+async function getCore(embeddedWasm, embeddedThreadedWasm) {
   if (!corePromise) {
     corePromise = (async () => {
-      const wasmBinary = embeddedWasm || await downloadCore();
-      const { default: createCore } = await import(
-        "../public/codecs/hdrbridge/hdrbridge-core.mjs");
-      return createCore({
+      async function load(threaded) {
+      const wasmBinary = (threaded ? embeddedThreadedWasm : embeddedWasm) || await downloadCore(threaded);
+      const { default: createCore } = threaded
+        ? await import("../public/codecs/hdrbridge/threaded/hdrbridge-core.mjs")
+        : await import("../public/codecs/hdrbridge/hdrbridge-core.mjs");
+      const options = {
         wasmBinary: new Uint8Array(wasmBinary),
         locateFile: (name) => new URL(
-          `../public/codecs/hdrbridge/${name}`, import.meta.url).href,
-      });
+          `../public/codecs/hdrbridge/${threaded ? "threaded/" : ""}${name}`, import.meta.url).href,
+      };
+      try { return await createCore(options); }
+      catch (error) {
+        options.PThread?.terminateAllThreads();
+        throw error;
+      }
+      }
+      if (self.crossOriginIsolated && typeof SharedArrayBuffer !== "undefined") {
+        try { return await load(true); } catch (error) { console.warn("Threaded core unavailable; using scalar core", error); }
+      }
+      return load(false);
     })().catch((error) => {
       corePromise = undefined;
       throw error;
@@ -56,7 +66,8 @@ async function getCore(embeddedWasm) {
 function readCString(core, address) {
   let end = address;
   while (core.HEAPU8[end] !== 0) end += 1;
-  return new TextDecoder().decode(core.HEAPU8.subarray(address, end));
+  // TextDecoder rejects views backed by SharedArrayBuffer in some browsers.
+  return new TextDecoder().decode(core.HEAPU8.slice(address, end));
 }
 
 function extensionOf(name) {
@@ -92,7 +103,7 @@ async function withInput(core, buffer, operation) {
 self.addEventListener("message", async ({ data }) => {
   let stage = "core";
   try {
-    const core = await getCore(data.wasmBinary);
+    const core = await getCore(data.wasmBinary, data.threadedWasmBinary);
     self.postMessage({ type: "core-ready", requestId: data.requestId });
     stage = data.type;
     const extension = extensionOf(data.fileName);

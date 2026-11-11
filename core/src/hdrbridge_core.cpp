@@ -1,4 +1,5 @@
 #include "hdrbridge_core.h"
+#include "hdrbridge_threads.h"
 #include "gainmap_adapters.h"
 #include "hdr_transfer.h"
 #include "jpeg_probe.h"
@@ -121,10 +122,10 @@ using Clock = std::chrono::steady_clock;
 template <typename Function>
 void parallel_pixel_blocks(size_t count, Function&& function) {
   constexpr size_t kMinimumPixelsPerWorker = 262144;
-  const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
+  const unsigned hardware = default_worker_count();
   const size_t useful_workers = std::max<size_t>(
       1, (count + kMinimumPixelsPerWorker - 1) / kMinimumPixelsPerWorker);
-  const size_t workers = std::min<size_t>({hardware, 16u, useful_workers});
+  const size_t workers = std::min<size_t>(hardware, useful_workers);
   if (workers <= 1 || count < kMinimumPixelsPerWorker * 2) {
     function(0, count);
     return;
@@ -133,18 +134,25 @@ void parallel_pixel_blocks(size_t count, Function&& function) {
   threads.reserve(workers);
   std::mutex error_mutex;
   std::exception_ptr error;
-  for (size_t worker = 0; worker < workers; ++worker) {
-    const size_t begin = count * worker / workers;
-    const size_t end = count * (worker + 1) / workers;
-    threads.emplace_back([&, begin, end] {
+  const auto run = [&](size_t worker) {
+      const size_t begin = count * worker / workers;
+      const size_t end = count * (worker + 1) / workers;
       try {
         function(begin, end);
       } catch (...) {
         std::lock_guard lock(error_mutex);
         if (!error) error = std::current_exception();
       }
-    });
+  };
+  try {
+    for (size_t worker = 1; worker < workers; ++worker) {
+      threads.emplace_back(run, worker);
+    }
+  } catch (...) {
+    for (auto& thread : threads) thread.join();
+    throw;
   }
+  run(0);
   for (auto& thread : threads) thread.join();
   if (error) std::rethrow_exception(error);
 }
@@ -152,10 +160,10 @@ void parallel_pixel_blocks(size_t count, Function&& function) {
 template <typename Function>
 size_t parallel_indexed_blocks(size_t count, Function&& function) {
   constexpr size_t kMinimumPixelsPerWorker = 262144;
-  const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
+  const unsigned hardware = default_worker_count();
   const size_t useful_workers = std::max<size_t>(
       1, (count + kMinimumPixelsPerWorker - 1) / kMinimumPixelsPerWorker);
-  const size_t workers = std::min<size_t>({hardware, 16u, useful_workers});
+  const size_t workers = std::min<size_t>(hardware, useful_workers);
   if (workers <= 1 || count < kMinimumPixelsPerWorker * 2) {
     function(0, 0, count);
     return 1;
@@ -164,18 +172,25 @@ size_t parallel_indexed_blocks(size_t count, Function&& function) {
   threads.reserve(workers);
   std::mutex error_mutex;
   std::exception_ptr error;
-  for (size_t worker = 0; worker < workers; ++worker) {
-    const size_t begin = count * worker / workers;
-    const size_t end = count * (worker + 1) / workers;
-    threads.emplace_back([&, worker, begin, end] {
+  const auto run = [&](size_t worker) {
+      const size_t begin = count * worker / workers;
+      const size_t end = count * (worker + 1) / workers;
       try {
         function(worker, begin, end);
       } catch (...) {
         std::lock_guard lock(error_mutex);
         if (!error) error = std::current_exception();
       }
-    });
+  };
+  try {
+    for (size_t worker = 1; worker < workers; ++worker) {
+      threads.emplace_back(run, worker);
+    }
+  } catch (...) {
+    for (auto& thread : threads) thread.join();
+    throw;
   }
+  run(0);
   for (auto& thread : threads) thread.join();
   if (error) std::rethrow_exception(error);
   return workers;
@@ -524,7 +539,7 @@ OpenedHeif open_heif(const std::filesystem::path& path) {
   auto bytes = read_file(path);
   ContextPtr context(heif_context_alloc());
   if (!context) throw std::bad_alloc();
-  heif_context_set_max_decoding_threads(context.get(), 0);
+  heif_context_set_max_decoding_threads(context.get(), codec_background_workers());
   require_heif(heif_context_read_from_memory_without_copy(
                    context.get(), bytes.data(), bytes.size(), nullptr),
                "read HEIF");
@@ -701,6 +716,8 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
   // prevents metadata-driven double rotation on output.
   options->ignore_transformations = 1;
   options->output_image_nclx_profile_passthrough = 1;
+  // Tile workers share the budget; avoid starting another full pool per tile.
+  options->num_codec_threads = result.info.is_grid ? 1 : default_worker_count();
   options->progress_user_data = cancel;
   options->cancel_decoding = [](void* user) -> int {
     return user && static_cast<std::atomic_bool*>(user)->load() ? 1 : 0;
@@ -733,6 +750,11 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
     }
   }
   result.timings.decode_ms = elapsed_ms(decode_start);
+  // RGB and metadata are now owned by result. Release codec contexts before
+  // starting the next parallel stage so their workers cannot retain the pool.
+  image.reset();
+  opened.handle.reset();
+  opened.context.reset();
   const auto orientation_start = Clock::now();
   uint8_t canonical_transform = result.info.original_orientation;
   if (canonical_transform == 1) {
@@ -751,11 +773,18 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
   result.timings.orientation_ms = elapsed_ms(orientation_start);
   const auto color_start = Clock::now();
   if (direct_hlg) {
-    long double squared_error = 0.0;
-    double max_error = 0.0;
-    long double pq_squared_error = 0.0;
-    double pq_max_error = 0.0;
-    for (size_t p = 0; p < pixel_count; ++p) {
+    struct TransferErrors {
+      long double squared = 0.0;
+      double maximum = 0.0;
+      long double pq_squared = 0.0;
+      double pq_maximum = 0.0;
+    };
+    std::vector<TransferErrors> errors(default_worker_count());
+    const size_t workers = parallel_indexed_blocks(pixel_count,
+        [&](size_t worker, size_t begin, size_t end) {
+      auto& local = errors[worker];
+      for (size_t p = begin; p < end; ++p) {
+      if ((p & 16383u) == 0) check_cancel(cancel);
       const std::array<double, 3> source_signal{
           result.rgb[p * 3u] / 65535.0,
           result.rgb[p * 3u + 1u] / 65535.0,
@@ -775,8 +804,8 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
         result.rgb[p * 3u + c] = static_cast<uint16_t>(std::llround(
             ideal_pq * 65535.0));
         const double pq_error = result.rgb[p * 3u + c] / 65535.0 - ideal_pq;
-        pq_squared_error += static_cast<long double>(pq_error) * pq_error;
-        pq_max_error = std::max(pq_max_error, std::abs(pq_error));
+        local.pq_squared += static_cast<long double>(pq_error) * pq_error;
+        local.pq_maximum = std::max(local.pq_maximum, std::abs(pq_error));
       }
       const auto reconstructed_signal = transfer::linear_nits_to_hlg({
           transfer::pq_to_nits(result.rgb[p * 3u] / 65535.0),
@@ -784,16 +813,24 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
           transfer::pq_to_nits(result.rgb[p * 3u + 2u] / 65535.0)});
       for (size_t c = 0; c < 3; ++c) {
         const double error = reconstructed_signal[c] - source_signal[c];
-        squared_error += static_cast<long double>(error) * error;
-        max_error = std::max(max_error, std::abs(error));
+        local.squared += static_cast<long double>(error) * error;
+        local.maximum = std::max(local.maximum, std::abs(error));
       }
+      }
+    });
+    TransferErrors combined;
+    for (size_t worker = 0; worker < workers; ++worker) {
+      combined.squared += errors[worker].squared;
+      combined.maximum = std::max(combined.maximum, errors[worker].maximum);
+      combined.pq_squared += errors[worker].pq_squared;
+      combined.pq_maximum = std::max(combined.pq_maximum, errors[worker].pq_maximum);
     }
     result.transfer_conversion_rmse = std::sqrt(static_cast<double>(
-        squared_error / static_cast<long double>(pixel_count * 3u)));
-    result.transfer_conversion_max_abs_error = max_error;
+        combined.squared / static_cast<long double>(pixel_count * 3u)));
+    result.transfer_conversion_max_abs_error = combined.maximum;
     result.source_to_canonical_rmse = std::sqrt(static_cast<double>(
-        pq_squared_error / static_cast<long double>(pixel_count * 3u)));
-    result.source_to_canonical_max_abs_error = pq_max_error;
+        combined.pq_squared / static_cast<long double>(pixel_count * 3u)));
+    result.source_to_canonical_max_abs_error = combined.pq_maximum;
   } else if (result.info.primaries == 12) {
     convert_p3_pq_to_rec2020_pq(result.rgb);
   } else if (result.info.primaries == 1) {
@@ -819,8 +856,7 @@ std::vector<uint8_t> encode_jxl(const DecodedImage& decoded, const ConversionOpt
   if (JxlEncoderSetParallelRunner(encoder.get(), JxlResizableParallelRunner, runner.get()) != JXL_ENC_SUCCESS) {
     throw std::runtime_error("cannot attach JPEG XL parallel runner");
   }
-  JxlResizableParallelRunnerSetThreads(runner.get(),
-      JxlResizableParallelRunnerSuggestThreads(decoded.info.width, decoded.info.height));
+  JxlResizableParallelRunnerSetThreads(runner.get(), codec_background_workers());
   if (JxlEncoderUseContainer(encoder.get(), JXL_TRUE) != JXL_ENC_SUCCESS) throw std::runtime_error("cannot enable JXL container");
   if (JxlEncoderUseBoxes(encoder.get()) != JXL_ENC_SUCCESS) throw std::runtime_error("cannot enable JXL metadata boxes");
 
@@ -914,8 +950,7 @@ std::vector<uint8_t> encode_jxl_gainmap_raster(uint32_t width, uint32_t height,
   if (!encoder || !runner) throw std::runtime_error("cannot create gain-map JPEG XL encoder");
   if (JxlEncoderSetParallelRunner(encoder.get(), JxlResizableParallelRunner, runner.get()) != JXL_ENC_SUCCESS)
     throw std::runtime_error("cannot attach gain-map JPEG XL runner");
-  JxlResizableParallelRunnerSetThreads(runner.get(),
-      JxlResizableParallelRunnerSuggestThreads(width, height));
+  JxlResizableParallelRunnerSetThreads(runner.get(), codec_background_workers());
   if (use_container && JxlEncoderUseContainer(encoder.get(), JXL_TRUE) != JXL_ENC_SUCCESS)
     throw std::runtime_error("cannot enable gain-map JPEG XL container");
   JxlBasicInfo basic{};
@@ -970,7 +1005,7 @@ std::vector<uint8_t> encode_gainmap_jxl(const DecodedImage& decoded,
   const size_t pixel_count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
   std::vector<uint16_t> base(pixel_count * 3u);
   std::vector<double> channel_gain(pixel_count * 3u);
-  std::array<double, 16> local_maximum{};
+  std::vector<double> local_maximum(default_worker_count());
   const size_t gain_workers = parallel_indexed_blocks(
       hdr.size(), [&](size_t worker, size_t begin, size_t end) {
         double maximum = 1.0;
@@ -1064,7 +1099,7 @@ Verification decode_jxl(const std::vector<uint8_t>& data, const std::vector<uint
   auto runner = JxlResizableParallelRunnerMake(nullptr);
   if (!decoder || !runner) throw std::runtime_error("cannot create JXL decoder");
   if (JxlDecoderSetParallelRunner(decoder.get(), JxlResizableParallelRunner, runner.get()) != JXL_DEC_SUCCESS) throw std::runtime_error("cannot attach JXL decoder runner");
-  JxlResizableParallelRunnerSetThreads(runner.get(), 0);
+  JxlResizableParallelRunnerSetThreads(runner.get(), codec_background_workers());
   const int events = JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FULL_IMAGE;
   if (JxlDecoderSubscribeEvents(decoder.get(), events) != JXL_DEC_SUCCESS) throw std::runtime_error("cannot subscribe JXL events");
   if (JxlDecoderSetInput(decoder.get(), data.data(), data.size()) != JXL_DEC_SUCCESS) throw std::runtime_error("cannot set JXL input");
@@ -1148,7 +1183,7 @@ DecodedImage decode_jxl_input(const std::filesystem::path& path) {
   if (JxlDecoderSetParallelRunner(decoder.get(), JxlResizableParallelRunner, runner.get()) != JXL_DEC_SUCCESS) {
     throw std::runtime_error("cannot attach JPEG XL input runner");
   }
-  JxlResizableParallelRunnerSetThreads(runner.get(), 0);
+  JxlResizableParallelRunnerSetThreads(runner.get(), codec_background_workers());
   if (JxlDecoderSetDecompressBoxes(decoder.get(), JXL_TRUE) != JXL_DEC_SUCCESS ||
       JxlDecoderSubscribeEvents(decoder.get(), JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING |
                                                JXL_DEC_FULL_IMAGE | JXL_DEC_BOX) != JXL_DEC_SUCCESS ||
@@ -1378,7 +1413,7 @@ HdrStats measure_hdr(const DecodedImage& decoded, float requested_target_nits = 
     std::array<uint64_t, 10001> luminance{};
     std::array<uint64_t, 10001> channel{};
   };
-  std::vector<PartialStats> partials(16);
+  std::vector<PartialStats> partials(default_worker_count());
   const size_t workers = parallel_indexed_blocks(
       count, [&](size_t worker, size_t begin, size_t end) {
         auto& partial = partials[worker];
@@ -1433,7 +1468,7 @@ HdrStats measure_hdr(const DecodedImage& decoded, float requested_target_nits = 
     }
     stats.chosen_target_nits = std::clamp(stats.chosen_target_nits, 203.0, 10000.0);
   }
-  std::array<uint64_t, 16> clipped_parts{};
+  std::vector<uint64_t> clipped_parts(default_worker_count());
   const size_t clipped_workers = parallel_indexed_blocks(
       count, [&](size_t worker, size_t begin, size_t end) {
         uint64_t clipped = 0;
@@ -2493,7 +2528,7 @@ void encode_tiff(const std::filesystem::path& path, const DecodedImage& decoded,
   const std::string description = p3 ? "HDR Bridge direct RGB16 Display P3 PQ" :
                                        "HDR Bridge direct RGB16 Rec.2020 PQ";
   TIFFSetField(tiff.get(), TIFFTAG_IMAGEDESCRIPTION, description.c_str());
-  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.3.1");
+  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.3.2");
   TIFFSetField(tiff.get(), TIFFTAG_ICCPROFILE, static_cast<uint32_t>(icc.size()), icc.data());
   std::vector<uint8_t> diagnostic_photoshop;
   std::vector<uint8_t> diagnostic_iptc;
@@ -2785,6 +2820,28 @@ void encode_avif(const std::filesystem::path& path, const DecodedImage& decoded,
   const int quality = std::clamp(static_cast<int>(std::lround(options.image_quality * 100.0f)), 1, 100);
   require_heif(heif_encoder_set_lossy_quality(encoder.get(), quality), "set direct PQ AVIF quality");
   require_heif(heif_encoder_set_parameter_string(encoder.get(), "chroma", "444"), "force direct PQ AVIF 4:4:4");
+  for (auto parameter = heif_encoder_list_parameters(encoder.get()); *parameter; ++parameter) {
+    if (std::strcmp(heif_encoder_parameter_get_name(*parameter), "threads") != 0) continue;
+    int has_min = 0, has_max = 0, minimum = 1, maximum = std::numeric_limits<int>::max();
+    int value_count = 0;
+    const int* values = nullptr;
+    require_heif(heif_encoder_parameter_get_valid_integer_values(*parameter,
+        &has_min, &has_max, &minimum, &maximum, &value_count, &values),
+        "query AVIF encoder thread range");
+    int threads = static_cast<int>(default_worker_count());
+    if (has_min) threads = std::max(threads, minimum);
+    if (has_max) threads = std::min(threads, maximum);
+    if (value_count > 0) {
+      int nearest = values[0];
+      for (int index = 1; index < value_count; ++index) {
+        if (std::abs(values[index] - threads) < std::abs(nearest - threads)) nearest = values[index];
+      }
+      threads = nearest;
+    }
+    require_heif(heif_encoder_set_parameter_integer(encoder.get(), "threads", threads),
+                 "set direct HDR AVIF worker budget");
+    break;
+  }
   HeifEncodingOptionsPtr encoding_options(heif_encoding_options_alloc());
   if (!encoding_options) throw std::bad_alloc();
   encoding_options->output_nclx_profile = profile.get();
@@ -2934,7 +2991,7 @@ void encode_gainmap_avif(const std::filesystem::path& path,
   }
   AvifEncoderPtr encoder(avifEncoderCreate());
   if (!encoder) throw std::bad_alloc();
-  encoder->maxThreads = static_cast<int>(std::clamp(std::thread::hardware_concurrency(), 1u, 32u));
+  encoder->maxThreads = static_cast<int>(default_worker_count());
   encoder->quality = std::clamp(static_cast<int>(std::lround(options.image_quality * 100.0f)), 1, 100);
   encoder->qualityGainMap = std::clamp(options.gainmap_quality, 1, 100);
   encoder->autoTiling = AVIF_TRUE;
@@ -4286,14 +4343,55 @@ DecodedImage decode_input_uncached(const std::filesystem::path& path,
   return decoded;
 }
 
+struct SourceRevision {
+  uint64_t volume = 0;
+  std::array<uint8_t, 16> file_id{};
+  int64_t change_time = 0;
+  bool valid = false;
+  bool operator==(const SourceRevision&) const = default;
+};
+
+SourceRevision source_revision(const std::filesystem::path& path) {
+  SourceRevision result;
+#ifdef _WIN32
+  const HANDLE file = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return result;
+  FILE_BASIC_INFO basic{};
+  FILE_ID_INFO id{};
+  if (GetFileInformationByHandleEx(file, FileBasicInfo, &basic, sizeof(basic)) &&
+      GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id)) &&
+      basic.ChangeTime.QuadPart != 0) {
+    result.volume = id.VolumeSerialNumber;
+    std::copy(std::begin(id.FileId.Identifier), std::end(id.FileId.Identifier), result.file_id.begin());
+    result.change_time = basic.ChangeTime.QuadPart;
+    result.valid = true;
+  }
+  CloseHandle(file);
+#elif defined(__EMSCRIPTEN__)
+  // The Web API compares staged bytes and explicitly invalidates replacements.
+  (void)path;
+  result.valid = true;
+#else
+  // Reuse requires a reliable revision token on other native platforms too.
+  (void)path;
+#endif
+  return result;
+}
+
 struct CanonicalCacheEntry {
   std::filesystem::path path;
   uintmax_t file_size = 0;
   std::filesystem::file_time_type write_time{};
+  SourceRevision revision;
   std::shared_ptr<const DecodedImage> image;
 };
 
 std::mutex canonical_cache_mutex;
+// Preview, Inspector and conversion can request the same file concurrently.
+// Serialize cache misses so only one full-resolution source is decoded.
+std::mutex canonical_decode_mutex;
 CanonicalCacheEntry canonical_cache;
 
 std::shared_ptr<const DecodedImage> decode_input(
@@ -4301,26 +4399,38 @@ std::shared_ptr<const DecodedImage> decode_input(
     const ProgressCallback& progress,
     std::atomic_bool* cancel,
     TimingDiagnostics& timings) {
+  check_cancel(cancel);
+  std::lock_guard decode_lock(canonical_decode_mutex);
+  check_cancel(cancel);
   const auto absolute = std::filesystem::weakly_canonical(path);
   const uintmax_t size = std::filesystem::file_size(absolute);
   const auto write_time = std::filesystem::last_write_time(absolute);
+  const auto revision = source_revision(absolute);
   {
     std::lock_guard lock(canonical_cache_mutex);
     if (canonical_cache.image && canonical_cache.path == absolute &&
-        canonical_cache.file_size == size && canonical_cache.write_time == write_time) {
+        canonical_cache.file_size == size && canonical_cache.write_time == write_time &&
+        revision.valid && canonical_cache.revision == revision) {
       timings = {};
       timings.canonical_cache_hit = true;
       report(progress, 42, "Reusing cached canonical high-precision HDR master");
       return canonical_cache.image;
     }
+    canonical_cache = {};
   }
   auto decoded = std::make_shared<DecodedImage>(
       decode_input_uncached(absolute, progress, cancel));
   timings = decoded->timings;
   timings.canonical_cache_hit = false;
-  {
+  if (std::filesystem::file_size(absolute) != size ||
+      std::filesystem::last_write_time(absolute) != write_time ||
+      (revision.valid && source_revision(absolute) != revision)) {
+    throw std::runtime_error("Source changed while decoding; reopen the image");
+  }
+  if (revision.valid && (decoded->info.asset_kind == "direct-hdr" ||
+      decoded->info.asset_kind == "gain-map-hdr")) {
     std::lock_guard lock(canonical_cache_mutex);
-    canonical_cache = {absolute, size, write_time, decoded};
+    canonical_cache = {absolute, size, write_time, revision, decoded};
   }
   return decoded;
 }
@@ -4349,9 +4459,11 @@ SourceInfo inspect_any(const std::filesystem::path& path) {
   if (extension == ".jxl" && gainmap::is_iso_gainmap_jxl(path)) {
     return gainmap::inspect_iso_gainmap_jxl(path);
   }
-  if (extension == ".jxl") return decode_jxl_input(path).info;
-  if (extension == ".jxr" || extension == ".wdp" || extension == ".hdp") return decode_jxr_input(path).info;
-  if (extension == ".png") return decode_png_input(path).info;
+  if (extension == ".jxl" || extension == ".jxr" || extension == ".wdp" ||
+      extension == ".hdp" || extension == ".png") {
+    TimingDiagnostics timings;
+    return decode_input(path, {}, nullptr, timings)->info;
+  }
   if (extension == ".jpg" || extension == ".jpeg" || extension == ".jpe") {
     const auto apple = gainmap::probe_apple_jpeg(path);
     if (apple.detected) {
@@ -4617,6 +4729,12 @@ ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
 }
 
 }  // namespace
+
+void clear_input_cache() {
+  std::lock_guard decode_lock(canonical_decode_mutex);
+  std::lock_guard lock(canonical_cache_mutex);
+  canonical_cache = {};
+}
 
 SourceInfo inspect(const std::filesystem::path& path) {
   auto info = inspect_any(path);

@@ -24,6 +24,10 @@ ctest --test-dir build-vs -C Release --output-on-failure
 
 The GUI is `build-vs\bin\Release\hdrbridge.exe`. Developer-only CLI and test targets are built alongside it when `BUILD_TESTING` is enabled.
 
+CTest includes a synthetic single-source cache regression covering inspection,
+repeated output, source replacement and decode failures. The default worker
+budget follows the detected logical thread count, with a fallback of four.
+
 ## Portable package
 
 ```powershell

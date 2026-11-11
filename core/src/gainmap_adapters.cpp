@@ -1,4 +1,5 @@
 #include "gainmap_adapters.h"
+#include "hdrbridge_threads.h"
 
 #include "jpeg_probe.h"
 #include "orientation.h"
@@ -46,11 +47,7 @@ constexpr char kAppleHdrGainMapUrn[] =
     "urn:com:apple:photo:2020:aux:hdrgainmap";
 
 uint32_t codec_worker_count() {
-#if defined(__EMSCRIPTEN__)
-  return 1u;
-#else
-  return std::clamp(std::thread::hardware_concurrency(), 1u, 32u);
-#endif
+  return default_worker_count();
 }
 
 struct AvifDecoderDeleter {
@@ -1463,11 +1460,7 @@ GainMapAsset extract_apple_heif_gainmap_asset(
   const auto bytes = read_file(path);
   HeifContextPtr context(heif_context_alloc());
   if (!context) throw std::bad_alloc();
-#if defined(__EMSCRIPTEN__)
-  heif_context_set_max_decoding_threads(context.get(), 0);
-#else
-  heif_context_set_max_decoding_threads(context.get(), worker_count);
-#endif
+  heif_context_set_max_decoding_threads(context.get(), codec_background_workers());
   require_heif(heif_context_read_from_memory_without_copy(
                    context.get(), bytes.data(), bytes.size(), nullptr),
                "read Apple HDR HEIC");
@@ -1590,7 +1583,15 @@ GainMapAsset extract_apple_heif_gainmap_asset(
   options->convert_hdr_to_8bit = 0;
   options->ignore_transformations = 1;
   options->output_image_nclx_profile_passthrough = 1;
-  options->num_codec_threads = worker_count;
+  const auto codec_threads = [&](const heif_image_handle* handle) {
+    heif_image_tiling tiling{};
+    tiling.version = 1;
+    const bool tiled = heif_image_handle_get_image_tiling(handle, 0, &tiling).code == heif_error_Ok &&
+        (tiling.num_columns > 1 || tiling.num_rows > 1);
+    // A tiled image already uses the context's worker pool.
+    return tiled ? 1 : worker_count;
+  };
+  options->num_codec_threads = codec_threads(primary.get());
   options->progress_user_data = cancel;
   options->cancel_decoding = [](void* user) -> int {
     return user && static_cast<std::atomic_bool*>(user)->load() ? 1 : 0;
@@ -1629,6 +1630,7 @@ GainMapAsset extract_apple_heif_gainmap_asset(
   asset.base_decode_ms = elapsed_ms(base_decode_start);
 
   const auto map_decode_start = Clock::now();
+  options->num_codec_threads = codec_threads(auxiliary.get());
   heif_image* raw_map = nullptr;
   require_heif(heif_decode_image(auxiliary.get(), &raw_map, heif_colorspace_monochrome,
                                  heif_chroma_monochrome, options.get()),
@@ -2140,7 +2142,7 @@ JxlRaster decode_jxl_raster(const uint8_t* bytes, size_t size) {
       JxlDecoderSetParallelRunner(decoder.get(), JxlResizableParallelRunner, runner.get()) != JXL_DEC_SUCCESS) {
     throw std::runtime_error("cannot initialize gain-map JPEG XL decoder");
   }
-  JxlResizableParallelRunnerSetThreads(runner.get(), 0);
+  JxlResizableParallelRunnerSetThreads(runner.get(), codec_background_workers());
   if (JxlDecoderSubscribeEvents(decoder.get(), JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING |
                                                JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS ||
       JxlDecoderSetInput(decoder.get(), bytes, size) != JXL_DEC_SUCCESS) {

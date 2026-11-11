@@ -31,12 +31,18 @@ pwsh web/scripts/build-wasm.ps1
 pwsh web/scripts/assemble-site.ps1
 ```
 
-The module is single-threaded so GitHub Pages does not need cross-origin
-isolation headers. Large images are processed in a worker, but browser and device
-WebAssembly memory limits still apply.
+The build produces separate scalar and pthread modules, including the threaded
+module's worker files. A same-origin service worker attempts cross-origin
+isolation on GitHub Pages and other static hosts, with at most one automatic
+reload before user interaction. The worker loads the threaded module when
+isolation and SharedArrayBuffer are available, otherwise it uses the scalar
+module. Threaded initialization failures also fall back to scalar. The thread
+budget uses the detected logical thread count, or four if unavailable. Browser
+and device WebAssembly memory limits still apply.
 
 The assembled site also contains `/bundled/`, a compatibility entry whose HTML
-embeds the exact same WebAssembly binary. The standard page offers this entry
+embeds both WebAssembly binaries. The standard page offers this entry
 when the separate core download fails or times out. `assemble-site` generates
-the Base64 payload automatically and verifies that it decodes byte-for-byte to
-the compiled module; the payload is never maintained by hand.
+the Base64 payloads automatically from the compiled modules; the payloads are
+never maintained by hand. The staged source and its canonical raster are reused
+for repeated conversions of the same file; changed input bytes invalidate them.

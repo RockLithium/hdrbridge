@@ -207,8 +207,8 @@ function codecWorker() {
   return state.worker;
 }
 
-function embeddedCoreBuffer() {
-  const element = document.querySelector("#hdrbridge-embedded-core");
+function embeddedCoreBuffer(id = "hdrbridge-embedded-core") {
+  const element = document.getElementById(id);
   if (!element) return null;
   const encoded = element.textContent.replace(/\s/g, "");
   const binary = atob(encoded);
@@ -226,6 +226,11 @@ function postCodecMessage(message, transfers) {
     if (wasmBinary) {
       message.wasmBinary = wasmBinary;
       transfers.push(wasmBinary);
+    }
+    const threadedWasmBinary = embeddedCoreBuffer("hdrbridge-embedded-threaded-core");
+    if (threadedWasmBinary) {
+      message.threadedWasmBinary = threadedWasmBinary;
+      transfers.push(threadedWasmBinary);
     }
     state.workerNeedsEmbeddedCore = false;
   }

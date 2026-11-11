@@ -25,18 +25,24 @@ New-Item -ItemType Directory -Force -Path $cacheRoot, $outputRoot, $licenseRoot 
 $env:EMSDK = $EmsdkRoot
 $env:EMSCRIPTEN_ROOT = Join-Path $EmsdkRoot "upstream\emscripten"
 
+foreach ($variant in @('scalar', 'threaded')) {
+$triplet = if ($variant -eq 'threaded') { 'wasm32-emscripten-pthreads' } else { 'wasm32-emscripten' }
+$threaded = if ($variant -eq 'threaded') { 'ON' } else { 'OFF' }
+$prefix = Join-Path $installRoot $triplet
+$buildRoot = Join-Path $cacheRoot "build\hdrbridge-$variant"
 & $vcpkg install `
-  "libheif[core,aom]:wasm32-emscripten" "libavif[core,aom]:wasm32-emscripten" `
-  "libpng:wasm32-emscripten" "tiff[core,jpeg,zip]:wasm32-emscripten" `
-  "lcms:wasm32-emscripten" "liblzma:wasm32-emscripten" "libjxl:wasm32-emscripten" `
-  "jxrlib:wasm32-emscripten" "nlohmann-json:wasm32-emscripten" `
+  "libheif[core,aom]:$triplet" "libavif[core,aom]:$triplet" `
+  "libpng:$triplet" "tiff[core,jpeg,zip]:$triplet" `
+  "lcms:$triplet" "liblzma:$triplet" "libjxl:$triplet" `
+  "jxrlib:$triplet" "nlohmann-json:$triplet" `
   --classic "--x-install-root=$installRoot" `
-  "--overlay-ports=$(Join-Path $webRoot 'vcpkg-overlay')"
+  "--overlay-ports=$(Join-Path $webRoot 'vcpkg-overlay')" "--overlay-triplets=$(Join-Path $webRoot 'vcpkg-triplets')"
 if ($LASTEXITCODE -ne 0) { throw "WASM codec dependency build failed" }
 
 & $emcmake cmake -S (Join-Path $webRoot "wasm") -B $buildRoot -G Ninja `
   "-DCMAKE_MAKE_PROGRAM=$NinjaPath" `
   "-DCMAKE_BUILD_TYPE=Release" `
+  "-DHDRBRIDGE_PTHREADS=$threaded" `
   "-DCMAKE_PREFIX_PATH=$prefix" `
   "-DCMAKE_FIND_ROOT_PATH=$prefix" `
   "-Dlibheif_DIR=$(Join-Path $prefix 'share\libheif')" `
@@ -48,7 +54,9 @@ if ($LASTEXITCODE -ne 0) { throw "HDR Bridge WASM configure failed" }
 cmake --build $buildRoot --parallel
 if ($LASTEXITCODE -ne 0) { throw "HDR Bridge WASM build failed" }
 
-Copy-Item -Force (Join-Path $buildRoot "dist\hdrbridge-core.mjs") $outputRoot
-Copy-Item -Force (Join-Path $buildRoot "dist\hdrbridge-core.wasm") $outputRoot
+$dest = if ($variant -eq 'threaded') { Join-Path $outputRoot 'threaded' } else { $outputRoot }
+New-Item -ItemType Directory -Force -Path $dest | Out-Null
+Copy-Item -Force (Join-Path $buildRoot 'dist\*') $dest
+}
 Copy-Item -Force (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md") $licenseRoot
 Get-ChildItem $outputRoot | Select-Object Name, Length

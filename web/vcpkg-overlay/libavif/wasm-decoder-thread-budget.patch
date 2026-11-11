@@ -1,0 +1,40 @@
+--- a/src/read.c
++++ b/src/read.c
+@@ -973,6 +973,9 @@
+     //   decoder instance (same as above).
+     avifCodec * codec;
+     avifCodec * codecAlpha;
++#if defined(__EMSCRIPTEN_PTHREADS__)
++    int maxThreadsPerCodec;
++#endif
+     uint8_t majorBrand[4];                     // From the file's ftyp, used by AVIF_DECODER_SOURCE_AUTO
+     avifBrandArray compatibleBrands;           // From the file's ftyp
+     avifDiagnostics * diag;                    // Shallow copy; owned by avifDecoder
+@@ -5464,6 +5467,15 @@
+             }
+         }
+     }
++#if defined(__EMSCRIPTEN_PTHREADS__)
++    // Each codec can retain its own worker threads, so share the requested budget
++    // across all instances rather than allocating it independently to each tile.
++    const unsigned int codecCount = data->codec ? (data->codecAlpha ? 2 : 1) : data->tiles.count;
++    data->maxThreadsPerCodec = (codecCount && decoder->maxThreads > 0) ? decoder->maxThreads / (int)codecCount : 1;
++    if (data->maxThreadsPerCodec < 1) {
++        data->maxThreadsPerCodec = 1;
++    }
++#endif
+     return AVIF_RESULT_OK;
+ }
+ 
+@@ -6740,7 +6752,11 @@
+         }
+ 
+         avifBool isLimitedRangeAlpha = AVIF_FALSE;
++#if defined(__EMSCRIPTEN_PTHREADS__)
++        tile->codec->maxThreads = decoder->data->maxThreadsPerCodec;
++#else
+         tile->codec->maxThreads = decoder->maxThreads;
++#endif
+         tile->codec->imageSizeLimit = decoder->imageSizeLimit;
+         tile->codec->imageDimensionLimit = decoder->imageDimensionLimit;
+         if (!tile->codec->getNextImage(tile->codec, sample, avifIsAlpha(tile->input->itemCategory), &isLimitedRangeAlpha, tile->image)) {

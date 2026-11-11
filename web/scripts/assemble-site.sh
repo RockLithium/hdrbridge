@@ -16,6 +16,7 @@ test -f "${web_root}/public/codecs/hdrbridge/hdrbridge-core.wasm" || {
 rm -rf "${dist_root}"
 mkdir -p "${dist_root}"
 cp "${web_root}/index.html" "${dist_root}/"
+cp "${web_root}/isolation-sw.js" "${dist_root}/"
 cp -R "${web_root}/src" "${dist_root}/src"
 cp -R "${web_root}/public" "${dist_root}/public"
 cp "${web_root}/README.md" "${dist_root}/WEB_README.md"
@@ -23,5 +24,6 @@ cp "${web_root}/../THIRD_PARTY_NOTICES.md" "${dist_root}/"
 node "${web_root}/scripts/generate-bundled.mjs" \
   "${web_root}/index.html" \
   "${web_root}/public/codecs/hdrbridge/hdrbridge-core.wasm" \
-  "${dist_root}/bundled/index.html"
+  "${dist_root}/bundled/index.html" \
+  "${web_root}/public/codecs/hdrbridge/threaded/hdrbridge-core.wasm"
 touch "${dist_root}/.nojekyll"

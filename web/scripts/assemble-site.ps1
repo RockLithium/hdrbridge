@@ -17,12 +17,13 @@ if (Test-Path -LiteralPath $distRoot) {
 }
 New-Item -ItemType Directory -Path $distRoot | Out-Null
 Copy-Item -LiteralPath (Join-Path $webRoot "index.html") -Destination $distRoot
+Copy-Item -LiteralPath (Join-Path $webRoot "isolation-sw.js") -Destination $distRoot
 Copy-Item -LiteralPath (Join-Path $webRoot "src") -Destination $distRoot -Recurse
 Copy-Item -LiteralPath (Join-Path $webRoot "public") -Destination $distRoot -Recurse
 Copy-Item -LiteralPath (Join-Path $webRoot "README.md") -Destination (Join-Path $distRoot "WEB_README.md")
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $webRoot) "THIRD_PARTY_NOTICES.md") -Destination $distRoot
 & node (Join-Path $PSScriptRoot "generate-bundled.mjs") `
   (Join-Path $webRoot "index.html") $wasm `
-  (Join-Path $distRoot "bundled\index.html")
+  (Join-Path $distRoot "bundled\index.html") (Join-Path $webRoot "public\codecs\hdrbridge\threaded\hdrbridge-core.wasm")
 if ($LASTEXITCODE -ne 0) { throw "Bundled Web generation failed" }
 New-Item -ItemType File -Force -Path (Join-Path $distRoot ".nojekyll") | Out-Null

@@ -17,6 +17,8 @@ namespace {
 std::vector<uint8_t> output_bytes;
 std::string info_json = "{}";
 std::string last_error;
+std::filesystem::path staged_input;
+size_t staged_input_size = 0;
 
 std::string clean_extension(const char* value) {
   std::string extension = value ? value : "";
@@ -61,17 +63,47 @@ struct StagedFiles {
   std::filesystem::path output;
   ~StagedFiles() {
     std::error_code ignored;
-    std::filesystem::remove(input, ignored);
     if (!output.empty()) std::filesystem::remove(output, ignored);
   }
 };
+
+bool same_staged_bytes(const std::filesystem::path& path,
+                       const uint8_t* bytes, size_t byte_count) {
+  std::ifstream stream(path, std::ios::binary);
+  if (!stream) return false;
+  std::vector<char> chunk(65536);
+  size_t offset = 0;
+  while (offset < byte_count) {
+    const size_t count = std::min(chunk.size(), byte_count - offset);
+    if (!stream.read(chunk.data(), static_cast<std::streamsize>(count)) ||
+        !std::equal(chunk.begin(), chunk.begin() + count, bytes + offset,
+                    [](char a, uint8_t b) { return static_cast<uint8_t>(a) == b; })) {
+      return false;
+    }
+    offset += count;
+  }
+  return stream.peek() == std::char_traits<char>::eof();
+}
 
 StagedFiles stage_input(const uint8_t* bytes, size_t byte_count,
                         const char* extension) {
   StagedFiles files;
   files.input = std::filesystem::path("/tmp") /
       ("hdrbridge-input." + clean_extension(extension));
-  write_input(files.input, bytes, byte_count);
+  if (!bytes || byte_count == 0) throw std::runtime_error("input is empty");
+  if (staged_input != files.input || staged_input_size != byte_count ||
+      !same_staged_bytes(files.input, bytes, byte_count)) {
+    // Timestamp resolution in MEMFS is not enough to distinguish same-sized
+    // replacements. Compare bytes and explicitly invalidate before rewriting.
+    hdrbridge::clear_input_cache();
+    std::error_code ignored;
+    if (!staged_input.empty()) std::filesystem::remove(staged_input, ignored);
+    staged_input.clear();
+    staged_input_size = 0;
+    write_input(files.input, bytes, byte_count);
+    staged_input = files.input;
+    staged_input_size = byte_count;
+  }
   return files;
 }
 

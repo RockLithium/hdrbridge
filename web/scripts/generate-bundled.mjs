@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-const [indexPath, wasmPath, outputPath] = process.argv.slice(2)
+const [indexPath, wasmPath, outputPath, threadedPath] = process.argv.slice(2)
   .map((value) => resolve(value));
 if (!indexPath || !wasmPath || !outputPath) {
   throw new Error("usage: node generate-bundled.mjs <index> <wasm> <output>");
@@ -13,6 +13,7 @@ const [source, wasm] = await Promise.all([
   readFile(wasmPath),
 ]);
 const encoded = wasm.toString("base64");
+const threaded = threadedPath ? (await readFile(threadedPath)).toString("base64") : "";
 if (!Buffer.from(encoded, "base64").equals(wasm)) {
   throw new Error("embedded WASM verification failed");
 }
@@ -28,6 +29,7 @@ const bundled = source
   .replaceAll('href="./public/', 'href="../public/')
   .replace(marker,
     `<script id="hdrbridge-embedded-core" type="application/octet-stream">${encoded}</script>\n` +
+    `<script id="hdrbridge-embedded-threaded-core" type="application/octet-stream">${threaded}</script>\n` +
     '  <script type="module" src="../src/app.js?v=9"></script>');
 
 await mkdir(dirname(outputPath), { recursive: true });
