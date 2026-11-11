@@ -4,13 +4,11 @@ The desktop UI orders formats by intended use. Compression controls do not chang
 
 ## Ultra HDR JPEG
 
-An SDR JPEG base plus ISO gain map for sharing, Web and mobile use. Faithful/Auto measures the reconstructed source peak. Gain-map resolution is 1/4, 1/2 (default) or full; channels are mono (default) or true per-channel RGB. Base and gain-map JPEG quality remain independently controlled.
-Ultra HDR is backward compatible with ordinary JPEG readers, which show only the SDR base. It is not a lossless HDR master format.
+An SDR JPEG base plus ISO gain map for sharing, Web and mobile use. Faithful/Auto measures the reconstructed source peak. Gain-map resolution is 1/4, 1/2 (default) or full; channels are mono (default) or true per-channel RGB. Base and gain-map JPEG quality remain independently controlled. Ultra HDR is backward compatible with ordinary JPEG readers, which show only the SDR base. It is not a lossless HDR master format.
 
 ## HDR PNG
 
-RGB16 with Rec.2020/PQ by default, optional Display P3/PQ, Rec.2020/HLG or Display P3/HLG.
-PQ PNG writes cICP `9/16/0/1` and the production `Rec.2100 PQ` ICC; Display P3/PQ uses the corresponding primaries. HLG writes cICP `9/18/0/1` or `12/18/0/1` without a PQ ICC. PNG Deflate is lossless for the target RGB16 buffer.
+RGB16 with Rec.2020/PQ by default, optional Display P3/PQ, Rec.2020/HLG or Display P3/HLG. PQ PNG writes cICP `9/16/0/1` and the production `Rec.2100 PQ` ICC; Display P3/PQ uses the corresponding primaries. HLG writes cICP `9/18/0/1` or `12/18/0/1` without a PQ ICC. PNG Deflate is lossless for the target RGB16 buffer.
 
 ## Direct HDR TIFF
 

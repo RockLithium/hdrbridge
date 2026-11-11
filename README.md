@@ -35,8 +35,7 @@ Download the Windows x64 installer or portable ZIP from [GitHub Releases](https:
 
 ## Build on Windows
 
-Requirements and reproducible build commands are in
-[docs/BUILDING.md](docs/BUILDING.md). A typical Release build is:
+Requirements and reproducible build commands are in [docs/BUILDING.md](docs/BUILDING.md). A typical Release build is:
 
 ```powershell
 .\scripts\bootstrap-vcpkg-local.ps1 -Ref ddd110b8a05cda14b8f1b0333a1d80c4fb6f16cd

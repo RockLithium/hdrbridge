@@ -3,6 +3,7 @@
 HDR fidelity and lossless compression are different claims.
 
 **Fidelity** means preserving intended HDR luminance, dynamic range, hue and gamut relationships to the precision and gamut of the destination.
+
 **Lossless** means a codec reproduces the exact discrete buffer supplied to its encoder. A lossless output codec does not make the entire source-to-output operation bit-exact: source decode, chroma reconstruction, gamut conversion, transfer conversion and quantization may occur first.
 
 ## Input reconstruction
