@@ -33,7 +33,7 @@ The Inspector reports the encoded source representation, metadata, gain-map comp
 
 Download the Windows x64 installer or portable ZIP from [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases). The installer supports in-place upgrades. Both builds are unsigned; Windows may show a SmartScreen or unknown-publisher warning.
 
-The desktop application checks for updates in the background. Click the version beside the title to check manually. Updates download from the project's GitHub Release and are verified with SHA-256 before installation. Installation requires confirmation and waits until conversions have stopped; it uses the Windows installer, including when started from a portable copy.
+The desktop checks for updates in the background; click the version beside the title to check manually. It asks before downloading the installer to a temporary folder, verifies SHA-256, then asks before opening the Windows installation wizard and administrator/UAC confirmation. Running conversions are not interrupted; if a download finishes during conversion, click the version after the queue stops to continue. The installer upgrades an installed copy. Updating from a portable copy starts an installation (Program Files by default) rather than replacing that portable folder.
 
 ## Build on Windows
 
@@ -50,7 +50,7 @@ Run `build-vs\bin\Release\hdrbridge.exe`. The CLI and test executables are devel
 
 ## Web application
 
-The browser version lives in [`web/`](web/) and is built independently from the desktop application. It runs the portable HDR core in a Web Worker and supports the same principal direct-HDR and gain-map input families. Browser outputs are Ultra HDR JPEG, HDR PNG, direct HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and direct HDR AVIF. Files remain on the device.
+The browser version lives in [`web/`](web/) and is built independently from the desktop application. It runs the portable HDR core in a Web Worker and supports the same principal direct-HDR and gain-map input families. Browser outputs are Ultra HDR JPEG, HDR PNG, direct HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and HDR AVIF. JPEG XL and AVIF support direct PQ/HLG and ISO gain-map output. Files remain on the device.
 
 ## Documentation
 
