@@ -46,11 +46,14 @@ jobs:
 
       - name: Configure
         shell: pwsh
-        run: >-
-          cmake -S . -B build -A x64
-          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\.tools\vcpkg\scripts\buildsystems\vcpkg.cmake"
-          -DVCPKG_INSTALLED_DIR="${{ github.workspace }}\vcpkg_installed"
-          -DVCPKG_OVERLAY_PORTS="${{ github.workspace }}\ports-overlay"
+        run: |
+          $expectedVersion = "${{ github.ref_name }}".TrimStart('v')
+          $sourceVersion = (Get-Content -LiteralPath VERSION -First 1).Trim()
+          if ($sourceVersion -ne $expectedVersion) { throw "Tag and source version do not match" }
+          cmake -S . -B build -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\.tools\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_INSTALLED_DIR="${{ github.workspace }}\vcpkg_installed" `
+            -DVCPKG_OVERLAY_PORTS="${{ github.workspace }}\ports-overlay"
 
       - name: Build and test
         shell: pwsh
@@ -131,9 +134,10 @@ jobs:
           Windows x64 release of HDR Bridge. Use the installer for normal installation and in-place upgrades, or the ZIP for portable use.
 
           ### Changes
-          - Reuse decoded HDR images across inspection, preview and conversion
-          - Improve parallel decoding and HLG processing
-          - Enable browser multithreading where supported, with single-threaded fallback
+          - Add in-app update checks and verified installer downloads
+          - Show results and HDR diagnostics as each task completes
+          - Unify large Ultra HDR JPEG support across Windows, CLI and Web
+          - Add a version label and refine desktop feedback
 
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 

@@ -24,6 +24,10 @@ The GUI is `build-vs\bin\Release\hdrbridge.exe`. Developer-only CLI and test tar
 
 CTest includes a synthetic single-source cache regression covering inspection, repeated output, source replacement and decode failures. The default worker budget follows the detected logical thread count, with a fallback of four.
 
+The root `VERSION` file supplies the native and Web CMake project versions, desktop version label, Windows file-version resource and output Software tag. CTest also checks update metadata, installer integrity and Ultra HDR size arithmetic. These tests do not install an update.
+
+Native and Web builds share the Ultra HDR configuration in `cmake/PatchUltraHdr.cmake`: 65,500 pixels per axis. Configuration applies the same checked buffer-size arithmetic to the pinned local or fetched libultrahdr source. Available memory can impose a lower practical limit, especially in browsers.
+
 ## Portable package
 
 ```powershell

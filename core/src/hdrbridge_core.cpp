@@ -1,4 +1,5 @@
 #include "hdrbridge_core.h"
+#include "hdrbridge_version.h"
 #include "hdrbridge_threads.h"
 #include "gainmap_adapters.h"
 #include "hdr_transfer.h"
@@ -2528,7 +2529,7 @@ void encode_tiff(const std::filesystem::path& path, const DecodedImage& decoded,
   const std::string description = p3 ? "HDR Bridge direct RGB16 Display P3 PQ" :
                                        "HDR Bridge direct RGB16 Rec.2020 PQ";
   TIFFSetField(tiff.get(), TIFFTAG_IMAGEDESCRIPTION, description.c_str());
-  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge 1.3.2");
+  TIFFSetField(tiff.get(), TIFFTAG_SOFTWARE, "HDR Bridge " HDRBRIDGE_VERSION_STRING);
   TIFFSetField(tiff.get(), TIFFTAG_ICCPROFILE, static_cast<uint32_t>(icc.size()), icc.data());
   std::vector<uint8_t> diagnostic_photoshop;
   std::vector<uint8_t> diagnostic_iptc;

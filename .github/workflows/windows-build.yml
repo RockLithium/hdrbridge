@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "CMakeLists.txt"
+      - "cmake/**"
+      - "VERSION"
       - "CMakePresets.json"
       - "core/**"
       - "desktop/**"
@@ -18,6 +20,8 @@ on:
   pull_request:
     paths:
       - "CMakeLists.txt"
+      - "cmake/**"
+      - "VERSION"
       - "CMakePresets.json"
       - "core/**"
       - "desktop/**"

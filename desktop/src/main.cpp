@@ -1,5 +1,7 @@
 #include "hdrbridge_core.h"
 #include "output_naming.h"
+#include "hdrbridge_version.h"
+#include "app_update.h"
 
 #include <Windows.h>
 #include <windowsx.h>
@@ -42,6 +44,9 @@ constexpr UINT WM_APP_OPEN_SOURCE = WM_APP + 4;
 constexpr UINT WM_APP_SPLITTER_MOVE = WM_APP + 5;
 constexpr UINT WM_APP_SPLITTER_END = WM_APP + 6;
 constexpr UINT WM_APP_ITEM_STATUS = WM_APP + 7;
+constexpr UINT WM_APP_RESULT = WM_APP + 10;
+constexpr UINT WM_APP_UPDATE_CHECK = WM_APP + 11;
+constexpr UINT WM_APP_UPDATE_DOWNLOAD = WM_APP + 12;
 constexpr UINT WM_APP_TASK_PROGRESS = WM_APP + 8;
 constexpr UINT WM_APP_TASK_OUTPUT = WM_APP + 9;
 constexpr UINT WM_APP_TASK_REORDER = WM_APP + 20;
@@ -104,6 +109,7 @@ enum ControlId {
   ,IDC_INSPECTOR_LABEL
   ,IDC_ACTIVITY_LABEL
   ,IDC_TITLE
+  ,IDC_VERSION
   ,IDC_RESET_LAYOUT
   ,IDC_RESET_SETTINGS
   ,IDC_VERTICAL_SPLITTER
@@ -184,6 +190,16 @@ struct SuccessPayload {
   size_t failed = 0;
 };
 
+struct UpdateCheckPayload {
+  std::optional<hdrbridge::app_update::Release> release;
+  std::string error;
+  bool manual = false;
+};
+struct UpdateDownloadPayload {
+  std::optional<hdrbridge::app_update::VerifiedInstaller> path;
+  std::string error;
+};
+
 struct AppState {
   HWND window = nullptr;
   HWND open = nullptr;
@@ -227,6 +243,11 @@ struct AppState {
   HWND inspector_label = nullptr;
   HWND activity_label = nullptr;
   HWND title = nullptr;
+  HWND version = nullptr;
+  bool update_busy = false;
+  bool update_manual_requested = false;
+  std::optional<hdrbridge::app_update::VerifiedInstaller> ready_installer;
+  std::optional<hdrbridge::app_update::Release> pending_release;
   HWND reset_layout = nullptr;
   HWND reset_settings = nullptr;
   HWND preview_toggle = nullptr;
@@ -1330,11 +1351,9 @@ LRESULT CALLBACK splitter_subclass(HWND control, UINT message, WPARAM wparam,
 
 void append_log(AppState* state, const std::wstring& line) {
   const int length = GetWindowTextLengthW(state->log);
-  std::wstring text(static_cast<size_t>(length), L'\0');
-  if (length) GetWindowTextW(state->log, text.data(), length + 1);
-  text += (length ? L"\r\n" : L"") + line;
-  SendMessageW(state->log, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(text.c_str()));
-  SendMessageW(state->log, EM_SETSEL, text.size(), text.size());
+  const std::wstring text = (length ? L"\r\n" : L"") + line;
+  SendMessageW(state->log, EM_SETSEL, length, length);
+  SendMessageW(state->log, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
   SendMessageW(state->log, EM_SCROLLCARET, 0, 0);
 }
 
@@ -1866,7 +1885,26 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
 }
 
 void layout(AppState* s, int width, int height) {
-  const int margin = 24, header = 42, gap = 24;
+  const int margin = 24, gap = 24;
+  const UINT dpi = GetDpiForWindow(s->window);
+  const int pad = MulDiv(4, dpi, 96);
+  HDC dc = GetDC(s->window);
+  SIZE title_size{}, version_size{};
+  TEXTMETRICW title_metrics{}, version_metrics{};
+  const auto previous_font = SelectObject(dc, s->title_font);
+  GetTextExtentPoint32W(dc, L"HDR Bridge", 10, &title_size);
+  GetTextMetricsW(dc, &title_metrics);
+  SelectObject(dc, s->font);
+  wchar_t version_text[256]{};
+  GetWindowTextW(s->version, version_text, 256);
+  GetTextExtentPoint32W(dc, version_text, static_cast<int>(wcslen(version_text)), &version_size);
+  GetTextMetricsW(dc, &version_metrics);
+  SelectObject(dc, previous_font);
+  ReleaseDC(s->window, dc);
+  const int title_y = MulDiv(7, dpi, 96);
+  const int baseline = title_y + title_metrics.tmAscent;
+  const int version_y = baseline - version_metrics.tmAscent;
+  const int header = std::max(42, static_cast<int>(std::max(title_y + title_metrics.tmHeight, version_y + version_metrics.tmHeight) + pad));
   const int content_top = header + 8;
   const int max_activity_height = std::max(160, height - (content_top + 450));
   s->activity_panel_height = std::clamp(s->activity_panel_height, 160, max_activity_height);
@@ -1877,7 +1915,9 @@ void layout(AppState* s, int width, int height) {
   const int right_width = s->right_panel_width;
   const int left_width = width - margin * 2 - gap - right_width;
   const int right_x = margin + left_width + gap;
-  MoveWindow(s->title, margin, 7, 180, 30, TRUE);
+  MoveWindow(s->title, margin, title_y, title_size.cx + pad, title_metrics.tmHeight + pad, TRUE);
+  MoveWindow(s->version, margin + title_size.cx + pad * 2, version_y,
+             version_size.cx + pad * 2, version_metrics.tmHeight + pad, TRUE);
   constexpr int reset_button_width = 144;
   constexpr int reset_button_gap = 8;
   constexpr int preview_button_width = 92;
@@ -2440,6 +2480,8 @@ void start_conversion(AppState* state) {
               PostMessageW(window, WM_APP_PROGRESS, static_cast<WPARAM>(overall),
                            reinterpret_cast<LPARAM>(new std::wstring(std::move(text))));
             }, &state->cancel);
+          PostMessageW(window, WM_APP_RESULT, 0,
+              reinterpret_cast<LPARAM>(new hdrbridge::ConversionResult(result)));
           results.push_back(std::move(result));
           ++succeeded;
           PostMessageW(window, WM_APP_ITEM_STATUS, 0,
@@ -2540,6 +2582,8 @@ void start_task_queue(AppState* state,
           PostMessageW(window, WM_APP_TASK_OUTPUT, 0,
               reinterpret_cast<LPARAM>(new TaskOutputPayload{
                   index, result.output_path}));
+          PostMessageW(window, WM_APP_RESULT, 0,
+              reinterpret_cast<LPARAM>(new hdrbridge::ConversionResult(result)));
           results.push_back(std::move(result));
           ++succeeded;
           PostMessageW(window, WM_APP_ITEM_STATUS, 0,
@@ -2577,12 +2621,57 @@ HWND add_control(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD sty
   return control;
 }
 
+void start_update_check(AppState* state, bool manual) {
+  if (state->update_busy) {
+    if (manual) {
+      state->update_manual_requested = true;
+      append_log(state, L"An update check or download is already in progress.");
+    }
+    return;
+  }
+  if (manual && state->ready_installer) {
+    if (state->running) {
+      MessageBoxW(state->window, L"Finish the current conversion before installing.", L"Update ready", MB_OK | MB_ICONINFORMATION);
+    } else if (MessageBoxW(state->window, L"The installer was verified. Launch it now?", L"Update ready", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+      std::string error;
+      if (!hdrbridge::app_update::launch_installer(*state->ready_installer, &error)) MessageBoxW(state->window, widen(error).c_str(), L"Update failed", MB_OK | MB_ICONERROR);
+      else PostMessageW(state->window, WM_CLOSE, 0, 0);
+    }
+    return;
+  }
+  if (manual && state->pending_release) {
+    auto result = std::make_unique<UpdateCheckPayload>();
+    result->manual = true;
+    result->release = state->pending_release;
+    if (PostMessageW(state->window, WM_APP_UPDATE_CHECK, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
+    return;
+  }
+  state->update_busy = true;
+  const HWND window = state->window;
+  std::thread([window, manual] {
+    auto result = std::make_unique<UpdateCheckPayload>();
+    result->manual = manual;
+    result->release = hdrbridge::app_update::check_latest(&result->error);
+    if (PostMessageW(window, WM_APP_UPDATE_CHECK, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
+  }).detach();
+}
+
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   auto* state = reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
   if (message == WM_CREATE) {
     auto owned = std::make_unique<AppState>();
     owned->window = window;
     owned->title = add_control(window, L"STATIC", L"HDR Bridge", SS_LEFT, IDC_TITLE);
+    owned->version = add_control(window, L"STATIC", HDRBRIDGE_VERSION_WIDE, SS_NOTIFY, IDC_VERSION);
+    HWND version_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+        WS_POPUP | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        window, nullptr, GetModuleHandleW(nullptr), nullptr);
+    TOOLINFOW tip{sizeof(tip)};
+    tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    tip.hwnd = window;
+    tip.uId = reinterpret_cast<UINT_PTR>(owned->version);
+    tip.lpszText = const_cast<wchar_t*>(L"Check for updates");
+    SendMessageW(version_tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
     owned->reset_layout = add_control(window, L"BUTTON", L"Reset layout", BS_PUSHBUTTON, IDC_RESET_LAYOUT);
     owned->reset_settings = add_control(window, L"BUTTON", L"Reset settings", BS_PUSHBUTTON, IDC_RESET_SETTINGS);
     owned->preview_toggle = add_control(window, L"BUTTON", L"Preview", BS_PUSHBUTTON,
@@ -2698,6 +2787,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     owned->output_path = add_control(window, L"STATIC", L"No output yet", SS_LEFT | SS_PATHELLIPSIS, IDC_OUTPUT_PATH);
     owned->log = add_control(window, L"EDIT", L"Ready. Detailed conversion activity appears here.",
                              ES_MULTILINE | ES_READONLY | WS_VSCROLL | WS_BORDER, IDC_LOG);
+    SendMessageW(owned->log, EM_SETLIMITTEXT, 16 * 1024 * 1024, 0);
     EnableWindow(owned->convert, FALSE);
     EnableWindow(owned->remove, FALSE);
     EnableWindow(owned->clear, FALSE);
@@ -2717,10 +2807,74 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     apply_fonts(state);
     apply_theme(state);
     update_mode_ui(state);
+    start_update_check(state, false);
     return 0;
   }
   if (!state) return DefWindowProcW(window, message, wparam, lparam);
   switch (message) {
+    case WM_SETCURSOR:
+      if (reinterpret_cast<HWND>(wparam) == state->version) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+      }
+      break;
+    case WM_APP_UPDATE_CHECK: {
+      std::unique_ptr<UpdateCheckPayload> result(reinterpret_cast<UpdateCheckPayload*>(lparam));
+      state->update_busy = false;
+      result->manual = result->manual || state->update_manual_requested;
+      state->update_manual_requested = false;
+      if (!result->release) {
+        if (result->manual) MessageBoxW(window, widen(result->error).c_str(), L"Update check", MB_OK | MB_ICONINFORMATION);
+        return 0;
+      }
+      const auto comparison = hdrbridge::app_update::compare_versions(result->release->version, HDRBRIDGE_VERSION_STRING);
+      if (!comparison) {
+        if (result->manual) MessageBoxW(window, L"The release version could not be compared.", L"Update check", MB_OK | MB_ICONINFORMATION);
+        return 0;
+      }
+      if (*comparison <= 0) {
+        if (result->manual) MessageBoxW(window, L"You have the latest version.", L"Update check", MB_OK | MB_ICONINFORMATION);
+        return 0;
+      }
+      state->pending_release = *result->release;
+      if (!result->manual && state->running) {
+        const auto label = std::wstring(HDRBRIDGE_VERSION_WIDE) + L" • update available";
+        SetWindowTextW(state->version, label.c_str());
+        append_log(state, L"Update available: " + widen(result->release->version) + L". Click the version to download.");
+        RECT client{}; GetClientRect(window, &client); layout(state, client.right, client.bottom);
+        return 0;
+      }
+      const auto prompt = L"Version " + widen(result->release->version) + L" is available. Download the installer?";
+      if (MessageBoxW(window, prompt.c_str(), L"Update available", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+      state->update_busy = true;
+      auto release = std::move(*result->release);
+      std::thread([window, release = std::move(release)] {
+        auto payload = std::make_unique<UpdateDownloadPayload>();
+        payload->path = hdrbridge::app_update::download_installer(release, {}, &payload->error);
+        if (PostMessageW(window, WM_APP_UPDATE_DOWNLOAD, 0, reinterpret_cast<LPARAM>(payload.get()))) payload.release();
+      }).detach();
+      return 0;
+    }
+    case WM_APP_UPDATE_DOWNLOAD: {
+      std::unique_ptr<UpdateDownloadPayload> result(reinterpret_cast<UpdateDownloadPayload*>(lparam));
+      state->update_busy = false;
+      state->update_manual_requested = false;
+      if (!result->path) {
+        MessageBoxW(window, widen(result->error).c_str(), L"Update download failed", MB_OK | MB_ICONERROR);
+        return 0;
+      }
+      state->ready_installer = std::move(result->path);
+      if (state->running) {
+        append_log(state, L"Update installer ready. Click the version after conversion to install.");
+        return 0;
+      }
+      if (MessageBoxW(window, L"The installer was verified. Launch it now?", L"Update ready", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        std::string error;
+        if (!hdrbridge::app_update::launch_installer(*state->ready_installer, &error)) MessageBoxW(window, widen(error).c_str(), L"Update failed", MB_OK | MB_ICONERROR);
+        else PostMessageW(window, WM_CLOSE, 0, 0);
+      }
+      return 0;
+    }
     case WM_APP_TASK_REORDER: {
       if (state->running) return 0;
       const size_t from = static_cast<size_t>(wparam);
@@ -3024,6 +3178,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       return 0;
     case WM_COMMAND:
       switch (LOWORD(wparam)) {
+        case IDC_VERSION:
+          if (HIWORD(wparam) == STN_CLICKED) start_update_check(state, true);
+          return 0;
         case IDC_PREVIEW_TOGGLE:
           state->preview_enabled = !state->preview_enabled;
           if (state->preview_enabled && !state->input.empty()) {
@@ -3338,16 +3495,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       state->output = payload->results.back().output_path;
       EnableWindow(state->reveal, TRUE);
       EnableWindow(state->open_output, TRUE);
-      for (size_t index = 0; index < payload->results.size(); ++index) {
-        const auto& item = payload->results[index];
-        append_log(state, L"BATCH PASS [" + std::to_wstring(index + 1u) + L"/" +
-                          std::to_wstring(payload->results.size()) + L"] " +
-                          item.output_path.wstring() + L" • SHA-256 " + widen(item.sha256));
-      }
-      const auto& result = payload->results.back();
+      return 0;
+    }
+    case WM_APP_RESULT: {
+      std::unique_ptr<hdrbridge::ConversionResult> owned(reinterpret_cast<hdrbridge::ConversionResult*>(lparam));
+      const auto& result = *owned;
       const auto& v = result.verification;
       std::wostringstream line;
-      line << L"PASS  " << v.width << L"×" << v.height << L"  " << widen(v.pixel_format)
+      line << L"PASS  " << result.output_path.wstring() << L"  •  " << v.width << L"×" << v.height << L"  " << widen(v.pixel_format)
            << L"  •  " << result.output_bytes << L" bytes  •  SHA-256 " << widen(result.sha256);
       append_log(state, line.str());
       if (v.max_channel_nits > 0.0) {

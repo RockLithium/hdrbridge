@@ -6,6 +6,8 @@ on:
     paths:
       - "web/**"
       - "core/**"
+      - "cmake/**"
+      - "VERSION"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 

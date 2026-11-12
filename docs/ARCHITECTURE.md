@@ -32,6 +32,8 @@ Direct PQ, direct HLG, ISO Ultra HDR, Apple Adaptive HDR, gain-map AVIF, gain-ma
 
 Outputs are written to a temporary file, verified, then renamed to the final path. A failed or cancelled operation does not leave a partial final output.
 
+The desktop posts each completed task's verification and timing to Activity immediately; the end-of-batch message contains the counts. Update checking and download run outside the conversion core. A downloaded installer is checked against the Release SHA-256 and checked again before launch; active conversion jobs are allowed to finish before installation.
+
 ## Platform boundaries
 
 HEIF/AVIF, JPEG/JPEG XL, PNG, TIFF, ICC and Ultra HDR processing use portable libraries where practical. Windows JPEG XR uses WIC. The Web build substitutes jxrlib for the container codec while preserving the same FP16 linear scRGB output semantics; Windows WIC compatibility is covered by release regression.

@@ -33,6 +33,8 @@ The Inspector reports the encoded source representation, metadata, gain-map comp
 
 Download the Windows x64 installer or portable ZIP from [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases). The installer supports in-place upgrades. Both builds are unsigned; Windows may show a SmartScreen or unknown-publisher warning.
 
+The desktop application checks for updates in the background. Click the version beside the title to check manually. Updates download from the project's GitHub Release and are verified with SHA-256 before installation. Installation requires confirmation and waits until conversions have stopped; it uses the Windows installer, including when started from a portable copy.
+
 ## Build on Windows
 
 Requirements and reproducible build commands are in [docs/BUILDING.md](docs/BUILDING.md). A typical Release build is:

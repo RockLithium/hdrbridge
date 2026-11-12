@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(hdrbridge_web_core LANGUAGES C CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION" HDRBRIDGE_VERSION LIMIT_COUNT 1)
+project(hdrbridge_web_core VERSION ${HDRBRIDGE_VERSION} LANGUAGES C CXX)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/hdrbridge_version.h.in"
+               "${CMAKE_CURRENT_BINARY_DIR}/generated/hdrbridge_version.h" @ONLY)
+add_compile_options(-fexceptions)
 
 option(HDRBRIDGE_PTHREADS "Build with WebAssembly threads" OFF)
 if(HDRBRIDGE_PTHREADS)
@@ -47,8 +51,10 @@ set(UHDR_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 set(UHDR_ENABLE_GLES OFF CACHE BOOL "" FORCE)
 set(UHDR_ENABLE_INTRINSICS OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/PatchUltraHdr.cmake")
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../.tools/libultrahdr/CMakeLists.txt")
   set(HDRBRIDGE_UHDR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.tools/libultrahdr")
+  hdrbridge_patch_ultrahdr("${HDRBRIDGE_UHDR_ROOT}")
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../.tools/libultrahdr"
                    "${CMAKE_CURRENT_BINARY_DIR}/libultrahdr" EXCLUDE_FROM_ALL)
 else()
@@ -56,8 +62,10 @@ else()
   FetchContent_Declare(libultrahdr
     GIT_REPOSITORY https://github.com/google/libultrahdr.git
     GIT_TAG b2aacb366e1542cfc29605cb0d8a0ebd06bb07f8
-    GIT_SHALLOW TRUE)
+    GIT_SHALLOW TRUE
+    PATCH_COMMAND "${CMAKE_COMMAND}" "-DHDRBRIDGE_UHDR_SOURCE=<SOURCE_DIR>" -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/PatchUltraHdr.cmake")
   FetchContent_MakeAvailable(libultrahdr)
+  hdrbridge_patch_ultrahdr("${libultrahdr_SOURCE_DIR}")
   set(HDRBRIDGE_UHDR_ROOT "${libultrahdr_SOURCE_DIR}")
 endif()
 
@@ -70,6 +78,7 @@ add_executable(hdrbridge-web
   ../../core/src/orientation.cpp)
 
 target_include_directories(hdrbridge-web PRIVATE
+  "${CMAKE_CURRENT_BINARY_DIR}/generated"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../core/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../core/src"
   "${JXL_INCLUDE_DIR}"
