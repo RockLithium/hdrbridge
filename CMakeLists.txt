@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 set(VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_LIST_DIR}/ports-overlay" CACHE STRING "HDR Bridge vcpkg overlay ports")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" HDRBRIDGE_VERSION LIMIT_COUNT 1)
 project(hdrbridge VERSION ${HDRBRIDGE_VERSION} LANGUAGES CXX)
 include(CTest)
@@ -51,6 +52,7 @@ else()
 endif()
 
 add_library(hdrbridge_core STATIC
+  core/src/output_transaction.cpp
   core/src/hdrbridge_core.cpp
   core/src/hdr_transfer.cpp
   core/src/jpeg_probe.cpp
@@ -128,6 +130,15 @@ if(BUILD_TESTING)
   target_compile_options(hdrbridge-uhdr-limits-tests PRIVATE /W4 /permissive- /utf-8)
   target_link_libraries(hdrbridge-uhdr-limits-tests PRIVATE uhdr-static JPEG::JPEG)
   add_test(NAME uhdr-dimension-and-size-safety COMMAND hdrbridge-uhdr-limits-tests)
+  add_executable(hdrbridge-output-transaction-tests tests/output-transaction-tests.cpp core/src/output_transaction.cpp)
+  target_include_directories(hdrbridge-output-transaction-tests PRIVATE core/src)
+  target_compile_definitions(hdrbridge-output-transaction-tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(hdrbridge-output-transaction-tests PRIVATE /W4 /permissive- /utf-8)
+  add_test(NAME output-transaction COMMAND hdrbridge-output-transaction-tests)
+  add_executable(hdrbridge-format-roundtrip-tests tests/format-roundtrip-tests.cpp)
+  target_compile_options(hdrbridge-format-roundtrip-tests PRIVATE /W4 /permissive- /utf-8)
+  target_link_libraries(hdrbridge-format-roundtrip-tests PRIVATE hdrbridge_core JPEG::JPEG)
+  add_test(NAME format-roundtrips COMMAND hdrbridge-format-roundtrip-tests)
   add_executable(hdrbridge-preview-ui-smoke tests/preview_ui_smoke.cpp)
   target_compile_definitions(hdrbridge-preview-ui-smoke PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

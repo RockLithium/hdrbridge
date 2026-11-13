@@ -27,6 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Test asynchronous request cancellation
+        run: node --test web/tests/*.test.mjs
       - name: Install Emscripten 4.0.21
         run: |
           git clone --depth 1 --branch 4.0.21 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"

@@ -30,7 +30,9 @@ Parallel execution preserves the per-pixel formulas, precision and quantization.
 
 Direct PQ, direct HLG, ISO Ultra HDR, Apple Adaptive HDR, gain-map AVIF, gain-map TIFF and gain-map JPEG XL (`jhgm`) assets have separate input adapters. They share color and HDR mathematics only after reconstruction. Camera brand is not used as a transfer-function proxy.
 
-Outputs are written to a temporary file, verified, then renamed to the final path. A failed or cancelled operation does not leave a partial final output.
+Each output reserves its own temporary sibling file, verifies it, then commits on the same filesystem. Overwriting replaces the existing file without deleting it first; no-overwrite commits refuse an existing target. Failed or cancelled operations before commit preserve the previous target and remove only their own temporary file. Cancellation is checked again immediately before commit.
+
+JPEG XL gain-map verification reuses its existing reconstructed raster to check map dimensions and RGB channels and measure linear-light error at up to 4,096 sampled pixels. Extraction verifies the written bytes and image header without another full decode. Synthetic end-to-end tests independently decode exported pixels and check lossless equality or format-specific error tolerances, including orientation, ICC and gain-map cases.
 
 The desktop posts each completed task's verification and timing to Activity immediately; the end-of-batch message contains the counts. Update checking and download run outside the conversion core. A downloaded installer is checked against the Release SHA-256 and checked again before launch; active conversion jobs are allowed to finish before installation.
 

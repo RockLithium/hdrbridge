@@ -1,3 +1,5 @@
+import { runForCurrentRequest } from "./request-guard.js";
+
 const availableFormats = new Set(["uhdr", "png", "jxl", "jxr", "avif", "tiff"]);
 const translations = {
   "en-US": {
@@ -186,18 +188,21 @@ function applyLanguage(language) {
 
 function codecWorker() {
   if (!state.worker) {
-    state.worker = new Worker(new URL("./heif-png-worker.js", import.meta.url), {
+    const worker = new Worker(new URL("./heif-png-worker.js", import.meta.url), {
       type: "module",
     });
-    state.worker.addEventListener("message", handleWorkerMessage);
-    state.worker.addEventListener("error", (event) => {
+    state.worker = worker;
+    worker.addEventListener("message", handleWorkerMessage);
+    worker.addEventListener("error", (event) => {
+      if (state.worker !== worker) return;
       setBusy(false);
       setStatus(event.message || "Conversion worker failed.", "error");
       if (!state.coreReady) offerCompatibilityMode();
       state.worker = null;
       state.coreReady = false;
     });
-    state.worker.addEventListener("messageerror", () => {
+    worker.addEventListener("messageerror", () => {
+      if (state.worker !== worker) return;
       setBusy(false);
       setStatus("The conversion worker could not receive the image.", "error");
     });
@@ -401,18 +406,23 @@ function selectFormat(format) {
 async function inspectFile(file) {
   const requestId = ++state.requestId;
   setTranslatedStatus(state.coreReady ? "inspecting" : "coreLoading");
-  try {
-    const buffer = await file.arrayBuffer();
+  await runForCurrentRequest(file, requestId, (id) => id === state.requestId, (buffer) => {
     postCodecMessage({
       type: "inspect", requestId, buffer, fileName: file.name,
     }, [buffer]);
-  } catch (error) {
-    setStatus(error.message, "error");
-  }
+  }, (error) => setStatus(error.message, "error"));
 }
 
 function selectFile(file) {
   if (!file) return;
+  // A new file owns all subsequent async work. Stop any active conversion, but
+  // keep the worker/core cache for the normal inspect-then-convert flow.
+  state.requestId += 1;
+  if (state.busy && state.worker) {
+    state.worker.terminate();
+    state.worker = null;
+    state.coreReady = false;
+  }
   state.file = file;
   state.compatibilityPromptShown = false;
   state.sourceSupported = false;
@@ -534,30 +544,33 @@ async function convert() {
   setBusy(true);
   setTranslatedStatus("processing");
   const requestId = ++state.requestId;
-  try {
-    const buffer = await state.file.arrayBuffer();
+  const file = state.file;
+  const options = {
+    fileName: file.name,
+    format: state.format,
+    primaries: state.primaries,
+    transfer: state.transfer,
+    outputRepresentation: state.outputRepresentation,
+    encodingValue: state.encodingValues[state.format],
+    lossless: state.format === "png" || state.format === "tiff" ? true : state.lossless,
+    tiffCompressed: state.tiffCompression === "compressed",
+    copyExif: state.copyExif,
+    copyXmp: state.copyXmp,
+    gainResolution: state.gainResolution,
+    gainChannels: state.gainChannels,
+    peak: state.peak,
+  };
+  await runForCurrentRequest(file, requestId, (id) => id === state.requestId, (buffer) => {
     postCodecMessage({
       type: "convert",
       requestId,
       buffer,
-      fileName: state.file.name,
-      format: state.format,
-      primaries: state.primaries,
-      transfer: state.transfer,
-      outputRepresentation: state.outputRepresentation,
-      encodingValue: state.encodingValues[state.format],
-      lossless: state.format === "png" || state.format === "tiff" ? true : state.lossless,
-      tiffCompressed: state.tiffCompression === "compressed",
-      copyExif: state.copyExif,
-      copyXmp: state.copyXmp,
-      gainResolution: state.gainResolution,
-      gainChannels: state.gainChannels,
-      peak: state.peak,
+      ...options,
     }, [buffer]);
-  } catch (error) {
+  }, (error) => {
     setBusy(false);
     setStatus(error.message, "error");
-  }
+  });
 }
 
 elements.input.addEventListener("change", () => selectFile(elements.input.files[0]));

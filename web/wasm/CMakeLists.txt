@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION")
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION" HDRBRIDGE_VERSION LIMIT_COUNT 1)
 project(hdrbridge_web_core VERSION ${HDRBRIDGE_VERSION} LANGUAGES C CXX)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/hdrbridge_version.h.in"
@@ -70,6 +71,7 @@ else()
 endif()
 
 add_executable(hdrbridge-web
+  ../../core/src/output_transaction.cpp
   hdrbridge_web_api.cpp
   ../../core/src/hdrbridge_core.cpp
   ../../core/src/hdr_transfer.cpp

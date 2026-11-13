@@ -1,4 +1,5 @@
 #include "hdrbridge_core.h"
+#include "output_transaction.h"
 #include "hdrbridge_version.h"
 #include "hdrbridge_threads.h"
 #include "gainmap_adapters.h"
@@ -4632,6 +4633,82 @@ json verification_json(const Verification& v) {
           {"checks", v.checks}};
 }
 
+#ifdef _WIN32
+struct GainmapJpegError { jpeg_error_mgr base; jmp_buf jump; };
+void gainmap_jpeg_error(j_common_ptr decoder) {
+  auto* error = reinterpret_cast<GainmapJpegError*>(decoder->err);
+  longjmp(error->jump, 1);
+}
+#endif
+
+// Verify the file that will be committed, independently of the encoder buffers.
+void verify_gainmap_export(const std::filesystem::path& path,
+                           const std::vector<uint8_t>& bytes,
+                           const gainmap::GainMapRaster& raster,
+                           const std::string& format, bool original) {
+  const auto actual = read_file(path);
+  if (actual != bytes) throw std::runtime_error("gain-map export byte readback mismatch");
+  if (original) return;
+  const size_t channels = raster.channels == 3 ? 3u : 1u;
+  if (raster.rgb16.size() != static_cast<size_t>(raster.width) * raster.height * 3u)
+    throw std::runtime_error("invalid source gain-map raster size");
+  if (format == "png") {
+    png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    if (!png) throw std::runtime_error("cannot create gain-map PNG reader");
+    png_infop info = png_create_info_struct(png);
+    if (!info) { png_destroy_read_struct(&png, nullptr, nullptr); throw std::runtime_error("cannot create PNG info"); }
+    if (setjmp(png_jmpbuf(png))) {
+      png_destroy_read_struct(&png, &info, nullptr);
+      throw std::runtime_error("gain-map PNG readback failed");
+    }
+    PngMemoryReader reader{actual.data(), actual.size()};
+    png_set_read_fn(png, &reader, png_read_memory);
+    png_read_info(png, info);
+    if (png_get_image_width(png, info) != raster.width ||
+        png_get_image_height(png, info) != raster.height ||
+        png_get_bit_depth(png, info) != 16 ||
+        png_get_color_type(png, info) != (channels == 3 ? PNG_COLOR_TYPE_RGB : PNG_COLOR_TYPE_GRAY)) {
+      png_destroy_read_struct(&png, &info, nullptr);
+      throw std::runtime_error("gain-map PNG metadata readback mismatch");
+    }
+    png_destroy_read_struct(&png, &info, nullptr);
+  } else if (format == "tiff") {
+    auto tiff = open_tiff(path, "r");
+    uint32_t width = 0, height = 0;
+    uint16_t depth = 0, count = 0, planar = 0;
+    TIFFGetField(tiff.get(), TIFFTAG_IMAGEWIDTH, &width);
+    TIFFGetField(tiff.get(), TIFFTAG_IMAGELENGTH, &height);
+    TIFFGetField(tiff.get(), TIFFTAG_BITSPERSAMPLE, &depth);
+    TIFFGetField(tiff.get(), TIFFTAG_SAMPLESPERPIXEL, &count);
+    TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PLANARCONFIG, &planar);
+    if (width != raster.width || height != raster.height || depth != 16 ||
+        count != channels || planar != PLANARCONFIG_CONTIG)
+      throw std::runtime_error("gain-map TIFF metadata readback mismatch");
+  } else if (format == "jpeg") {
+#ifdef _WIN32
+    jpeg_decompress_struct decoder{};
+    GainmapJpegError error{};
+    decoder.err = jpeg_std_error(&error.base);
+    error.base.error_exit = gainmap_jpeg_error;
+    if (setjmp(error.jump)) {
+      jpeg_destroy_decompress(&decoder);
+      throw std::runtime_error("gain-map JPEG readback failed");
+    }
+    jpeg_create_decompress(&decoder);
+    jpeg_mem_src(&decoder, actual.data(), static_cast<unsigned long>(actual.size()));
+    jpeg_read_header(&decoder, TRUE);
+    if (decoder.image_width != raster.width || decoder.image_height != raster.height ||
+        decoder.num_components != channels || decoder.data_precision != 8) {
+      jpeg_destroy_decompress(&decoder);
+      throw std::runtime_error("gain-map JPEG metadata readback mismatch");
+    }
+    jpeg_destroy_decompress(&decoder);
+#else
+    throw std::runtime_error("gain-map JPEG readback unavailable");
+#endif
+  }
+}
+
 ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
                                          const std::filesystem::path& output,
                                          const ConversionOptions& options,
@@ -4642,9 +4719,10 @@ ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
     throw std::runtime_error("output exists; overwrite not enabled");
   }
   if (!output.parent_path().empty()) std::filesystem::create_directories(output.parent_path());
-  const auto temp = output.parent_path() / (output.filename().wstring() + L".partial");
-  std::error_code ec;
-  std::filesystem::remove(temp, ec);
+  OutputTransaction transaction(output);
+  std::string commit_error;
+  if (!transaction.create(commit_error)) throw std::runtime_error(commit_error);
+  const auto& temp = transaction.stage_path();
   try {
     check_cancel(cancel);
     report(progress, 8, "Parsing Gain Map container and metadata");
@@ -4678,15 +4756,15 @@ ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
     } else {
       write_file(temp, bytes);
     }
-    check_cancel(cancel);
-    if (std::filesystem::exists(output)) std::filesystem::remove(output);
-    std::filesystem::rename(temp, output);
     const double encode_ms = elapsed_ms(encode_start);
+    const auto verification_start = Clock::now();
+    verify_gainmap_export(temp, bytes, raster, format, exact_original);
+    const double verification_ms = elapsed_ms(verification_start);
     Verification verification;
     verification.passed = true;
     verification.width = raster.width;
     verification.height = raster.height;
-    verification.bit_depth = raster.bit_depth;
+    verification.bit_depth = exact_original ? raster.bit_depth : (format == "jpeg" ? 8u : 16u);
     verification.pixel_format = raster.channels == 3 ?
         "RGB Gain Map image" : "Mono Gain Map image";
     verification.color_encoding = raster.encoding;
@@ -4700,6 +4778,8 @@ ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
       verification.max_value = std::max(verification.max_value, value / 65535.0);
     }
     verification.checks.push_back("Gain Map metadata parsed from source container");
+    verification.checks.push_back(exact_original ? "Written original payload compared byte-for-byte" :
+        "Written image bytes and header metadata checked");
     verification.checks.push_back("Gain Map image decoded without HDR reconstruction");
     verification.checks.push_back(exact_original ?
         (raster.original_extension == ".jpg" ?
@@ -4710,7 +4790,6 @@ ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
     if (raster.channels == 3 && !exact_original) {
       verification.checks.push_back("RGB Gain Map retained as one three-channel image");
     }
-    report(progress, 100, "Gain Map export committed");
     ConversionResult result;
     result.success = true;
     result.output_path = output;
@@ -4720,11 +4799,17 @@ ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
     result.verification = std::move(verification);
     result.timings.decode_ms = decode_ms;
     result.timings.gain_map_decode_ms = decode_ms;
+    result.timings.verification_ms = verification_ms;
     result.timings.encode_ms = encode_ms;
+    check_cancel(cancel);
+    if (!transaction.commit(options.overwrite, commit_error)) {
+      throw std::runtime_error(commit_error);
+    }
     result.timings.total_ms = elapsed_ms(total_start);
+    // A notification failure cannot undo a committed file or make it a failure.
+    try { report(progress, 100, "Gain Map export committed"); } catch (...) {}
     return result;
   } catch (...) {
-    std::filesystem::remove(temp, ec);
     throw;
   }
 }
@@ -4826,8 +4911,10 @@ ConversionResult convert(const std::filesystem::path& input,
     throw std::runtime_error("JPEG XL and AVIF gain-map output requires an RGB gain map");
   }
   if (!output.parent_path().empty()) std::filesystem::create_directories(output.parent_path());
-  const auto temp = output.parent_path() / (output.filename().wstring() + L".partial");
-  if (std::filesystem::exists(temp)) std::filesystem::remove(temp);
+  OutputTransaction transaction(output);
+  std::string commit_error;
+  if (!transaction.create(commit_error)) throw std::runtime_error(commit_error);
+  const auto& temp = transaction.stage_path();
   try {
     check_cancel(cancel);
     auto decoded_pointer = decode_input(input, progress, cancel, timings);
@@ -4876,10 +4963,41 @@ ConversionResult convert(const std::filesystem::path& input,
         verification.gain_map_width = reconstructed.info.gain_map_width;
         verification.gain_map_height = reconstructed.info.gain_map_height;
         verification.gain_map_channels = reconstructed.info.gain_map_channels;
+        const uint32_t scale = static_cast<uint32_t>(std::clamp(options.gainmap_scale, 1, 4));
+        const uint32_t expected_map_width = (decoded.info.width + scale - 1u) / scale;
+        const uint32_t expected_map_height = (decoded.info.height + scale - 1u) / scale;
+        const size_t pixel_count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
         verification.passed = verification.width == decoded.info.width &&
                               verification.height == decoded.info.height &&
-                              verification.gain_map_width > 0;
+                              verification.gain_map_width == expected_map_width &&
+                              verification.gain_map_height == expected_map_height &&
+                              verification.gain_map_channels == 3 &&
+                              decoded.rgb.size() == pixel_count * 3u &&
+                              reconstructed.rec2020_pq_rgb.size() == pixel_count * 3u;
+        if (verification.passed && pixel_count) {
+          // Both rasters use canonical Rec.2020 PQ16; LUT values are nits.
+          // Match the existing reconstruction metrics (linear, 1 = 203 nits).
+          const size_t samples = std::min<size_t>(pixel_count, 4096u);
+          const auto& nits = pq_nits_lut();
+          double squared = 0.0;
+          double maximum = 0.0;
+          for (size_t sample = 0; sample < samples; ++sample) {
+            const size_t pixel = sample * pixel_count / samples;
+            for (size_t channel = 0; channel < 3; ++channel) {
+              const size_t i = pixel * 3u + channel;
+              const double error = std::abs(nits[decoded.rgb[i]] -
+                  nits[reconstructed.rec2020_pq_rgb[i]]) / 203.0;
+              squared += error * error;
+              maximum = std::max(maximum, error);
+            }
+          }
+          verification.reconstruction_rmse = std::sqrt(squared / (samples * 3u));
+          verification.reconstruction_max_abs_error = maximum;
+          verification.checks.push_back("linear reconstruction error measured over " +
+              std::to_string(samples) + " sampled pixels (1.0 = 203 nits)");
+        }
         verification.checks.push_back("JPEG XL jhgm bundle and ISO metadata parsed");
+        verification.checks.push_back("gain-map dimensions and RGB channels checked");
         verification.checks.push_back("gain-map HDR reconstruction completed");
         timings.verification_ms = elapsed_ms(verification_start);
       } else {
@@ -5089,10 +5207,6 @@ ConversionResult convert(const std::filesystem::path& input,
                             decoded.gain_map_formula_max_error <= (2.5 / 65535.0);
     }
     if (!verification.passed) throw std::runtime_error("output verification failed: " + verification_json(verification).dump());
-    if (std::filesystem::exists(output)) std::filesystem::remove(output);
-    std::filesystem::rename(temp, output);
-    report(progress, 100, "Verified output committed atomically");
-    timings.total_ms = elapsed_ms(total_start);
     ConversionResult result;
     result.success = true;
     result.output_path = output;
@@ -5101,10 +5215,14 @@ ConversionResult convert(const std::filesystem::path& input,
     result.sha256 = sha256(bytes);
     result.verification = std::move(verification);
     result.timings = timings;
+    check_cancel(cancel);
+    if (!transaction.commit(options.overwrite, commit_error)) {
+      throw std::runtime_error(commit_error);
+    }
+    result.timings.total_ms = elapsed_ms(total_start);
+    try { report(progress, 100, "Verified output committed atomically"); } catch (...) {}
     return result;
   } catch (...) {
-    std::error_code ec;
-    std::filesystem::remove(temp, ec);
     throw;
   }
 }

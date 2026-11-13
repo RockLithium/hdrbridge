@@ -134,10 +134,9 @@ jobs:
           Windows x64 release of HDR Bridge. Use the installer for normal installation and in-place upgrades, or the ZIP for portable use.
 
           ### Changes
-          - Add in-app update checks and verified installer downloads
-          - Show results and HDR diagnostics as each task completes
-          - Unify large Ultra HDR JPEG support across Windows, CLI and Web
-          - Add a version label and refine desktop feedback
+          - Preserve existing files when output replacement fails
+          - Fix Web cancellation while loading an image
+          - Strengthen gain-map verification and automated regression coverage
 
           Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
 

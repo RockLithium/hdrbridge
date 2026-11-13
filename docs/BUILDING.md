@@ -26,6 +26,8 @@ CTest includes a synthetic single-source cache regression covering inspection, r
 
 The root `VERSION` file supplies the native and Web CMake project versions, desktop version label, Windows file-version resource and output Software tag. CTest also checks update metadata, installer integrity and Ultra HDR size arithmetic. These tests do not install an update.
 
+CTest includes output-transaction failure/concurrency checks and generated HDR format round trips. The round-trip fixtures are created at runtime; no private camera images are needed. The Web workflow also runs `node --test web/tests/*.test.mjs` for asynchronous file-read cancellation and stale-result handling.
+
 Native and Web builds share the Ultra HDR configuration in `cmake/PatchUltraHdr.cmake`: 65,500 pixels per axis. Configuration applies the same checked buffer-size arithmetic to the pinned local or fetched libultrahdr source. Available memory can impose a lower practical limit, especially in browsers.
 
 ## Portable package
