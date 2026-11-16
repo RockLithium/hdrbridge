@@ -15,7 +15,7 @@
 #include <jxl/resizable_parallel_runner_cxx.h>
 #include <tiffio.h>
 #include <ultrahdr_api.h>
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__ANDROID__)
 #include <jpeglib.h>
 #include <setjmp.h>
 #endif
@@ -2503,7 +2503,7 @@ GainMapRaster extract_jxl_gainmap(const std::filesystem::path& path,
   return result;
 }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__ANDROID__)
 std::vector<uint16_t> decode_jpeg_rgb16(const uint8_t* bytes, size_t size,
                                         uint32_t& width, uint32_t& height,
                                         std::atomic_bool* cancel) {
@@ -2565,9 +2565,9 @@ std::vector<uint16_t> decode_jpeg_rgb16(const uint8_t* bytes, size_t size,
 GainMapRaster extract_jpeg_gainmap(const std::filesystem::path& path,
                                    std::atomic_bool* cancel,
                                    bool decode_pixels) {
-#ifndef _WIN32
-  (void)path; (void)cancel;
-  throw std::runtime_error("embedded JPEG gain-map extraction requires Windows WIC");
+#if !defined(_WIN32) && !defined(__ANDROID__)
+  (void)path; (void)cancel; (void)decode_pixels;
+  throw std::runtime_error("embedded JPEG gain-map extraction is unavailable on this platform");
 #else
   const auto begin = Clock::now();
   const auto bytes = read_file(path);

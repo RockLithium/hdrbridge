@@ -60,6 +60,7 @@ add_library(hdrbridge_core STATIC
   core/src/orientation.cpp
 )
 target_include_directories(hdrbridge_core PUBLIC core/include PRIVATE "${JXL_INCLUDE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/generated")
+target_include_directories(hdrbridge_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb" "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nanosvg" "${HDRBRIDGE_UHDR_ROOT}/lib/include")
 target_compile_definitions(hdrbridge_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(hdrbridge_core PRIVATE /W4 /permissive- /utf-8)
 target_link_libraries(hdrbridge_core PUBLIC
@@ -70,6 +71,7 @@ target_link_libraries(hdrbridge_core PUBLIC
   uhdr-static
   nlohmann_json::nlohmann_json
   PNG::PNG
+  JPEG::JPEG
   TIFF::TIFF
   lcms2::lcms2
   windowscodecs ole32 propsys shell32 shlwapi
@@ -90,10 +92,30 @@ target_compile_definitions(hdrbridge PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICOD
 target_compile_options(hdrbridge PRIVATE /W4 /permissive- /utf-8)
 target_link_options(hdrbridge PRIVATE /MANIFEST:NO)
 target_link_libraries(hdrbridge PRIVATE hdrbridge_core comctl32 comdlg32 shell32 dwmapi uxtheme d3d11 dxgi d3dcompiler winhttp bcrypt)
+add_custom_command(TARGET hdrbridge POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts" "$<TARGET_FILE_DIR:hdrbridge>/assets/fonts"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/frame-logos" "$<TARGET_FILE_DIR:hdrbridge>/assets/frame-logos")
 
 install(TARGETS hdrbridge RUNTIME DESTINATION .)
 
 if(BUILD_TESTING)
+  add_executable(hdrbridge-frame-caption-tests tests/frame-caption-tests.cpp)
+  target_compile_options(hdrbridge-frame-caption-tests PRIVATE /W4 /permissive- /utf-8)
+  target_link_libraries(hdrbridge-frame-caption-tests PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME photo-frame-camera-captions COMMAND hdrbridge-frame-caption-tests)
+  add_executable(hdrbridge-frame-math-tests tests/frame-math-tests.cpp)
+  target_include_directories(hdrbridge-frame-math-tests PRIVATE core/src)
+  target_compile_options(hdrbridge-frame-math-tests PRIVATE /W4 /permissive- /utf-8)
+  target_link_libraries(hdrbridge-frame-math-tests PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME photo-frame-math-and-exif COMMAND hdrbridge-frame-math-tests)
+  add_executable(hdrbridge-frame-integration-tests tests/frame-integration-tests.cpp)
+  target_include_directories(hdrbridge-frame-integration-tests PRIVATE core/src)
+  target_compile_options(hdrbridge-frame-integration-tests PRIVATE /W4 /permissive- /utf-8)
+  target_compile_definitions(hdrbridge-frame-integration-tests PRIVATE HDRBRIDGE_FRAME_FONT="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/Roboto-Bold.ttf")
+  target_link_libraries(hdrbridge-frame-integration-tests PRIVATE hdrbridge_core PNG::PNG)
+  add_test(NAME photo-frame-hdr-roundtrips COMMAND hdrbridge-frame-integration-tests)
   add_executable(hdrbridge-orientation-tests tests/orientation-tests.cpp core/src/orientation.cpp)
   target_include_directories(hdrbridge-orientation-tests PRIVATE core/src)
   target_compile_definitions(hdrbridge-orientation-tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -144,4 +166,10 @@ if(BUILD_TESTING)
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(hdrbridge-preview-ui-smoke PRIVATE /W4 /permissive- /utf-8)
   target_link_libraries(hdrbridge-preview-ui-smoke PRIVATE user32)
+endif()
+
+if(BUILD_TESTING)
+  add_executable(hdrbridge-uhdr-exif-tests tests/uhdr-exif-tests.cpp)
+  target_include_directories(hdrbridge-uhdr-exif-tests PRIVATE core/src)
+  add_test(NAME uhdr-exif-metadata COMMAND hdrbridge-uhdr-exif-tests)
 endif()

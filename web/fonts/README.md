@@ -1,3 +1,3 @@
 # Web fonts
 
-No font binary is bundled. The Web UI uses the font-family order established by the supplied reference pages and falls back to locally available sans-serif or monospace fonts.
+No font binaries are bundled in the repository. The Web UI loads `Ubuntu` and `Ubuntu Condensed` from Google Fonts and falls back to `PingFang SC` and the system `sans-serif` font.

@@ -1,0 +1,106 @@
+name: Android build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - 'core/**'
+      - 'cmake/**'
+      - 'VERSION'
+      - 'LICENSE'
+      - 'assets/fonts/**'
+      - 'assets/frame-logos/**'
+      - 'third_party/stb/**'
+      - 'third_party/nanosvg/**'
+      - '.github/workflows/android-build.yml'
+      - 'scripts/build-android.ps1'
+      - 'scripts/bootstrap-vcpkg-local.ps1'
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'core/**'
+      - 'cmake/**'
+      - 'VERSION'
+      - 'LICENSE'
+      - 'assets/fonts/**'
+      - 'assets/frame-logos/**'
+      - 'third_party/stb/**'
+      - 'third_party/nanosvg/**'
+      - '.github/workflows/android-build.yml'
+      - 'scripts/build-android.ps1'
+      - 'scripts/bootstrap-vcpkg-local.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: windows-latest
+    env:
+      VCPKG_DOWNLOADS: ${{ github.workspace }}\.tools\vcpkg-downloads
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\.tools\vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject private Android payloads
+        shell: pwsh
+        run: |
+          $allowedImage = 'android/app/src/main/res/drawable-nodpi/hdrbridge_logo.png'
+          $tracked = @(git ls-files -- android)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list tracked Android files.' }
+          $forbidden = @($tracked | Where-Object {
+            $_ -match '(?i)(^|/)(private-fixtures|private-inputs|test-output|manual-test-assets)(/|$)' -or
+            ($_ -match '(?i)\.(png|jpe?g|gif|webp|bmp|tiff?|avif|heics?|heif|hif|jxl|jxr|dng|raw|svg|ico|icns|psd|exr|hdr)$' -and $_ -cne $allowedImage)
+          })
+          if ($forbidden.Count -gt 0) {
+            $forbidden | ForEach-Object { Write-Error "Forbidden tracked Android payload: $_" -ErrorAction Continue }
+            throw 'Private Android payload check failed.'
+          }
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+
+      - name: Install pinned Android SDK components
+        shell: pwsh
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;30.0.16248370' 'cmake;3.31.6'
+          if ($LASTEXITCODE -ne 0) { throw 'Android SDK component installation failed.' }
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Restore vcpkg caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/vcpkg_installed
+            .tools/vcpkg-downloads
+            .tools/vcpkg-binary-cache
+          key: android-vcpkg-${{ runner.os }}-${{ runner.arch }}-ndk30.0.16248370-${{ hashFiles('android/vcpkg.json', 'android/triplets/**', 'android/ports-overlay/**', 'ports-overlay/**', 'android/scripts/build-deps.ps1', 'scripts/bootstrap-vcpkg-local.ps1') }}
+
+      - name: Bootstrap pinned vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DOWNLOADS, $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          .\scripts\bootstrap-vcpkg-local.ps1
+
+      - name: Build, test, and verify Android preview
+        shell: pwsh
+        run: .\scripts\build-android.ps1 -Sdk $env:ANDROID_HOME -Java $env:JAVA_HOME
+
+      - name: Upload development-signed APK and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: HDRBridge-Android-preview
+          path: |
+            android/dist/*.apk
+            android/dist/*.txt
+          if-no-files-found: error

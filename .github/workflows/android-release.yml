@@ -1,0 +1,150 @@
+name: Android release
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || inputs.release_tag }}
+      GH_TOKEN: ${{ github.token }}
+      VCPKG_DOWNLOADS: ${{ github.workspace }}\.tools\vcpkg-downloads
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\.tools\vcpkg-binary-cache
+    steps:
+      - name: Check signing credentials
+        id: credentials
+        shell: pwsh
+        env:
+          RELEASE_KEY: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          RELEASE_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          $names = 'RELEASE_KEY','RELEASE_STORE_PASSWORD','RELEASE_ALIAS','RELEASE_KEY_PASSWORD'
+          $missing = @($names | Where-Object { [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($_)) })
+          if ($missing.Count) {
+            'available=false' >> $env:GITHUB_OUTPUT
+            'Android release skipped: signing credentials are not configured.' >> $env:GITHUB_STEP_SUMMARY
+          } else { 'available=true' >> $env:GITHUB_OUTPUT }
+
+      - name: Validate published stable release
+        if: steps.credentials.outputs.available == 'true'
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw 'Invalid release tag.' }
+          $data = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $data.draft -or $data.prerelease -or $data.tag_name -cne $env:RELEASE_TAG) { throw 'A published stable release is required.' }
+
+      - uses: actions/checkout@v4
+        if: steps.credentials.outputs.available == 'true'
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Verify release version
+        if: steps.credentials.outputs.available == 'true'
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ("v$version" -cne $env:RELEASE_TAG) { throw 'Release tag does not match VERSION.' }
+
+      - uses: actions/setup-java@v4
+        if: steps.credentials.outputs.available == 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        if: steps.credentials.outputs.available == 'true'
+        with:
+          packages: 'platform-tools'
+      - name: Install pinned Android SDK components
+        if: steps.credentials.outputs.available == 'true'
+        shell: pwsh
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;30.0.16248370' 'cmake;3.31.6'
+          if ($LASTEXITCODE -ne 0) { throw 'Android SDK component installation failed.' }
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.credentials.outputs.available == 'true'
+      - uses: actions/cache@v4
+        if: steps.credentials.outputs.available == 'true'
+        with:
+          path: |
+            android/vcpkg_installed
+            .tools/vcpkg-downloads
+            .tools/vcpkg-binary-cache
+          key: android-vcpkg-${{ runner.os }}-${{ runner.arch }}-ndk30.0.16248370-${{ hashFiles('android/vcpkg.json', 'android/triplets/**', 'android/ports-overlay/**', 'ports-overlay/**', 'android/scripts/build-deps.ps1', 'scripts/bootstrap-vcpkg-local.ps1') }}
+      - name: Bootstrap pinned vcpkg
+        if: steps.credentials.outputs.available == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DOWNLOADS, $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          .\scripts\bootstrap-vcpkg-local.ps1
+
+      - name: Build signed release
+        if: steps.credentials.outputs.available == 'true'
+        shell: pwsh
+        env:
+          RELEASE_KEY: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          RELEASE_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'hdrbridge-release-signing'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          try {
+            $releaseKey = Join-Path $dir 'release.keystore'
+            [IO.File]::WriteAllBytes($releaseKey, [Convert]::FromBase64String($env:RELEASE_KEY))
+            function Escape-Property([string]$value) {
+              $builder = [Text.StringBuilder]::new()
+              foreach ($c in $value.ToCharArray()) { [void]$builder.Append(('\u{0:x4}' -f [int]$c)) }
+              return $builder.ToString()
+            }
+            $properties = @{
+              storeFile = $releaseKey.Replace('\','/'); storePassword = $env:RELEASE_STORE_PASSWORD
+              keyAlias = $env:RELEASE_ALIAS; keyPassword = $env:RELEASE_KEY_PASSWORD
+            }
+            $path = Join-Path $dir 'release.properties'
+            $lines = foreach ($entry in $properties.GetEnumerator()) { $entry.Key + '=' + (Escape-Property $entry.Value) }
+            [IO.File]::WriteAllLines($path, [string[]]$lines, [Text.Encoding]::ASCII)
+            .\android\scripts\build.ps1 -Sdk $env:ANDROID_HOME -Java $env:JAVA_HOME -Configuration Release -SigningProperties $path
+            if ($LASTEXITCODE -ne 0) { throw 'Android release build failed.' }
+          } finally {
+            if (Test-Path -LiteralPath $dir) {
+              $tempRoot = (Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path.TrimEnd('\') + '\'
+              $target = (Resolve-Path -LiteralPath $dir).Path
+              if (-not $target.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                  ((Get-Item -LiteralPath $target -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'Refusing to clean an unexpected signing directory.'
+              }
+              Remove-Item -LiteralPath $target -Recurse -Force
+            }
+          }
+
+      - name: Publish Android release assets
+        if: steps.credentials.outputs.available == 'true'
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          $apk = "android/dist/HDRBridge-v$version-Android-arm64.apk"
+          if (-not (Test-Path -LiteralPath $apk -PathType Leaf)) { throw 'Signed release APK missing.' }
+          $hash = (Get-FileHash -LiteralPath $apk -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sums = 'android/dist/SHA256SUMS-Android.txt'
+          [IO.File]::WriteAllText((Join-Path $pwd $sums), "$hash  $([IO.Path]::GetFileName($apk))`n", [Text.Encoding]::ASCII)
+          gh release upload $env:RELEASE_TAG $apk $sums --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Android release asset upload failed.' }

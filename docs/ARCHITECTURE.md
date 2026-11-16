@@ -1,22 +1,27 @@
 # Architecture
 
-HDR Bridge has three independent layers:
+HDR Bridge has a shared core and independent platform interfaces:
 
 ```text
 desktop/       native Windows UI
 core/          C++ HDR inspection, reconstruction, conversion and verification
 web/           browser UI, Worker and WASM adapters
+android/       native Android UI, JNI and platform adapters
 ```
 
-The desktop UI calls the C++ core directly. Full-resolution pixels never pass through a JavaScript or 8-bit UI buffer. The developer CLI exposes the same inspection and conversion operations as JSON for regression tests.
+The desktop UI calls the C++ core directly without an intermediate 8-bit UI buffer. The developer CLI exposes the same inspection and conversion operations as JSON for regression tests.
 
-The Web application does not move or wrap the desktop UI. It uses the same conversion model through a narrow portable C/WASM boundary:
+Photo Frame uses the canonical HDR raster to compose a border, camera logo and caption, then encodes Ultra HDR JPEG. Desktop and Android share the compositor, font rasterizer and SVG renderer. Fonts and logo sources are packaged as runtime assets.
+
+The Web UI calls the portable core through a C/WASM boundary:
 
 ```text
 Web UI -> Web Worker -> codec adapter -> Rec.2020/PQ RGB16 working image -> encoder
 ```
 
 The worker and WebAssembly core are loaded only after the user selects a file. Separate single-threaded and pthread modules are built. A same-origin service worker establishes cross-origin isolation on static hosting when supported; it may reload the page once before user interaction. Isolated browsers use the threaded module, with a single-threaded fallback if isolation or threaded initialization is unavailable.
+
+The native Android application builds the existing C++ core through JNI, independently of the Windows desktop and Web interfaces. Android uses a user-selected document tree for output and an app-private intermediate for conversion; it streams verified results to the document provider. Its HDR preview uses the system decoder and requires Android 14 or later, an HDR display and a supported gain-map image. Update checking, SHA-256 and certificate-pin verification, and `PackageInstaller` handoff run in the Java layer outside the conversion core. The Android app targets ARM64 and Android 8.0 or later. See the [Android guide](../android/README.md) for build and platform details.
 
 ## Core model
 
@@ -30,12 +35,18 @@ Parallel execution preserves the per-pixel formulas, precision and quantization.
 
 Direct PQ, direct HLG, ISO Ultra HDR, Apple Adaptive HDR, gain-map AVIF, gain-map TIFF and gain-map JPEG XL (`jhgm`) assets have separate input adapters. They share color and HDR mathematics only after reconstruction. Camera brand is not used as a transfer-function proxy.
 
-Each output reserves its own temporary sibling file, verifies it, then commits on the same filesystem. Overwriting replaces the existing file without deleting it first; no-overwrite commits refuse an existing target. Failed or cancelled operations before commit preserve the previous target and remove only their own temporary file. Cancellation is checked again immediately before commit.
+For core filesystem outputs, each output reserves its own temporary sibling file, verifies it, then commits on the same filesystem. Overwriting replaces the existing file without deleting it first; no-overwrite commits refuse an existing target. Failed or cancelled operations before commit preserve the previous target and remove only their own temporary file. Cancellation is checked again immediately before commit.
 
-JPEG XL gain-map verification reuses its existing reconstructed raster to check map dimensions and RGB channels and measure linear-light error at up to 4,096 sampled pixels. Extraction verifies the written bytes and image header without another full decode. Synthetic end-to-end tests independently decode exported pixels and check lossless equality or format-specific error tolerances, including orientation, ICC and gain-map cases.
+JPEG XL gain-map verification reuses its existing reconstructed raster to check map dimensions and RGB channels and measure linear-light error at up to 4,096 sampled pixels. Extraction verifies the written bytes and image header without another full decode.
 
-The desktop posts each completed task's verification and timing to Activity immediately; the end-of-batch message contains the counts. Update checking and download run outside the conversion core. A downloaded installer is checked against the Release SHA-256 and checked again before launch; active conversion jobs are allowed to finish before installation.
+## Desktop shell
+
+The desktop posts each completed task's verification and timing to Activity immediately; the end-of-batch message contains the counts. Update checking and download run outside the conversion core. A downloaded installer is checked against the Release SHA-256 and checked again before launch. Updates never interrupt active conversions: if a conversion queue is running, installation waits until you click the version label after the queue finishes.
 
 ## Platform boundaries
 
-HEIF/AVIF, JPEG/JPEG XL, PNG, TIFF, ICC and Ultra HDR processing use portable libraries where practical. Windows JPEG XR uses WIC. The Web build substitutes jxrlib for the container codec while preserving the same FP16 linear scRGB output semantics; Windows WIC compatibility is covered by release regression.
+HEIF/AVIF, JPEG/JPEG XL, PNG, TIFF, ICC and Ultra HDR processing use portable libraries. Windows JPEG XR uses WIC; Android and Web use jxrlib for FP16 linear scRGB encoding. Platform-specific code handles file access, presentation and task scheduling.
+
+## Testing
+
+Synthetic end-to-end tests independently decode exported pixels and check lossless equality or format-specific error tolerances, including orientation, ICC and gain-map cases.

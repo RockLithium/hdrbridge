@@ -1,0 +1,9 @@
+<resources>
+  <color name="app_background">#F4F5F7</color>
+  <color name="button_surface">#FFFFFF</color>
+  <color name="button_text">#202830</color>
+  <color name="tab_selected">#E0EAF4</color>
+  <color name="button_ripple">#334D82AF</color>
+  <color name="list_surface">#FFFFFF</color>
+  <color name="list_border">#B7C1CC</color>
+</resources>

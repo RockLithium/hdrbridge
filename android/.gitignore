@@ -1,0 +1,22 @@
+.gradle/
+.cxx/
+.tools/
+build/
+build-*/
+**/build/
+local.properties
+vcpkg_installed/
+*.apk
+*.aab
+*.keystore
+*.p12
+*.jks
+.local-signing/
+
+# Local logs and test outputs
+*.log
+test-output/
+
+app/src/main/assets/licenses/
+app/src/main/assets/frame-logos/
+!app/src/main/res/drawable-nodpi/hdrbridge_logo.png

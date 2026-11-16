@@ -21,13 +21,16 @@ Direct HDR classification does not require native CICP/NCLX. The resolver may ob
 
 ## Output preservation
 
-| Output             | Preserved or generated                                       | Current boundary                                                                        |
-| ------------------ | ------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
-| Ultra HDR JPEG     | normalized Exif, SDR-base ICC and ISO gain-map metadata      | public libultrahdr has no arbitrary source-XMP setter; stale gain-map XMP is not copied |
-| HDR PNG            | normalized eXIf, descriptive XMP, target ICC and cICP        | source color signaling is replaced by the selected output space                         |
-| Direct HDR TIFF    | XMP, HDR-aware CICP ICC, Orientation 1 and Software tag       | arbitrary source Exif IFD cloning is not implemented                                    |
-| JPEG XL            | normalized Exif/XMP boxes and native PQ/HLG structured color | generated output correctly reports no ICC when structured color is used                 |
-| AVIF               | normalized Exif/XMP items plus target NCLX                   | conflicting source ICC/color signaling is not copied                                    |
-| FP16 scRGB JPEG XR | WIC pixel format and codec properties                        | current WIC encoder does not clone Exif/XMP/ICC payloads                                |
+| Output                      | Preserved or generated                                                            | Current boundary                                                                        |
+| --------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Ultra HDR JPEG              | normalized Exif, SDR-base ICC and ISO gain-map metadata                           | public libultrahdr has no arbitrary source-XMP setter; stale gain-map XMP is not copied |
+| HDR PNG                     | normalized eXIf, XMP, cICP and (for PQ) target ICC                                | HLG outputs omit ICC; source color signaling is replaced by the selected output space   |
+| Direct HDR TIFF             | XMP, HDR-aware CICP ICC, Orientation 1 and Software tag                           | arbitrary source EXIF IFD cloning is not implemented                                    |
+| JPEG XL                     | normalized EXIF/XMP boxes and native PQ/HLG structured color (direct mode)        | direct output uses structured color without ICC; gain-map output currently omits EXIF/XMP boxes |
+| AVIF                        | normalized Exif/XMP items plus target NCLX                                        | conflicting source ICC/color signaling is not copied                                    |
+| FP16 scRGB JPEG XR          | WIC pixel format and codec properties                                             | current WIC encoder does not clone Exif/XMP/ICC payloads                                |
+| Photo Frame UHDR JPEG | generated UHDR gain-map metadata; source EXIF may be read for caption composition | source EXIF/XMP are not copied; Lossless, EXIF and XMP are fixed off                    |
 
 Apple, gain-map-container and Ultra HDR relationship metadata is input reconstruction data. It is removed after reconstruction when it would misdescribe a new direct-HDR output. Camera Exif is retained where the destination encoder supports it.
+
+Converted outputs omit vendor MakerNote (`0x927C`) entries. Other supported camera, lens, exposure, date, GPS and copyright fields are retained, with Orientation normalized to 1. This output policy is shared by Windows, Web and Android; it does not change source files or Inspector metadata. Exif that cannot be parsed safely is omitted rather than copied unchecked.

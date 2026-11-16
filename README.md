@@ -1,12 +1,12 @@
 # HDR Bridge
 
-HDR Bridge is a local HDR still-image converter for Windows. It understands both direct PQ/HLG images and gain-map formats, normalizes them to a high-precision Rec.2020/PQ RGB16 working image, then writes formats suited to sharing, video, editing, or compact delivery. HDR reconstruction and color transforms are calculated in linear light.
+HDR Bridge is a local HDR still-image converter for Windows, Android and the Web. It understands both direct PQ/HLG images and gain-map formats, normalizes them to a high-precision Rec.2020/PQ RGB16 working image, then writes formats suited to sharing, video, editing, or compact delivery. HDR reconstruction and color transforms are calculated in linear light.
 
-The desktop application does not upload images and does not present an SDR simulation as an HDR preview.
+Files are processed on the device. HDR previews use native display paths on supported systems.
 
-## Windows application
+## Supported inputs
 
-Supported input families include:
+All platforms share the C++ core and support these principal HDR input families:
 
 - direct PQ or HLG HEIF/HIF, AVIF, PNG, TIFF and JPEG XL;
 - Apple Adaptive HDR HEIC and JPEG;
@@ -14,6 +14,8 @@ Supported input families include:
 - gain-map AVIF and gain-map TIFF;
 - gain-map JPEG XL (`jhgm`);
 - FP16 scRGB JPEG XR.
+
+## Windows application
 
 Available outputs:
 
@@ -25,32 +27,37 @@ Available outputs:
 - FP16 linear scRGB JPEG XR;
 - 10-bit 4:4:4 HDR AVIF in PQ or HLG;
 - RGB gain-map AVIF;
-- embedded gain-map extraction to the original payload where possible, or PNG, TIFF and JPEG images.
+- embedded gain-map extraction to the original payload where possible, or PNG, TIFF and JPEG images;
+- Photo Frame: Ultra HDR JPEG with a blurred border, camera logo and caption.
 
-The desktop order reflects observed interoperability: Ultra HDR JPEG, HDR PNG, HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and AVIF, followed by the Gain Map inspection/export tool. Direct HDR TIFF uses an HDR-aware CICP ICC and an application-compatible large-strip layout. Deflate compression is enabled by default and may be disabled.
+See [output formats](docs/OUTPUT_FORMATS.md) for controls and defaults, and the [compatibility matrix](docs/COMPATIBILITY_MATRIX.md) for application support.
 
 The Inspector reports the encoded source representation, metadata, gain-map components and reconstructed HDR separately. The task queue is sequential so large images do not accumulate in memory; tasks retain independent settings, status and progress, and a bad or non-HDR file does not stop the rest of the queue.
 
 Download the Windows x64 installer or portable ZIP from [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases). The installer supports in-place upgrades. Both builds are unsigned; Windows may show a SmartScreen or unknown-publisher warning.
 
-The desktop checks for updates in the background; click the version beside the title to check manually. It asks before downloading the installer to a temporary folder, verifies SHA-256, then asks before opening the Windows installation wizard and administrator/UAC confirmation. Running conversions are not interrupted; if a download finishes during conversion, click the version after the queue stops to continue. The installer upgrades an installed copy. Updating from a portable copy starts an installation (Program Files by default) rather than replacing that portable folder.
+The desktop checks for updates in the background; click the version beside the title to check manually. Updates are downloaded and verified before opening the installer, with confirmation before download and installation. Updates never interrupt active conversions: if a conversion queue is running, installation waits until you click the version label after the queue finishes. Updating from a portable copy runs the standard installer rather than replacing the portable folder in place.
+
+## Web application
+
+The browser version lives in [`web/`](web/) and is built independently from the desktop application. It runs the portable HDR core in a Web Worker and supports the same principal direct-HDR and gain-map input families. Browser outputs are Ultra HDR JPEG, HDR PNG, direct HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and HDR AVIF. JPEG XL and AVIF support direct PQ/HLG and ISO gain-map output. Files remain on the device.
+
+## Android application
+
+The native [Android application](android/README.md) brings the shared C++ core (including Photo Frame) to ARM64 devices running Android 8.0 or later, with a file library, per-task output settings and a sequential conversion queue. Signed release APKs are published on [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases); tap the version beside the title to check for verified Android updates. Native gain-map preview requires Android 14 or later, an HDR display and a format supported by the system decoder. See the Android guide for usage and platform limitations.
 
 ## Build on Windows
 
 Requirements and reproducible build commands are in [docs/BUILDING.md](docs/BUILDING.md). A typical Release build is:
 
 ```powershell
-.\scripts\bootstrap-vcpkg-local.ps1 -Ref ddd110b8a05cda14b8f1b0333a1d80c4fb6f16cd
+.\scripts\bootstrap-vcpkg-local.ps1
 cmake --preset windows-release
 cmake --build --preset windows-release
 ctest --test-dir build-vs -C Release --output-on-failure
 ```
 
 Run `build-vs\bin\Release\hdrbridge.exe`. The CLI and test executables are developer tools and are not included in the normal Windows release archive.
-
-## Web application
-
-The browser version lives in [`web/`](web/) and is built independently from the desktop application. It runs the portable HDR core in a Web Worker and supports the same principal direct-HDR and gain-map input families. Browser outputs are Ultra HDR JPEG, HDR PNG, direct HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and HDR AVIF. JPEG XL and AVIF support direct PQ/HLG and ISO gain-map output. Files remain on the device.
 
 ## Documentation
 
@@ -59,7 +66,7 @@ The browser version lives in [`web/`](web/) and is built independently from the 
 - [Color pipeline](docs/COLOR_PIPELINE.md) — PQ, HLG and gain-map processing
 - [Conversion fidelity](docs/CONVERSION_FIDELITY.md) — fidelity versus lossless encoding
 - [Metadata](docs/METADATA.md) — source inspection and output preservation
-- [Architecture](docs/ARCHITECTURE.md) — desktop/core/Web boundaries
+- [Architecture](docs/ARCHITECTURE.md) — desktop/core/Web/Android boundaries
 
 ## Privacy and fixtures
 

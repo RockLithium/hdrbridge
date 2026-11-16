@@ -6,6 +6,18 @@
 #include "hdr_transfer.h"
 #include "jpeg_probe.h"
 #include "orientation.h"
+#include "exif_output.h"
+#if defined(_WIN32) || defined(__ANDROID__)
+#include "frame_composite.h"
+#include "frame_exif.h"
+#include <ultrahdr/ultrahdrcommon.h>
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+#define NANOSVG_IMPLEMENTATION
+#include "nanosvg.h"
+#define NANOSVGRAST_IMPLEMENTATION
+#include "nanosvgrast.h"
+#endif
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -16,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cwctype>
 #include <cmath>
@@ -50,10 +63,13 @@
 #include <tiffio.h>
 #include <ultrahdr_api.h>
 #include <zlib.h>
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__ANDROID__)
 extern "C" {
 #include <jpeglib.h>
 }
+#endif
+#ifdef __ANDROID__
+#include <sys/stat.h>
 #endif
 #ifndef _WIN32
 extern "C" {
@@ -462,15 +478,17 @@ bool starts_tiff_header(const uint8_t* data, size_t size) {
 
 std::vector<uint8_t> exif_tiff_payload(const std::vector<uint8_t>& exif) {
   if (exif.empty()) return {};
-  if (starts_tiff_header(exif.data(), exif.size())) return exif;
+  if (starts_tiff_header(exif.data(), exif.size())) { auto result = exif; return metadata::prepare_output_exif(result) ? result : std::vector<uint8_t>{}; }
   if (exif.size() >= 6 && std::memcmp(exif.data(), "Exif\0\0", 6) == 0 &&
       starts_tiff_header(exif.data() + 6, exif.size() - 6)) {
-    return {exif.begin() + 6, exif.end()};
+    std::vector<uint8_t> result(exif.begin() + 6, exif.end());
+    return metadata::prepare_output_exif(result) ? result : std::vector<uint8_t>{};
   }
   if (exif.size() >= 4) {
     const size_t offset = 4u + be32(exif.data());
     if (offset < exif.size() && starts_tiff_header(exif.data() + offset, exif.size() - offset)) {
-      return {exif.begin() + static_cast<std::ptrdiff_t>(offset), exif.end()};
+      std::vector<uint8_t> result(exif.begin() + static_cast<std::ptrdiff_t>(offset), exif.end());
+      return metadata::prepare_output_exif(result) ? result : std::vector<uint8_t>{};
     }
   }
   return {};
@@ -2011,9 +2029,7 @@ std::vector<uint8_t> encode_png(const DecodedImage& decoded, const ConversionOpt
     png_set_text(png, info, &text, 1);
   }
   png_write_info(png, info);
-#if defined(_WIN32) || defined(__EMSCRIPTEN__)
-  png_set_swap(png);
-#endif
+  if constexpr (std::endian::native == std::endian::little) png_set_swap(png);
   if (rgba) {
     std::vector<uint16_t> row(static_cast<size_t>(decoded.info.width) * 4u);
     for (uint32_t y = 0; y < decoded.info.height; ++y) {
@@ -2060,9 +2076,7 @@ std::vector<uint8_t> encode_gainmap_png(const gainmap::GainMapRaster& raster,
                PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
   png_set_compression_level(png, 4);
   png_write_info(png, info);
-#if defined(_WIN32) || defined(__EMSCRIPTEN__)
-  png_set_swap(png);
-#endif
+  if constexpr (std::endian::native == std::endian::little) png_set_swap(png);
   std::vector<uint16_t> plane;
   if (!rgb) {
     plane.resize(static_cast<size_t>(raster.width) * raster.height);
@@ -2119,7 +2133,7 @@ void encode_gainmap_tiff(const std::filesystem::path& path,
 
 std::vector<uint8_t> encode_gainmap_jpeg(const gainmap::GainMapRaster& raster,
                                          uint32_t, int quality) {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ANDROID__)
   (void)raster; (void)quality;
   throw std::runtime_error("gain-map JPEG export is unavailable on this platform");
 #else
@@ -2217,9 +2231,7 @@ Verification decode_png(const std::vector<uint8_t>& bytes,
   v.pixel_format = rgba ? "PNG RGBA16" :
                    color_type == PNG_COLOR_TYPE_RGB ? "PNG RGB16" :
                                                       "unexpected PNG color type";
-#if defined(_WIN32) || defined(__EMSCRIPTEN__)
-  png_set_swap(png);
-#endif
+  if constexpr (std::endian::native == std::endian::little) png_set_swap(png);
   png_read_update_info(png, info);
   const size_t pixel_count = static_cast<size_t>(width) * height;
   std::vector<uint16_t> pixels(pixel_count * 3u);
@@ -2435,9 +2447,7 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
   }
   const bool rgba = color_type == PNG_COLOR_TYPE_RGB_ALPHA;
   decoded.info.pixel_format = rgba ? "RGBA16 integer (straight alpha)" : "RGB16 integer";
-#if defined(_WIN32) || defined(__EMSCRIPTEN__)
-  png_set_swap(png);
-#endif
+  if constexpr (std::endian::native == std::endian::little) png_set_swap(png);
   png_read_update_info(png, info);
   const size_t pixel_count = static_cast<size_t>(width) * height;
   decoded.rgb.resize(pixel_count * 3u);
@@ -3951,14 +3961,23 @@ Verification decode_ultrahdr(const std::vector<uint8_t>& bytes,
   }
   if (expected_stats) attach_hdr_stats(v, *expected_stats);
   v.checks.push_back("libultrahdr detected gain-map JPEG");
+#ifdef __ANDROID__
+  v.checks.push_back(base_width == v.width && base_height == v.height
+      ? "SDR base JPEG header has full-size dimensions" : "SDR base dimensions failed");
+  v.checks.push_back(v.gain_map_channels == 3
+      ? "RGB gain map confirmed by JPEG SOF; channel difference is not measured by this adapter"
+      : v.gain_map_channels == 1 ? "monochrome gain map confirmed by JPEG SOF"
+                                 : "gain-map JPEG channel count unavailable");
+#else
   v.checks.push_back(base_width == v.width && base_height == v.height ? "ordinary WIC JPEG decoder opened full-size SDR base" : "SDR base decode/dimensions failed");
-  v.checks.push_back(gain_width > 0 && gain_height > 0 ? "gain-map dimensions present" : "gain map missing");
   v.checks.push_back(v.gain_map_channels == 3
       ? (v.gain_map_channel_difference_max > 0.0
           ? "RGB gain map contains distinct per-channel samples"
           : "RGB gain map channels decode identically")
       : v.gain_map_channels == 1 ? "monochrome gain map confirmed by JPEG SOF"
                                  : "gain-map JPEG channel count unavailable");
+#endif
+  v.checks.push_back(gain_width > 0 && gain_height > 0 ? "gain-map dimensions present" : "gain map missing");
   v.checks.push_back(metadata ? "ISO gain-map metadata parsed" : "gain-map metadata missing");
   if (expected_stats && metadata) {
     const double expected_capacity = expected_stats->chosen_target_nits / 203.0;
@@ -4375,6 +4394,16 @@ SourceRevision source_revision(const std::filesystem::path& path) {
   // The Web API compares staged bytes and explicitly invalidates replacements.
   (void)path;
   result.valid = true;
+#elif defined(__ANDROID__)
+  struct stat info{};
+  if (stat(path.c_str(), &info) == 0) {
+    result.volume = static_cast<uint64_t>(info.st_dev);
+    const auto inode = static_cast<uint64_t>(info.st_ino);
+    std::memcpy(result.file_id.data(), &inode, sizeof(inode));
+    result.change_time = static_cast<int64_t>(info.st_ctim.tv_sec) * 1000000000ll +
+                         info.st_ctim.tv_nsec;
+    result.valid = result.change_time != 0;
+  }
 #else
   // Reuse requires a reliable revision token on other native platforms too.
   (void)path;
@@ -4633,7 +4662,7 @@ json verification_json(const Verification& v) {
           {"checks", v.checks}};
 }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__ANDROID__)
 struct GainmapJpegError { jpeg_error_mgr base; jmp_buf jump; };
 void gainmap_jpeg_error(j_common_ptr decoder) {
   auto* error = reinterpret_cast<GainmapJpegError*>(decoder->err);
@@ -4685,7 +4714,7 @@ void verify_gainmap_export(const std::filesystem::path& path,
         count != channels || planar != PLANARCONFIG_CONTIG)
       throw std::runtime_error("gain-map TIFF metadata readback mismatch");
   } else if (format == "jpeg") {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__ANDROID__)
     jpeg_decompress_struct decoder{};
     GainmapJpegError error{};
     decoder.err = jpeg_std_error(&error.base);
@@ -4814,6 +4843,10 @@ ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
   }
 }
 
+#if defined(_WIN32) || defined(__ANDROID__)
+#include "frame_pipeline.inc"
+#endif
+
 }  // namespace
 
 void clear_input_cache() {
@@ -4867,6 +4900,11 @@ ConversionResult convert(const std::filesystem::path& input,
                          std::atomic_bool* cancel) {
   const auto total_start = Clock::now();
   TimingDiagnostics timings;
+#if defined(_WIN32) || defined(__ANDROID__)
+  if (options.mode == "photo-frame") {
+    return convert_photo_frame(input, output, options, progress, cancel);
+  }
+#endif
   if (options.mode == "gainmap-extract") {
     return convert_gainmap_extract(input, output, options, progress, cancel);
   }
@@ -5026,14 +5064,22 @@ ConversionResult convert(const std::filesystem::path& input,
       const auto color_start = Clock::now();
       auto half = pq2020_to_scrgb_half(decoded, progress, cancel);
       timings.color_conversion_ms += elapsed_ms(color_start);
+#ifdef __ANDROID__
+      report(progress, 65, "Encoding JPEG XR FP16 scRGB with jxrlib");
+#else
       report(progress, 65, "Encoding JPEG XR FP16 scRGB with Windows WIC");
+#endif
       const auto encode_start = Clock::now();
       encode_jxr(temp, decoded.info.width, decoded.info.height, half, options);
       timings.encode_ms = elapsed_ms(encode_start);
       check_cancel(cancel);
+#ifdef __ANDROID__
+      report(progress, 88, "Checking portable JPEG XR FP16 output");
+#else
       report(progress, 88, "Verifying JPEG XR through WIC FP16 decode");
+#endif
       const auto verification_start = Clock::now();
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) || defined(__ANDROID__)
       // jxrlib's decoder rejects some of its own FP16/alpha streams even though
       // Windows WIC accepts them.  Keep the browser encoder portable and leave
       // the stronger WIC round-trip check to the release regression suite.

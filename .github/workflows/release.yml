@@ -130,15 +130,11 @@ jobs:
           $zipHash  HDRBridge-${{ github.ref_name }}-Windows-x64.zip
           $exeHash  hdrbridge.exe
           "@ | Set-Content -Encoding ASCII "${{ github.workspace }}\dist\SHA256SUMS.txt"
+          $notesSource = Join-Path $env:GITHUB_WORKSPACE ".github/release-notes/${{ github.ref_name }}.md"
+          if (-not (Test-Path -LiteralPath $notesSource -PathType Leaf)) { throw 'Release notes are missing for this tag.' }
+          $notes = (Get-Content -LiteralPath $notesSource -Raw).TrimEnd()
           @"
-          Windows x64 release of HDR Bridge. Use the installer for normal installation and in-place upgrades, or the ZIP for portable use.
-
-          ### Changes
-          - Preserve existing files when output replacement fails
-          - Fix Web cancellation while loading an image
-          - Strengthen gain-map verification and automated regression coverage
-
-          Compatibility remains application-specific; see the measured [compatibility matrix](https://github.com/RockLithium/hdrbridge/blob/${{ github.ref_name }}/docs/COMPATIBILITY_MATRIX.md). The application is unsigned, so Windows may show a SmartScreen or unknown-publisher warning.
+          $notes
 
           ### SHA-256
           - HDRBridge-${{ github.ref_name }}-Windows-x64-Setup.exe: $setupHash
@@ -158,3 +154,12 @@ jobs:
           --repo "${{ github.repository }}"
           --title "HDR Bridge ${{ github.ref_name }}"
           --notes-file "${{ github.workspace }}\release-notes.md"
+
+  android-release:
+    needs: windows-portable
+    permissions:
+      contents: write
+    uses: ./.github/workflows/android-release.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+    secrets: inherit

@@ -20,6 +20,13 @@ if (Test-Path -LiteralPath $Destination) {
 
 Copy-Item -LiteralPath (Join-Path $BuildDirectory "hdrbridge.exe") -Destination $Destination
 Get-ChildItem -LiteralPath $BuildDirectory -Filter "*.dll" | Copy-Item -Destination $Destination
+New-Item -ItemType Directory -Force -Path (Join-Path $Destination 'assets') | Out-Null
+foreach ($resource in 'fonts','frame-logos') {
+    Copy-Item -LiteralPath (Join-Path $repo "assets/$resource") -Destination (Join-Path $Destination 'assets') -Recurse
+}
+Copy-Item -LiteralPath (Join-Path $repo 'third_party/stb/LICENSE') -Destination (Join-Path $Destination 'licenses/stb.txt')
+Copy-Item -LiteralPath (Join-Path $repo 'third_party/nanosvg/LICENSE.txt') -Destination (Join-Path $Destination 'licenses/nanosvg.txt')
+Copy-Item -LiteralPath (Join-Path $repo 'assets/fonts/Roboto-LICENSE.txt') -Destination (Join-Path $Destination 'licenses/Roboto.txt')
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe not found" }
@@ -81,6 +88,7 @@ Primary outputs:
 - RGB gain-map AVIF
 - RGB16 PQ TIFF
 - Embedded Gain Map extraction (original, PNG, TIFF or JPEG)
+- Photo Frame (Ultra HDR JPEG with camera logo and caption)
 
 The application is unsigned. Windows may show a SmartScreen or unknown-
 publisher warning. See docs/COMPATIBILITY_MATRIX.md for measured application

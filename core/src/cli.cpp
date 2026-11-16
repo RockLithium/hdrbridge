@@ -14,6 +14,7 @@ void usage() {
             << "      [--base-quality=0..100] [--gainmap-quality=0..100] [--gainmap-scale=1|2|4]\n"
             << "      [--single-channel-gainmap|--rgb-gainmap] [--no-icc] [--png-icc-name=<description>] [--png-compression=1..9]\n"
             << "      [--tiff-compression=1..9|--tiff-uncompressed] [--diagnostic-icc-only] [--lossy] [--overwrite]\n"
+            << "      [--mode=photo-frame --frame-format=jpeg|png --frame-font=<path> --frame-caption1=<text> --frame-caption2=<text>]\n"
             << "  hdrbridge-cli verify <output> <mode>\n"
             << "  hdrbridge-cli benchmark-cache <input> <output-a> <mode-a> <output-b> <mode-b>\n";
 }
@@ -55,6 +56,10 @@ int main(int argc, char** argv) {
         else if (flag == "--rgb-gainmap") options.multi_channel_gainmap = true;
         else if (flag == "--no-icc") options.embed_hdr_icc = false;
         else if (flag.rfind("--mode=", 0) == 0) options.mode = flag.substr(7);
+        else if (flag.rfind("--frame-format=", 0) == 0) options.frame_format = flag.substr(15);
+        else if (flag.rfind("--frame-font=", 0) == 0) options.frame_font_path = flag.substr(13);
+        else if (flag.rfind("--frame-caption1=", 0) == 0) options.frame_caption1 = flag.substr(17);
+        else if (flag.rfind("--frame-caption2=", 0) == 0) options.frame_caption2 = flag.substr(17);
         else if (flag.rfind("--gainmap-format=", 0) == 0) options.gainmap_export_format = flag.substr(17);
         else if (flag.rfind("--gamut=", 0) == 0) options.output_gamut = flag.substr(8);
         else if (flag.rfind("--transfer=", 0) == 0) options.output_transfer = flag.substr(11);

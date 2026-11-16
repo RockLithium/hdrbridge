@@ -1,10 +1,10 @@
 # Output formats
 
-The desktop UI orders formats by intended use. Compression controls do not change the transfer/gamut mathematics described below.
+Compression controls affect encoding size and quality. Gamut and transfer settings determine the target color representation.
 
 ## Ultra HDR JPEG
 
-An SDR JPEG base plus ISO gain map for sharing, Web and mobile use. Faithful/Auto measures the reconstructed source peak. Gain-map resolution is 1/4, 1/2 (default) or full; channels are mono (default) or true per-channel RGB. Base and gain-map JPEG quality remain independently controlled. Ultra HDR is backward compatible with ordinary JPEG readers, which show only the SDR base. It is not a lossless HDR master format.
+An SDR JPEG base plus ISO gain map for sharing, Web and mobile use. Faithful/Auto measures the reconstructed source peak. Gain-map resolution is 1/4, 1/2 (default) or full; channels are mono (default) or true per-channel RGB. The quality slider controls both JPEG encoders. Ordinary JPEG readers display the SDR base. Ultra HDR is not a lossless HDR master format.
 
 ## HDR PNG
 
@@ -30,6 +30,12 @@ Linear scRGB FP16, encoded through Windows WIC, with 1.0 representing 80 nits. I
 
 Exports the embedded gain-map image without reconstructing the HDR master. Original is the default: JPEG keeps its compressed scan data without re-encoding while removing parent-container metadata, JPEG XL is copied byte-for-byte, TIFF remains TIFF, and auxiliary AVIF/HEIC items that are not independently usable fall back to lossless PNG. PNG and TIFF preserve decoded 16-bit samples; JPEG is an optional lossy 8-bit export. A three-channel gain map remains one RGB image; a mono map remains single-channel.
 
+## Photo Frame
+
+Adds a blurred border, camera logo and caption to an HDR image and exports Ultra HDR JPEG. Defaults are Display P3, a full-resolution RGB gain map and JPEG quality 95. Gamut (Rec.709 or Display P3), peak, gain-map resolution, channels and quality are configurable.
+
+The caption uses source EXIF. A matching camera logo replaces the manufacturer name, and repeated brand prefixes are removed from the model; otherwise only the model is shown. Missing fields and their units are omitted. Source EXIF/XMP are not copied. Lossless, EXIF and XMP controls are fixed off; the encoder generates the new HDR gain-map metadata.
+
 ## Naming and output safety
 
-The format controls the extension. Output defaults beside the source, with an optional persistent custom folder, editable base name/suffix, auto-numbering or explicit overwrite. Conversion writes and verifies a temporary file before committing the final path. Auto-numbering is resolved immediately before each queued task starts, so duplicate queue entries and reruns cannot collide with outputs produced earlier in the same or a previous run. The source file itself is never a valid overwrite target.
+The format controls the extension. On Windows, output defaults beside the source with an optional persistent custom folder, editable base name/suffix, auto-numbering or explicit overwrite; Android writes to a user-selected document folder with auto-numbering, and Web downloads the converted file. Local file outputs write and verify a temporary file before committing the final path. Auto-numbering is resolved immediately before each queued task starts, so duplicate queue entries and reruns cannot collide with outputs produced earlier in the same or a previous run. The source file itself is never a valid overwrite target.

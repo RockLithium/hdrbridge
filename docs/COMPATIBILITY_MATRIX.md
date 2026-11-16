@@ -1,4 +1,4 @@
-# HDR Bridge final compatibility matrix
+# HDR Bridge compatibility matrix
 
 Updated: 2026-08-13. This table records observed application behavior only.
 Standards conformance, successful local decoding, or nominal HDR signaling is not treated as application compatibility. Untested combinations remain `NT`.
@@ -56,7 +56,6 @@ The desktop output order remains purpose-based:
 4. Master — JPEG XL
 5. Windows — FP16 scRGB JPEG XR
 6. Compact — AVIF
-7. Experimental — JPEG XR RGB10
 
 Rec.2020 is the Video/NLE default. Display P3 is a normal color-space option for both PQ and HLG where implemented. FP16 scRGB JXR remains linear scRGB and Ultra HDR remains SDR base plus gain map; neither uses the PQ/HLG selector.
 

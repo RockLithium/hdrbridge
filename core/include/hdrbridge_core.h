@@ -108,6 +108,12 @@ struct SourceInfo {
 
 struct ConversionOptions {
   std::string mode = "jxl-pq16";
+  // Photo-frame output and typography. Empty captions select EXIF-derived text.
+  std::string frame_format = "jpeg";
+  std::string frame_font_path;
+  std::string frame_logo_path;
+  std::string frame_caption1;
+  std::string frame_caption2;
   bool lossless = true;
   float image_quality = 1.0f;
   int effort = 7;

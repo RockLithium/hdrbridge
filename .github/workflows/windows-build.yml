@@ -49,6 +49,7 @@ jobs:
           $publicBranding = @(
             'assets/branding/hdrbridge-logo-source.png',
             'assets/branding/hdrbridge-logo.png',
+            'android/app/src/main/res/drawable-nodpi/hdrbridge_logo.png',
             'web/public/apple-touch-icon.png',
             'web/public/favicon-32x32.png',
             'web/public/icon-192.png',
