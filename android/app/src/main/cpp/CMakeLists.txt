@@ -56,6 +56,7 @@ else()
 endif()
 add_library(hdrbridge_jni SHARED
   bridge.cpp
+  hdr_preview.cpp
   "${HDRBRIDGE_ROOT}/core/src/hdrbridge_core.cpp"
   "${HDRBRIDGE_ROOT}/core/src/hdr_transfer.cpp"
   "${HDRBRIDGE_ROOT}/core/src/gainmap_adapters.cpp"
@@ -71,7 +72,7 @@ target_link_options(hdrbridge_jni PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,--no
 target_link_libraries(hdrbridge_jni PRIVATE heif avif "${JXL_LIBRARY}" "${JXL_CMS_LIBRARY}"
   "${JXL_THREADS_LIBRARY}" "${HIGHWAY_LIBRARY}" "${BROTLI_enc}" "${BROTLI_dec}" "${BROTLI_common}"
   ${JXR_LIBRARIES} uhdr nlohmann_json::nlohmann_json PNG::PNG JPEG::JPEG TIFF::TIFF
-  LibLZMA::LibLZMA lcms2::lcms2 log android)
+  LibLZMA::LibLZMA lcms2::lcms2 log android EGL GLESv3 dl)
 
 option(HDRBRIDGE_ANDROID_CODEC_TESTS "Include device-only codec equivalence checks" OFF)
 if(HDRBRIDGE_ANDROID_CODEC_TESTS)

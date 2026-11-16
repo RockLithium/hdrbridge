@@ -17,6 +17,23 @@ public class UpdateManifestTest {
   private static String apkName() { return "HDRBridge-v1.2.3-Android-arm64.apk"; }
   private static String apkUrl() { return "https://github.com/RockLithium/hdrbridge/releases/download/v1.2.3/" + apkName(); }
 
+  @Test public void publicChecksumFallbackBindsTagFilenameAndSize() {
+    String url = "https://github.com/RockLithium/hdrbridge/releases/download/v1.2.3/SHA256SUMS-Android.txt";
+    String contents = "a".repeat(64) + "  " + apkName();
+    UpdateManifest.Release r = UpdateManifest.fromReleaseChecksums(url, contents, 1234);
+    assertEquals(apkUrl(), r.apkUrl); assertEquals(1002003L, r.versionCode);
+    assertEquals("a".repeat(64), r.apkSha256); assertEquals(1234, r.apkSize);
+    String[] bad = {url + "?x=1", url.replace("github.com/", "github.com.evil/"),
+        url.replace("v1.2.3", "v01.2.3"), url.replace("v1.2.3", "v1.2.4")};
+    for (String value : bad) try { UpdateManifest.fromReleaseChecksums(value, contents, 1234); fail(value); }
+    catch (IllegalArgumentException expected) {}
+    for (long size : new long[] {0, 512L * 1024 * 1024 + 1}) try {
+      UpdateManifest.fromReleaseChecksums(url, contents, size); fail();
+    } catch (IllegalArgumentException expected) {}
+    try { UpdateManifest.fromReleaseChecksums(url, contents + "\n" + contents, 1234); fail(); }
+    catch (IllegalArgumentException expected) {}
+  }
+
   @Test public void parsesAndroidAssetAndPrefersApiDigest() throws Exception {
     JSONObject json = release(new JSONArray().put(asset(apkName(), apkUrl(), 1234, "sha256:" + "a".repeat(64)))
         .put(asset("HDRBridge-v1.2.3-Windows-x64.zip", "https://example.com/x", 4, null)));

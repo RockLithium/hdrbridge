@@ -1391,12 +1391,12 @@ double forward_pq(double nits) {
 }
 
 const std::array<double, 65536>& pq_nits_lut() {
-  static const std::array<double, 65536> values = [] {
-    std::array<double, 65536> result{};
-    for (size_t i = 0; i < result.size(); ++i) result[i] = inverse_pq(i / 65535.0);
+  static const auto values = [] {
+    auto result = std::make_unique<std::array<double, 65536>>();
+    for (size_t i = 0; i < result->size(); ++i) (*result)[i] = inverse_pq(i / 65535.0);
     return result;
   }();
-  return values;
+  return *values;
 }
 
 struct HdrStats {
@@ -1899,7 +1899,8 @@ DecodedImage resize_linear_hdr_to_fit(const DecodedImage& source,
   output.xmp = source.xmp;
   output.rgb.resize(static_cast<size_t>(output.info.width) * output.info.height * 3u);
   const auto& lut = pq_nits_lut();
-  for (uint32_t y = 0; y < output.info.height; ++y) {
+  parallel_pixel_blocks(output.info.height, [&](size_t begin, size_t end) {
+  for (size_t y = begin; y < end; ++y) {
     const double sy = (y + 0.5) / scale - 0.5;
     const uint32_t y0 = static_cast<uint32_t>(std::clamp(
         static_cast<int64_t>(std::floor(sy)), int64_t{0},
@@ -1927,6 +1928,7 @@ DecodedImage resize_linear_hdr_to_fit(const DecodedImage& source,
       }
     }
   }
+  });
   return output;
 }
 
@@ -3084,12 +3086,13 @@ std::vector<uint16_t> pq2020_to_scrgb_half(const DecodedImage& decoded,
   const size_t pixels = static_cast<size_t>(decoded.info.width) * decoded.info.height;
   std::vector<uint16_t> rgba(pixels * 4u);
   report(progress, 44, "Transforming Rec.2020/PQ to linear FP16 scRGB");
+  const auto& lut = pq_nits_lut();
   parallel_pixel_blocks(pixels, [&](size_t begin, size_t end) {
     check_cancel(cancel);
     for (size_t p = begin; p < end; ++p) {
-      const double r = inverse_pq(decoded.rgb[p * 3u] / 65535.0) / 80.0;
-      const double g = inverse_pq(decoded.rgb[p * 3u + 1u] / 65535.0) / 80.0;
-      const double b = inverse_pq(decoded.rgb[p * 3u + 2u] / 65535.0) / 80.0;
+      const double r = lut[decoded.rgb[p * 3u]] / 80.0;
+      const double g = lut[decoded.rgb[p * 3u + 1u]] / 80.0;
+      const double b = lut[decoded.rgb[p * 3u + 2u]] / 80.0;
       const float sr = static_cast<float>(std::clamp(1.660491 * r - 0.587641 * g - 0.072850 * b, -65504.0, 65504.0));
       const float sg = static_cast<float>(std::clamp(-0.124550 * r + 1.132900 * g - 0.008349 * b, -65504.0, 65504.0));
       const float sb = static_cast<float>(std::clamp(-0.018151 * r - 0.100579 * g + 1.118730 * b, -65504.0, 65504.0));
@@ -3099,6 +3102,61 @@ std::vector<uint16_t> pq2020_to_scrgb_half(const DecodedImage& decoded,
       const float alpha = decoded.alpha.size() == pixels
           ? decoded.alpha[p] / 65535.0f : 1.0f;
       rgba[p * 4u + 3u] = float_to_half(alpha);
+    }
+  });
+  report(progress, 62, "Linear FP16 scRGB transform complete");
+  return rgba;
+}
+
+
+// Resample in linear light and composite straight alpha over black before
+// converting to the display's scRGB representation.
+std::vector<uint16_t> resize_preview_scrgb(const DecodedImage& source,
+                                          uint32_t width, uint32_t height,
+                                          uint32_t max_dimension,
+                                          const ProgressCallback& progress,
+                                          std::atomic_bool* cancel) {
+  const double scale = std::min(max_dimension / static_cast<double>(source.info.width),
+                                max_dimension / static_cast<double>(source.info.height));
+  const size_t count = static_cast<size_t>(width) * height;
+  const bool has_alpha = source.alpha.size() ==
+      static_cast<size_t>(source.info.width) * source.info.height;
+  const auto& lut = pq_nits_lut();
+  std::vector<uint16_t> rgba(count * 4u);
+  report(progress, 44, "Resampling linear HDR preview");
+  parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
+    check_cancel(cancel);
+    for (size_t p = begin; p < end; ++p) {
+      const uint32_t x = static_cast<uint32_t>(p % width);
+      const uint32_t y = static_cast<uint32_t>(p / width);
+      const double sx = (x + 0.5) / scale - 0.5;
+      const double sy = (y + 0.5) / scale - 0.5;
+      const uint32_t x0 = static_cast<uint32_t>(std::clamp(static_cast<int64_t>(std::floor(sx)), int64_t{0}, static_cast<int64_t>(source.info.width - 1u)));
+      const uint32_t y0 = static_cast<uint32_t>(std::clamp(static_cast<int64_t>(std::floor(sy)), int64_t{0}, static_cast<int64_t>(source.info.height - 1u)));
+      const uint32_t x1 = std::min(x0 + 1u, source.info.width - 1u);
+      const uint32_t y1 = std::min(y0 + 1u, source.info.height - 1u);
+      const double fx = std::clamp(sx - std::floor(sx), 0.0, 1.0);
+      const double fy = std::clamp(sy - std::floor(sy), 0.0, 1.0);
+      const size_t samples[] = {static_cast<size_t>(y0) * source.info.width + x0,
+                                static_cast<size_t>(y0) * source.info.width + x1,
+                                static_cast<size_t>(y1) * source.info.width + x0,
+                                static_cast<size_t>(y1) * source.info.width + x1};
+      double rgb[3];
+      for (size_t c = 0; c < 3; ++c) {
+        double v[4];
+        for (size_t i = 0; i < 4; ++i) {
+          v[i] = lut[source.rgb[samples[i] * 3u + c]];
+          if (has_alpha) v[i] *= source.alpha[samples[i]] / 65535.0;
+        }
+        const double top = v[0] + (v[1] - v[0]) * fx;
+        const double bottom = v[2] + (v[3] - v[2]) * fx;
+        rgb[c] = (top + (bottom - top) * fy) / 80.0;
+      }
+      const double r = rgb[0], g = rgb[1], b = rgb[2];
+      rgba[p * 4u] = float_to_half(static_cast<float>(std::clamp(1.660491 * r - 0.587641 * g - 0.072850 * b, -65504.0, 65504.0)));
+      rgba[p * 4u + 1u] = float_to_half(static_cast<float>(std::clamp(-0.124550 * r + 1.132900 * g - 0.008349 * b, -65504.0, 65504.0)));
+      rgba[p * 4u + 2u] = float_to_half(static_cast<float>(std::clamp(-0.018151 * r - 0.100579 * g + 1.118730 * b, -65504.0, 65504.0)));
+      rgba[p * 4u + 3u] = float_to_half(1.0f);
     }
   });
   report(progress, 62, "Linear FP16 scRGB transform complete");
@@ -4872,24 +4930,25 @@ PreviewImage decode_preview(const std::filesystem::path& input,
       decoded->info.asset_kind != "gain-map-hdr") {
     throw std::runtime_error("No HDR data");
   }
-  std::optional<DecodedImage> alpha_composited;
-  const DecodedImage* preview = decoded.get();
-  if (!decoded->alpha.empty()) {
-    alpha_composited = *decoded;
-    composite_straight_alpha_over_black(*alpha_composited);
-    preview = &*alpha_composited;
-  }
-  std::optional<DecodedImage> resized;
-  if (decoded->info.width > max_dimension || decoded->info.height > max_dimension) {
-    resized = resize_linear_hdr_to_fit(*preview, max_dimension);
-    preview = &*resized;
-  }
   PreviewImage result;
-  result.info = preview->info;
-  result.width = preview->info.width;
-  result.height = preview->info.height;
+  result.info = decoded->info;
   result.timings = timings;
-  result.rgba_fp16 = pq2020_to_scrgb_half(*preview, progress, cancel);
+  if (decoded->info.width > max_dimension || decoded->info.height > max_dimension) {
+    const double scale = std::min(max_dimension / static_cast<double>(decoded->info.width),
+                                  max_dimension / static_cast<double>(decoded->info.height));
+    result.info.width = std::max(1u, static_cast<uint32_t>(std::lround(decoded->info.width * scale)));
+    result.info.height = std::max(1u, static_cast<uint32_t>(std::lround(decoded->info.height * scale)));
+    result.rgba_fp16 = resize_preview_scrgb(*decoded, result.info.width, result.info.height,
+                                            max_dimension, progress, cancel);
+  } else if (!decoded->alpha.empty()) {
+    DecodedImage composited = *decoded;
+    composite_straight_alpha_over_black(composited);
+    result.rgba_fp16 = pq2020_to_scrgb_half(composited, progress, cancel);
+  } else {
+    result.rgba_fp16 = pq2020_to_scrgb_half(*decoded, progress, cancel);
+  }
+  result.width = result.info.width;
+  result.height = result.info.height;
   return result;
 }
 

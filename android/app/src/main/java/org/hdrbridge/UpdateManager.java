@@ -32,8 +32,17 @@ final class UpdateManager {
   private static final int CONFIRM_NOTIFICATION = 8742;
   private static final String CONFIRM_CHANNEL = "update_confirmation";
   private static final String API = "https://api.github.com/repos/RockLithium/hdrbridge/releases/latest";
+  private static final String PUBLIC_CHECKSUMS = "https://github.com/RockLithium/hdrbridge/releases/latest/download/SHA256SUMS-Android.txt";
   private UpdateManager(Context c) {
     context = c;
+    try {
+      String cached = preferences().getString("release", "");
+      if (!cached.isEmpty()) {
+        release = UpdateManifest.parseLatest(cached);
+        if (release != null) state = release.versionCode > currentVersionCode() ? State.AVAILABLE : State.UP_TO_DATE;
+        message = state == State.AVAILABLE ? "Update available" : "Up to date";
+      }
+    } catch (Exception ignored) { preferences().edit().remove("release").apply(); }
     sessionId = context.getSharedPreferences("update_private", 0).getInt("session", -1);
     if (sessionId >= 0) {
       recoveredSession = true;
@@ -46,13 +55,28 @@ final class UpdateManager {
   void setListener(Runnable r) { listener = r; }
   private void changed() { Runnable r = listener; if (r != null) r.run(); }
   private void set(State s, String m) { state = s; message = m; changed(); }
-  synchronized void maybeCheck() { if (System.currentTimeMillis() - context.getSharedPreferences("update_private", 0).getLong("checked", 0) >= 86400000L) check(false); }
+  private SharedPreferences preferences() { return context.getSharedPreferences("update_private", 0); }
+  synchronized void maybeCheck() { check(false); }
+  long nextAutomaticCheckDelay() {
+    return Math.max(60000L, UpdateCheckPolicy.delayUntilAutomatic(System.currentTimeMillis(),
+        preferences().getLong("checked_ok", 0), preferences().getLong("attempted", 0)));
+  }
   synchronized void check(boolean manual) {
-    if (state == State.CHECKING || state == State.DOWNLOADING || state == State.INSTALLING) return;
+    if (state == State.CHECKING || state == State.DOWNLOADING || state == State.INSTALLING || state == State.READY || permissionPending) return;
+    long now = System.currentTimeMillis();
+    if (!UpdateCheckPolicy.shouldCheck(now, preferences().getLong("checked_ok", 0),
+        preferences().getLong("attempted", 0), manual)) {
+      if (manual && (state == State.ERROR || state == State.UNAVAILABLE)) {
+        long seconds = Math.max(1, (preferences().getLong("attempted", 0) + UpdateCheckPolicy.MANUAL_INTERVAL_MS - now + 999) / 1000);
+        message = "Please wait " + seconds + " seconds before checking again."; changed();
+      }
+      return;
+    }
+    preferences().edit().putLong("attempted", now).apply();
     set(State.CHECKING, "Checking for updates");
     worker.execute(() -> { try {
       long deadline = System.currentTimeMillis() + 60000;
-      UpdateManifest.Release r = UpdateManifest.parseLatest(read(API, 1048576, deadline));
+      UpdateManifest.Release r = latestRelease(deadline);
       if (r == null) { set(State.UNAVAILABLE, "No Android update available"); return; }
       if (r.apkSha256 == null || r.apkSha256.isEmpty()) {
         if (r.checksumUrl == null || r.checksumUrl.isEmpty()) throw new IOException("No update checksum");
@@ -60,10 +84,46 @@ final class UpdateManager {
       }
       release = r;
       long current = currentVersionCode();
+      cacheRelease(r);
+      preferences().edit().putLong("checked_ok", System.currentTimeMillis()).apply();
       set(r.versionCode > current ? State.AVAILABLE : State.UP_TO_DATE, r.versionCode > current ? "Update available" : "Up to date");
-    } catch (Exception e) { set(manual ? State.ERROR : State.UNAVAILABLE, "Update check failed: " + e.getMessage()); }
-      finally { context.getSharedPreferences("update_private", 0).edit().putLong("checked", System.currentTimeMillis()).apply(); }
+    } catch (Exception e) {
+      try {
+        if (release != null && release.versionCode > currentVersionCode()) {
+          set(State.AVAILABLE, "Update available (last successful check)"); return;
+        }
+      } catch (Exception ignored) {}
+      set(manual ? State.ERROR : State.UNAVAILABLE, "Update check failed: " + e.getMessage());
+    }
     });
+  }
+  private void cacheRelease(UpdateManifest.Release r) throws Exception {
+    org.json.JSONObject asset = new org.json.JSONObject().put("name", r.apkName)
+        .put("browser_download_url", r.apkUrl).put("size", r.apkSize).put("digest", "sha256:" + r.apkSha256);
+    org.json.JSONObject snapshot = new org.json.JSONObject().put("tag_name", "v" + r.version)
+        .put("assets", new org.json.JSONArray().put(asset));
+    preferences().edit().putString("release", snapshot.toString()).apply();
+  }
+  private UpdateManifest.Release latestRelease(long deadline) throws Exception {
+    IOException apiFailure = null;
+    if (System.currentTimeMillis() >= preferences().getLong("api_retry_at", 0)) {
+      try { return UpdateManifest.parseLatest(read(API, 1048576, deadline)); }
+      catch (IOException e) { apiFailure = e; }
+    }
+    // GitHub's public release assets do not consume the REST API's anonymous quota.
+    StringBuilder canonicalUrl = new StringBuilder();
+    try {
+      HttpURLConnection sums = open(PUBLIC_CHECKSUMS, deadline, "GET", canonicalUrl);
+      String contents = read(sums, 1048576, deadline);
+      String apkUrl = UpdateManifest.apkUrlForChecksums(canonicalUrl.toString());
+      HttpURLConnection headers = open(apkUrl, deadline, "HEAD", null);
+      long size;
+      try { size = headers.getContentLengthLong(); } finally { headers.disconnect(); }
+      return UpdateManifest.fromReleaseChecksums(canonicalUrl.toString(), contents, size);
+    } catch (Exception e) {
+      if (apiFailure != null) e.addSuppressed(apiFailure);
+      throw e;
+    }
   }
   synchronized void download() {
     if (state != State.AVAILABLE || release == null) return;
@@ -71,6 +131,10 @@ final class UpdateManager {
     worker.execute(() -> { File part = null; progress = 0; try {
       File dir = new File(context.getFilesDir(), "updates"); if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create update directory");
       part = new File(dir, "update.apk.part"); File dest = new File(dir, "update.apk");
+      if (dest.isFile()) {
+        try { verify(dest, r); apk = dest; set(State.READY, "Update ready to install"); return; }
+        catch (Exception ignored) { /* A different or incomplete cached APK must be downloaded again. */ }
+      }
       long deadline = System.currentTimeMillis() + 600000;
       if (r.apkSize <= 0 || r.apkSize > 512L * 1024 * 1024) throw new IOException("Invalid APK size");
       HttpURLConnection c = open(r.apkUrl, deadline);
@@ -91,6 +155,11 @@ final class UpdateManager {
     PackageInstaller.SessionInfo info = context.getPackageManager().getPackageInstaller().getSessionInfo(sessionId);
     if (info == null) {
       clearSession();
+      try {
+        if (release != null && currentVersionCode() >= release.versionCode) {
+          set(State.UP_TO_DATE, "Update installed"); return;
+        }
+      } catch (Exception ignored) {}
       set(State.ERROR, "The previous installation has ended. Check for updates again.");
     }
   }
@@ -109,10 +178,15 @@ final class UpdateManager {
       PackageInstaller installer = context.getPackageManager().getPackageInstaller();
       PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
       params.setAppPackageName(context.getPackageName());
-      if (Build.VERSION.SDK_INT >= 31) params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED);
+      if (Build.VERSION.SDK_INT >= 31) params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED);
       id = installer.createSession(params); sessionId = id;
       context.getSharedPreferences("update_private", 0).edit().putInt("session", id).remove("confirmation_launched").commit();
-      try (PackageInstaller.Session session = installer.openSession(id); InputStream in = new FileInputStream(apk); OutputStream out = session.openWrite("base.apk", 0, apk.length())) { byte[] b = new byte[65536]; int n; while ((n = in.read(b)) != -1) out.write(b, 0, n); session.fsync(out);
+      try (PackageInstaller.Session session = installer.openSession(id)) {
+        try (InputStream in = new FileInputStream(apk); OutputStream out = session.openWrite("base.apk", 0, apk.length())) {
+          byte[] b = new byte[65536]; int n;
+          while ((n = in.read(b)) != -1) out.write(b, 0, n);
+          session.fsync(out);
+        }
         Intent callback = new Intent(context, UpdateStatusReceiver.class).setAction("org.hdrbridge.UPDATE_STATUS").putExtra("session", id);
         PendingIntent pi = PendingIntent.getBroadcast(context, id, callback, PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0)); session.commit(pi.getIntentSender()); }
     } catch (Exception e) { if (id >= 0) try { context.getPackageManager().getPackageInstaller().abandonSession(id); } catch (Exception ignored) {} finishFailure("Installation failed: " + e.getMessage()); } });
@@ -233,10 +307,47 @@ final class UpdateManager {
     if (!installedSigners[0].equals(signers[0])) throw new IOException("APK incompatible with installed signing certificate");
   }
   private static String hex(byte[] data) { StringBuilder s = new StringBuilder(); for (byte b : data) s.append(String.format(Locale.ROOT, "%02x", b & 255)); return s.toString(); }
-  private static HttpURLConnection open(String value, long deadline) throws Exception {
-    for (int redirects = 0; redirects < 6; redirects++) { URL url = new URL(value); String host = url.getHost().toLowerCase(Locale.ROOT); if (!"https".equals(url.getProtocol()) || url.getUserInfo() != null || url.getPort() != -1 || !(host.equals("api.github.com") || host.equals("github.com") || host.equals("objects.githubusercontent.com") || host.equals("release-assets.githubusercontent.com"))) throw new IOException("Untrusted update URL");
-      if (System.currentTimeMillis() > deadline) throw new IOException("Request timed out"); HttpURLConnection c = (HttpURLConnection)url.openConnection(); c.setInstanceFollowRedirects(false); c.setConnectTimeout(10000); c.setReadTimeout(10000); c.setRequestProperty("Accept", "application/vnd.github+json"); int status = c.getResponseCode(); if (status >= 300 && status < 400) { String location = c.getHeaderField("Location"); c.disconnect(); if (location == null) throw new IOException("Invalid redirect"); value = new URL(url, location).toString(); continue; } if (status != 200) { c.disconnect(); throw new IOException("HTTP " + status); } return c; }
+  private HttpURLConnection open(String value, long deadline) throws Exception { return open(value, deadline, "GET", null); }
+  private HttpURLConnection open(String value, long deadline, String method, StringBuilder checksumUrl) throws Exception {
+    for (int redirects = 0; redirects < 6; redirects++) {
+      URL url = new URL(value);
+      String host = url.getHost().toLowerCase(Locale.ROOT);
+      if (!"https".equals(url.getProtocol()) || url.getUserInfo() != null || url.getPort() != -1 || !(host.equals("api.github.com") || host.equals("github.com") || host.equals("objects.githubusercontent.com") || host.equals("release-assets.githubusercontent.com"))) throw new IOException("Untrusted update URL");
+      if (checksumUrl != null && host.equals("github.com") && url.getPath().startsWith("/RockLithium/hdrbridge/releases/download/")) {
+        // Record the versioned redirect, not the expiring signed CDN URL.
+        UpdateManifest.apkUrlForChecksums(value);
+        checksumUrl.setLength(0); checksumUrl.append(value);
+      }
+      long remaining = deadline - System.currentTimeMillis();
+      if (remaining <= 0) throw new IOException("Request timed out");
+      HttpURLConnection c = (HttpURLConnection)url.openConnection();
+      c.setInstanceFollowRedirects(false); c.setRequestMethod(method);
+      c.setConnectTimeout((int)Math.min(10000, remaining)); c.setReadTimeout((int)Math.min(10000, remaining));
+      c.setRequestProperty("User-Agent", "HDRBridge/" + BuildConfig.VERSION_NAME + " Android");
+      c.setRequestProperty("Accept", host.equals("api.github.com") ? "application/vnd.github+json" : "application/octet-stream");
+      int status;
+      try { status = c.getResponseCode(); } catch (Exception e) { c.disconnect(); throw e; }
+      if (status >= 300 && status < 400) {
+        String location = c.getHeaderField("Location"); c.disconnect();
+        if (location == null) throw new IOException("Invalid redirect");
+        value = new URL(url, location).toString(); continue;
+      }
+      if (status != 200) {
+        boolean limited = host.equals("api.github.com") && (status == 403 || status == 429);
+        if (limited) {
+          long retryAt = System.currentTimeMillis() + 60000L;
+          try { retryAt = Math.max(retryAt, Long.parseLong(c.getHeaderField("Retry-After")) * 1000L + System.currentTimeMillis()); } catch (Exception ignored) {}
+          if ("0".equals(c.getHeaderField("X-RateLimit-Remaining")))
+            try { retryAt = Math.max(retryAt, Long.parseLong(c.getHeaderField("X-RateLimit-Reset")) * 1000L); } catch (Exception ignored) {}
+          preferences().edit().putLong("api_retry_at", retryAt).apply();
+        }
+        c.disconnect();
+        throw new IOException(limited ? "GitHub API rate limit reached" : "HTTP " + status);
+      }
+      return c;
+    }
     throw new IOException("Too many redirects");
   }
-  private static String read(String url, int limit, long deadline) throws Exception { HttpURLConnection c = open(url, deadline); try (InputStream in = c.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) { byte[] b = new byte[8192]; int n; while ((n = in.read(b)) != -1) { if (System.currentTimeMillis() > deadline || out.size() + n > limit) throw new IOException("Response too large or timed out"); out.write(b, 0, n); } return out.toString("UTF-8"); } finally { c.disconnect(); } }
+  private String read(String url, int limit, long deadline) throws Exception { return read(open(url, deadline), limit, deadline); }
+  private String read(HttpURLConnection c, int limit, long deadline) throws Exception { try (InputStream in = c.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) { byte[] b = new byte[8192]; int n; while ((n = in.read(b)) != -1) { if (System.currentTimeMillis() > deadline || out.size() + n > limit) throw new IOException("Response too large or timed out"); out.write(b, 0, n); } return out.toString("UTF-8"); } finally { c.disconnect(); } }
 }

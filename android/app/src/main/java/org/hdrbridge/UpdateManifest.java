@@ -101,6 +101,29 @@ final class UpdateManifest {
         release.versionCode, release.apkSize);
   }
 
+  // The URL is the canonical GitHub release redirect, before the asset CDN redirect.
+  static Release fromReleaseChecksums(String checksumReleaseUrl, String contents, long apkSize) {
+    String version = checksumReleaseVersion(checksumReleaseUrl);
+    long code = versionCode(version);
+    if (apkSize <= 0 || apkSize > MAX_APK_SIZE) throw new IllegalArgumentException("invalid APK size");
+    String name = "HDRBridge-v" + version + "-Android-arm64.apk";
+    return withChecksums(new Release(version, name, apkUrlForChecksums(checksumReleaseUrl), "", checksumReleaseUrl, code, apkSize), contents);
+  }
+
+  static String apkUrlForChecksums(String checksumReleaseUrl) {
+    String version = checksumReleaseVersion(checksumReleaseUrl);
+    return "https://github.com/RockLithium/hdrbridge/releases/download/v" + version + "/HDRBridge-v" + version + "-Android-arm64.apk";
+  }
+
+  private static String checksumReleaseVersion(String checksumReleaseUrl) {
+    if (checksumReleaseUrl == null) throw new IllegalArgumentException("missing checksum release URL");
+    Matcher m = Pattern.compile("^https://github\\.com/RockLithium/hdrbridge/releases/download/v([0-9]+\\.[0-9]+\\.[0-9]+)/SHA256SUMS-Android\\.txt$").matcher(checksumReleaseUrl);
+    if (!m.matches()) throw new IllegalArgumentException("untrusted checksum release URL");
+    String version = m.group(1);
+    versionCode(version);
+    return version;
+  }
+
   static int compareVersions(String a, String b) {
     String[] x = parts(a), y = parts(b);
     versionCode(a); versionCode(b);

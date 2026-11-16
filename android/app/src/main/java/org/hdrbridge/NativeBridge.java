@@ -17,4 +17,11 @@ public final class NativeBridge {
   public static native void resetCancel();
   public static native void cancel();
   public static native void clearCache();
+  public static native int previewMaxTextureSize();
+  public static native long previewDecode(String path, int maxDimension);
+  public static native float[] previewStats(long handle);
+  public static native int previewAttachSurface(long handle, android.view.Surface surface);
+  public static native int previewRender(long handle, int width, int height, float scale, float x, float y, float displayHeadroom);
+  public static native void previewDetachSurface(long handle);
+  public static native void previewDestroy(long handle);
 }

@@ -44,7 +44,7 @@ The browser version lives in [`web/`](web/) and is built independently from the 
 
 ## Android application
 
-The native [Android application](android/README.md) brings the shared C++ core (including Photo Frame) to ARM64 devices running Android 8.0 or later, with a file library, per-task output settings and a sequential conversion queue. Signed release APKs are published on [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases); tap the version beside the title to check for verified Android updates. Native gain-map preview requires Android 14 or later, an HDR display and a format supported by the system decoder. See the Android guide for usage and platform limitations.
+The native [Android application](android/README.md) brings the shared C++ core (including Photo Frame) to ARM64 devices running Android 8.0 or later, with a file library, per-task output settings and a sequential conversion queue. Signed release APKs are published on [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases); tap the version beside the title to check for verified Android updates. Native HDR preview uses the shared decoder and requires Android 14 or later, an HDR display and a compatible graphics surface. See the Android guide for usage and platform limitations.
 
 ## Build on Windows
 

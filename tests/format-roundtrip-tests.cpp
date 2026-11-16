@@ -60,6 +60,91 @@ double half(uint16_t bits) {
   if (!exponent) return sign * std::ldexp(static_cast<double>(fraction), -24);
   return sign * std::ldexp(1.0 + fraction / 1024.0, exponent - 15);
 }
+// Exercise every PQ code through the public decoder and the production FP16 path.
+void precision_regression(const std::filesystem::path& path) {
+  constexpr unsigned side = 256;
+  FILE* file = nullptr;
+  require(!_wfopen_s(&file, path.c_str(), L"wb") && file, "precision fixture open");
+  png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+  png_infop info = png ? png_create_info_struct(png) : nullptr;
+  require(png && info, "precision fixture writer");
+  if (setjmp(png_jmpbuf(png))) throw std::runtime_error("precision fixture PNG failed");
+  png_init_io(png, file);
+  png_set_IHDR(png, info, side, side, 16, PNG_COLOR_TYPE_RGB,
+               PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+  png_write_info(png, info);
+  const png_byte cicp[]{9, 16, 0, 1};
+  png_write_chunk(png, reinterpret_cast<png_const_bytep>("cICP"), cicp, sizeof(cicp));
+  auto code = [](unsigned i, unsigned c) { return (i * (c == 0 ? 1u : c == 1 ? 251u : 997u) + c * 12345u) & 65535u; };
+  std::vector<png_byte> row(side * 6u);
+  for (unsigned y = 0; y < side; ++y) {
+    for (unsigned x = 0; x < side; ++x) for (unsigned c = 0; c < 3; ++c) {
+      const unsigned v = code(y * side + x, c);
+      row[(x * 3u + c) * 2u] = static_cast<png_byte>(v >> 8);
+      row[(x * 3u + c) * 2u + 1u] = static_cast<png_byte>(v);
+    }
+    png_write_row(png, row.data());
+  }
+  png_write_end(png, info); png_destroy_write_struct(&png, &info); std::fclose(file);
+  const auto preview = hdrbridge::decode_preview(path, side);
+  require(preview.width == side && preview.height == side && preview.rgba_fp16.size() == side * side * 4u,
+          "precision preview dimensions");
+  auto direct = [](unsigned value) {
+    constexpr double m1 = 2610.0 / 16384.0, m2 = 2523.0 / 32.0;
+    constexpr double c1 = 3424.0 / 4096.0, c2 = 2413.0 / 128.0, c3 = 2392.0 / 128.0;
+    const double p = std::pow(value / 65535.0, 1.0 / m2);
+    return std::pow(std::max(p - c1, 0.0) / std::max(c2 - c3 * p, 1e-12), 1.0 / m1) * 10000.0 / 80.0;
+  };
+  // Find the nearest representable half by numerical value, independently of
+  // the production bit conversion. Ties round away from zero as it does.
+  auto expected_half = [](float value) {
+    const bool negative = std::signbit(value);
+    const double magnitude = std::abs(static_cast<double>(value));
+    unsigned lo = 0, hi = 0x7bff;
+    while (lo < hi) {
+      const unsigned mid = (lo + hi) / 2;
+      if (half(static_cast<uint16_t>(mid)) < magnitude) lo = mid + 1;
+      else hi = mid;
+    }
+    unsigned result = lo;
+    if (lo && magnitude - half(static_cast<uint16_t>(lo - 1)) <
+                  half(static_cast<uint16_t>(lo)) - magnitude) result = lo - 1;
+    return static_cast<uint16_t>(result | (negative ? 0x8000u : 0u));
+  };
+  for (unsigned i = 0; i < side * side; ++i) {
+    const double r = direct(code(i, 0)), g = direct(code(i, 1)), b = direct(code(i, 2));
+    const double values[] = {1.660491*r - 0.587641*g - 0.072850*b,
+                             -0.124550*r + 1.132900*g - 0.008349*b,
+                             -0.018151*r - 0.100579*g + 1.118730*b};
+    for (unsigned c = 0; c < 3; ++c) {
+      const auto expected = expected_half(static_cast<float>(std::clamp(values[c], -65504.0, 65504.0)));
+      require(preview.rgba_fp16[i * 4u + c] == expected,
+              "precision mismatch pixel " + std::to_string(i) + " channel " + std::to_string(c));
+    }
+    require(preview.rgba_fp16[i * 4u + 3u] == 0x3c00u, "precision alpha");
+  }
+
+  // Fully transparent highlights must remain black when the preview is resized.
+  require(!_wfopen_s(&file, path.c_str(), L"wb") && file, "alpha fixture open");
+  png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+  info = png ? png_create_info_struct(png) : nullptr;
+  require(png && info, "alpha fixture writer");
+  if (setjmp(png_jmpbuf(png))) throw std::runtime_error("alpha fixture PNG failed");
+  png_init_io(png, file);
+  png_set_IHDR(png, info, 2, 2, 16, PNG_COLOR_TYPE_RGBA,
+               PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+  png_write_info(png, info);
+  png_write_chunk(png, reinterpret_cast<png_const_bytep>("cICP"), cicp, sizeof(cicp));
+  png_byte alpha_row[]{255,255, 255,255, 255,255, 0,0, 255,255, 255,255, 255,255, 0,0};
+  png_write_row(png, alpha_row); png_write_row(png, alpha_row);
+  png_write_end(png, info); png_destroy_write_struct(&png, &info); std::fclose(file);
+  const auto transparent = hdrbridge::decode_preview(path, 1);
+  require(transparent.width == 1 && transparent.height == 1 &&
+          transparent.rgba_fp16.size() == 4 &&
+          half(transparent.rgba_fp16[0]) == 0 && half(transparent.rgba_fp16[1]) == 0 &&
+          half(transparent.rgba_fp16[2]) == 0 && transparent.rgba_fp16[3] == 0x3c00u,
+          "transparent resized preview must be black");
+}
 void compare_export(const std::filesystem::path& path, const std::string& format,
                     const hdrbridge::gainmap::GainMapRaster& expected) {
   if (format == "original") {
@@ -135,6 +220,7 @@ int main() {
   const auto dir = std::filesystem::temp_directory_path() / ("hdrbridge-roundtrip-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   try {
     std::filesystem::create_directories(dir);
+    precision_regression(dir / "precision.png");
     const auto src = dir / "source.png";
     fixture(src, true); fixture(dir / "sdr.png", false);
     require(hdrbridge::inspect(dir / "sdr.png").asset_kind == "non-HDR", "SDR classification");

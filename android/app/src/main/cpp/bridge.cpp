@@ -1,13 +1,16 @@
 #include <jni.h>
+#include <android/native_window_jni.h>
 #include <atomic>
 #include <codecvt>
 #include <locale>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <nlohmann/json.hpp>
 #include "hdrbridge_core.h"
 #include "hdrbridge_version.h"
+#include "hdr_preview.h"
 
 namespace {
 std::mutex operation_mutex;
@@ -126,4 +129,80 @@ extern "C" JNIEXPORT void JNICALL Java_org_hdrbridge_NativeBridge_clearCache(JNI
   try { std::lock_guard<std::mutex> lock(operation_mutex); hdrbridge::clear_input_cache(); }
   catch (const std::exception& e) { fail(env, e.what()); }
   catch (...) { fail(env, "Unknown native error"); }
+}
+
+namespace {
+using PreviewRenderer = hdrbridge::android_preview::Renderer;
+PreviewRenderer* preview_renderer(jlong handle) {
+  return reinterpret_cast<PreviewRenderer*>(handle);
+}
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_hdrbridge_NativeBridge_previewMaxTextureSize(JNIEnv*, jclass) {
+  try { return PreviewRenderer::maxTextureSize(); }
+  catch (...) { return 0; }
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_org_hdrbridge_NativeBridge_previewDecode(JNIEnv* env, jclass, jstring path, jint limit) {
+  try {
+    if (limit <= 0) throw std::invalid_argument("Invalid HDR preview texture limit");
+    auto renderer = std::make_unique<PreviewRenderer>();
+    std::string error;
+    {
+      std::lock_guard<std::mutex> lock(operation_mutex);
+      if (!renderer->decode(str(env, path), static_cast<uint32_t>(limit), error))
+        throw std::runtime_error(error.empty() ? "HDR preview decode failed" : error);
+    }
+    return reinterpret_cast<jlong>(renderer.release());
+  } catch (const std::exception& e) { fail(env, e.what()); }
+  catch (...) { fail(env, "HDR preview decode failed"); }
+  return 0;
+}
+
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_org_hdrbridge_NativeBridge_previewStats(JNIEnv* env, jclass, jlong handle) {
+  const auto* renderer = preview_renderer(handle);
+  if (!renderer) return nullptr;
+  auto result = env->NewFloatArray(3);
+  if (result) {
+    const jfloat values[]{static_cast<float>(renderer->width()),
+                          static_cast<float>(renderer->height()), renderer->peakRatio()};
+    env->SetFloatArrayRegion(result, 0, 3, values);
+  }
+  return result;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_hdrbridge_NativeBridge_previewAttachSurface(JNIEnv* env, jclass, jlong handle, jobject surface) {
+  auto* renderer = preview_renderer(handle);
+  if (!renderer || !surface) return 0;
+  ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+  if (!window) return 0;
+  std::string error;
+  int mode = 0;
+  try { mode = renderer->attach(window, error); }
+  catch (...) { /* The activity retains its existing unsupported-preview flow. */ }
+  ANativeWindow_release(window);
+  return mode;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_hdrbridge_NativeBridge_previewRender(JNIEnv*, jclass, jlong handle, jint width, jint height,
+                                            jfloat scale, jfloat x, jfloat y, jfloat displayHeadroom) {
+  auto* renderer = preview_renderer(handle);
+  if (!renderer) return static_cast<int>(hdrbridge::android_preview::FrameResult::Unavailable);
+  try { return static_cast<int>(renderer->render(width, height, scale, x, y, displayHeadroom)); }
+  catch (...) { return static_cast<int>(hdrbridge::android_preview::FrameResult::Unavailable); }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_hdrbridge_NativeBridge_previewDetachSurface(JNIEnv*, jclass, jlong handle) {
+  if (auto* renderer = preview_renderer(handle)) renderer->detach();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_hdrbridge_NativeBridge_previewDestroy(JNIEnv*, jclass, jlong handle) {
+  delete preview_renderer(handle);
 }

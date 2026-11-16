@@ -30,4 +30,4 @@ FP16 JPEG XR decodes the Rec.2020/PQ RGB16 image to linear light and converts it
 
 ## Presentation
 
-The Windows application offers an optional native HDR preview through a linear FP16 swap chain. The Web application uses the browser's native `<img>` presentation for supported Blob formats; formats the browser cannot display report preview unavailability rather than falling back to an SDR simulation.
+The Windows application offers an optional native HDR preview through a linear FP16 swap chain. Android also uses the shared FP16 scRGB preview raster, with gamut and transfer signaling matched to its native HDR surface. Preview resizing and alpha compositing are calculated in linear light. The Web application uses the browser's native `<img>` presentation for supported Blob formats; formats the browser cannot display report preview unavailability rather than falling back to an SDR simulation.

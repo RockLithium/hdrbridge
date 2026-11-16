@@ -22,7 +22,7 @@ Filenames use the source base name, optional suffix and format-controlled extens
 
 ## HDR preview
 
-Preview requires Android 14 or later, an HDR display and a gain-map image recognized by the system decoder. It decodes only when opened and supports pinch zoom, pan and double-tap. Other representations remain convertible without preview.
+Preview uses the shared HDR decoder and requires Android 14 or later, an HDR display and a compatible native graphics surface. It decodes only when opened and supports pinch zoom, pan and double-tap. Source resolution is retained up to the GPU texture limit, capped at 16,384 pixels per dimension. Images outside these limits remain convertible. Unsupported devices do not receive an SDR simulation.
 
 ## Platform limitations
 
@@ -30,7 +30,7 @@ JPEG XR uses jxrlib. Some FP16 streams it encodes cannot be read by its own deco
 
 ## Updates
 
-The app quietly checks for a stable Android release at most once a day. Tap the version beside **HDR Bridge** to check manually, download an update or install it. Updates are verified against the release checksum, package identity, version and pinned signing certificate before installation. Output settings and the selected folder remain in place.
+The app checks for a stable Android release in the background while open, reusing successful results for up to an hour. Tap the version beside **HDR Bridge** to check manually, download an update or install it. Updates are verified against the release checksum, package identity, version and pinned signing certificate before opening the system installer. Output settings and the selected folder remain in place.
 
 Android may ask you to allow installation from HDR Bridge or confirm an update. Installation waits until conversion and inspection are idle; it does not stop an active batch. A missing Android release or a network error does not affect conversion. APKs can also be downloaded and installed manually.
 

@@ -32,6 +32,17 @@ public class MainActivity extends Activity {
   String fullVersion = "", shortVersion = "";
   AlertDialog updateDialog;
   boolean resumed;
+  final Runnable automaticUpdateCheck = new Runnable() {
+    @Override public void run() {
+      if (!resumed) return;
+      updates.maybeCheck();
+      scheduleAutomaticUpdateCheck();
+    }
+  };
+  void scheduleAutomaticUpdateCheck() {
+    handler.removeCallbacks(automaticUpdateCheck);
+    if (resumed) handler.postDelayed(automaticUpdateCheck, updates.nextAutomaticCheckDelay());
+  }
 
   @Override
   public void onCreate(Bundle state) {
@@ -68,17 +79,19 @@ public class MainActivity extends Activity {
     super.onResume();
     resumed = true;
     model.listener = () -> handler.post(this::refresh);
-    updates.setListener(() -> handler.post(() -> { if (resumed) refreshUpdate(); }));
+    updates.setListener(() -> handler.post(() -> {
+      if (resumed) { refreshUpdate(); scheduleAutomaticUpdateCheck(); }
+    }));
     if (updates.installPending()) updates.resumeInstall(this);
-    if (updates.state == UpdateManager.State.IDLE || updates.state == UpdateManager.State.UP_TO_DATE
-        || updates.state == UpdateManager.State.UNAVAILABLE || updates.state == UpdateManager.State.ERROR)
-      updates.maybeCheck();
+    handler.removeCallbacks(automaticUpdateCheck);
+    automaticUpdateCheck.run();
     refreshUpdate();
     refresh();
   }
   @Override
   protected void onPause() {
     resumed = false;
+    handler.removeCallbacks(automaticUpdateCheck);
     updates.setListener(null);
     if (updateDialog != null) { updateDialog.dismiss(); updateDialog = null; }
     model.listener = null;

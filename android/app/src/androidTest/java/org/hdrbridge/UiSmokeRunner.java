@@ -370,18 +370,26 @@ final class UiSmokeRunner {
     Activity preview = instrumentation.waitForMonitorWithTimeout(monitor, 10000);
     instrumentation.removeMonitor(monitor);
     require("Native preview activity launched", preview instanceof HdrPreviewActivity);
-    Bitmap decoded = null;
     try {
-      Field bitmapField = HdrPreviewActivity.class.getDeclaredField("bitmap"); bitmapField.setAccessible(true);
+      Field sessionField = HdrPreviewActivity.class.getDeclaredField("nativeSession"); sessionField.setAccessible(true);
+      Field widthField = HdrPreviewActivity.class.getDeclaredField("imageWidth"); widthField.setAccessible(true);
+      Field heightField = HdrPreviewActivity.class.getDeclaredField("imageHeight"); heightField.setAccessible(true);
+      Field lockField = HdrPreviewActivity.class.getDeclaredField("lock"); lockField.setAccessible(true);
+      Object stateLock = lockField.get(preview);
+      long session = 0;
+      int width = 0, height = 0;
       long end = SystemClock.elapsedRealtime() + 20000;
       while (SystemClock.elapsedRealtime() < end) {
-        decoded = (Bitmap) bitmapField.get(preview);
-        if (decoded != null) break;
+        synchronized (stateLock) {
+          session = sessionField.getLong(preview);
+          width = widthField.getInt(preview);
+          height = heightField.getInt(preview);
+        }
+        if (session != 0 && width > 0 && height > 0) break;
         SystemClock.sleep(50);
       }
-      require("Preview decoded bitmap", decoded != null);
-      require("Android native decoder exposes gainmap", decoded.hasGainmap());
-      checks.put(new JSONObject().put("preview", "nativeGainmap").put("width", decoded.getWidth()).put("height", decoded.getHeight()));
+      require("Preview native session decoded", session != 0 && width > 0 && height > 0);
+      checks.put(new JSONObject().put("preview", "nativeDecoded").put("width", width).put("height", height));
     } finally {
       instrumentation.runOnMainSync(preview::finish);
       waitUi(250);
