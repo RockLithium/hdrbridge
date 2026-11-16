@@ -10,7 +10,7 @@ public class OptionsTest {
   public void defaultsMapToExpectedNativeFormatsAndQualities() throws Exception {
     String[] modes = {"ultrahdr", "png-pq16", "tiff-pq16", "jxl-pq16", "jxr-scrgb-fp16",
         "avif-pq10", "gainmap-extract"};
-    int[] qualities = {95, 4, 6, 100, 100, 90, 95};
+    int[] qualities = {95, 4, 6, 90, 100, 95, 95};
     for (int i = 0; i < modes.length; i++) {
       Options option = Options.defaults(i);
       JSONObject nativeOptions = option.json();
@@ -33,6 +33,7 @@ public class OptionsTest {
     for (int format : new int[] {3, 5}) {
       Options o = Options.defaults(format);
       o.transfer = 2;
+      assertEquals(1, o.json().getInt("gainmap_scale"));
       o.gamut = "p3";
       o.scale = 4;
       o.peak = 2;
@@ -45,13 +46,14 @@ public class OptionsTest {
       assertEquals("_gainmap", Options.defaultSuffix(format, 2));
     }
     Options jpeg = Options.defaults(0);
-    assertFalse(jpeg.json().getBoolean("multi_channel_gainmap"));
-    jpeg.channels = 1;
-    jpeg.gamut = "rec709";
-    jpeg.scale = 1;
     assertTrue(jpeg.json().getBoolean("multi_channel_gainmap"));
-    assertEquals("rec709", jpeg.json().getString("output_gamut"));
     assertEquals(1, jpeg.json().getInt("gainmap_scale"));
+    jpeg.channels = 0;
+    jpeg.gamut = "rec709";
+    jpeg.scale = 2;
+    assertFalse(jpeg.json().getBoolean("multi_channel_gainmap"));
+    assertEquals("rec709", jpeg.json().getString("output_gamut"));
+    assertEquals(2, jpeg.json().getInt("gainmap_scale"));
   }
 
   @Test

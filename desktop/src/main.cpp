@@ -2,6 +2,7 @@
 #include "output_naming.h"
 #include "hdrbridge_version.h"
 #include "app_update.h"
+#include "ui_language.h"
 
 #include <Windows.h>
 #include <windowsx.h>
@@ -14,6 +15,9 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <uxtheme.h>
+#include <vsstyle.h>
+#include <vssym32.h>
+#include <Richedit.h>
 #include <wrl/client.h>
 
 #include <atomic>
@@ -35,6 +39,8 @@
 #include <vector>
 
 namespace {
+
+namespace ui = hdrbridge::desktop::i18n;
 
 constexpr wchar_t kWindowClass[] = L"HDRBridgeMainWindow";
 constexpr UINT WM_APP_PROGRESS = WM_APP + 1;
@@ -87,8 +93,7 @@ enum ControlId {
   IDC_PROGRESS,
   IDC_STATUS,
   IDC_OUTPUT_PATH,
-  IDC_LOG,
-  IDC_FORMAT_NOTE
+  IDC_LOG
   ,IDC_GAMUT
   ,IDC_TRANSFER
   ,IDC_REPRESENTATION
@@ -220,7 +225,9 @@ struct AppState {
   HWND status = nullptr;
   HWND output_path = nullptr;
   HWND log = nullptr;
-  HWND format_note = nullptr;
+  std::wstring activity_text = HB_UI("Ready. Detailed conversion activity appears here.");
+  std::wstring inspector_text = HB_UI("No file selected");
+  std::wstring base_name_cue = HB_UI("Base name");
   HWND gamut = nullptr;
   HWND transfer = nullptr;
   HWND representation = nullptr;
@@ -258,7 +265,11 @@ struct AppState {
   HWND use_suffix = nullptr;
   HWND files_splitter = nullptr;
   HFONT font = nullptr;
+  HFONT cjk_font = nullptr;
+  HFONT small_font = nullptr;
+  HFONT small_cjk_font = nullptr;
   HFONT title_font = nullptr;
+  HFONT version_font = nullptr;
   HBRUSH background_brush = nullptr;
   HBRUSH surface_brush = nullptr;
   COLORREF background_color = RGB(244, 246, 248);
@@ -288,12 +299,12 @@ struct AppState {
   int last_transfer_index = -1;
   int last_representation_index = -1;
   int last_encoding_format_index = -1;
-  int uhdr_gainmap_channels = 0;
-  int normal_gainmap_resolution = 1, frame_gainmap_resolution = 2, frame_gainmap_channels = 1, frame_gamut = 12;
+  int uhdr_gainmap_channels = 1;
+  int normal_gainmap_resolution = 2, frame_gainmap_resolution = 2, frame_gainmap_channels = 1, frame_gamut = 12;
   bool normal_copy_exif = true, normal_copy_xmp = true;
   bool lossless_setting = true;
   bool tiff_compressed = true;
-  std::array<int, 8> encoding_values{95, 4, 6, 95, 95, 95, 95, 95};
+  std::array<int, 8> encoding_values{95, 4, 6, 90, 95, 95, 95, 95};
   std::unique_ptr<PreviewRenderer> preview_renderer;
   std::shared_ptr<std::atomic_bool> preview_cancel;
   uint64_t preview_generation = 0;
@@ -302,12 +313,322 @@ struct AppState {
 
 std::wstring widen(const std::string& input);
 
+bool font_available(const wchar_t* family) {
+  LOGFONTW query{};
+  query.lfCharSet = DEFAULT_CHARSET;
+  wcsncpy_s(query.lfFaceName, family, _TRUNCATE);
+  bool found = false;
+  HDC dc = GetDC(nullptr);
+  EnumFontFamiliesExW(dc, &query,
+      [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM parameter) -> int {
+        *reinterpret_cast<bool*>(parameter) = true;
+        return 0;
+      }, reinterpret_cast<LPARAM>(&found), 0);
+  ReleaseDC(nullptr, dc);
+  return found;
+}
+
+const wchar_t* ui_english_font_family() {
+  static const bool ubuntu = font_available(L"Ubuntu");
+  return ubuntu ? L"Ubuntu" : L"Segoe UI";
+}
+
+const wchar_t* ui_cjk_font_family() {
+  static const wchar_t* family = font_available(L"Microsoft YaHei UI")
+      ? L"Microsoft YaHei UI"
+      : (font_available(L"Microsoft YaHei") ? L"Microsoft YaHei" : L"Segoe UI");
+  return family;
+}
+
+const wchar_t* ui_font_family() {
+  return ui_english_font_family();
+}
+
+struct FontRun {
+  std::wstring_view text;
+  bool use_cjk = false;
+};
+
+std::vector<FontRun> split_font_runs(HDC dc, HFONT primary_font, std::wstring_view text) {
+  std::vector<FontRun> runs;
+  if (text.empty()) return runs;
+  const HGDIOBJ old_font = primary_font ? SelectObject(dc, primary_font) : nullptr;
+  std::vector<WORD> glyphs(text.size(), 0);
+  const DWORD res = GetGlyphIndicesW(dc, text.data(), static_cast<int>(text.size()),
+                                     glyphs.data(), GGI_MARK_NONEXISTING_GLYPHS);
+  if (old_font) SelectObject(dc, old_font);
+  if (res == GDI_ERROR) {
+    runs.push_back({text, false});
+    return runs;
+  }
+  size_t index = 0;
+  while (index < text.size()) {
+    const wchar_t ch = text[index];
+    const bool use_cjk = ch >= 0x80 && glyphs[index] == 0xFFFF;
+    size_t next = index + 1;
+    while (next < text.size()) {
+      const wchar_t nch = text[next];
+      const bool n_cjk = nch >= 0x80 && glyphs[next] == 0xFFFF;
+      if (n_cjk != use_cjk) break;
+      ++next;
+    }
+    runs.push_back({text.substr(index, next - index), use_cjk});
+    index = next;
+  }
+  return runs;
+}
+
+int measure_mixed_width(HDC dc, HFONT primary_font, HFONT cjk_font, std::wstring_view text) {
+  if (text.empty()) return 0;
+  const auto runs = split_font_runs(dc, primary_font, text);
+  const HGDIOBJ saved = SelectObject(dc, primary_font);
+  int total = 0;
+  for (const auto& run : runs) {
+    SelectObject(dc, (run.use_cjk && cjk_font) ? cjk_font : primary_font);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, run.text.data(), static_cast<int>(run.text.size()), &sz);
+    total += sz.cx;
+  }
+  SelectObject(dc, saved);
+  return total;
+}
+
+std::wstring fit_mixed_text(HDC dc, HFONT primary_font, HFONT cjk_font,
+                            std::wstring_view text, int max_width, UINT flags) {
+  if (max_width <= 0 || text.empty()) return std::wstring(text);
+  if (measure_mixed_width(dc, primary_font, cjk_font, text) <= max_width) {
+    return std::wstring(text);
+  }
+  if ((flags & DT_PATH_ELLIPSIS) != 0) {
+    const size_t slash = text.find_last_of(L"\\/");
+    if (slash != std::wstring_view::npos) {
+      const std::wstring_view file = text.substr(slash);
+      const std::wstring_view dir = text.substr(0, slash);
+      std::wstring root;
+      const size_t first_sep = dir.find_first_of(L"\\/");
+      if (first_sep != std::wstring_view::npos) {
+        root = std::wstring(dir.substr(0, first_sep + 1));
+      }
+      for (size_t keep = dir.size();;) {
+        std::wstring candidate = (keep > root.size() + 3)
+            ? (std::wstring(dir.substr(0, keep)) + L"\\..." + std::wstring(file))
+            : (root + L"..." + std::wstring(file));
+        if (measure_mixed_width(dc, primary_font, cjk_font, candidate) <= max_width) {
+          return candidate;
+        }
+        if (keep <= root.size() + 3) break;
+        const size_t prev = dir.rfind(L'\\', keep - 1);
+        keep = (prev == std::wstring_view::npos || prev <= root.size()) ? root.size() : prev;
+      }
+    }
+  }
+  if ((flags & (DT_END_ELLIPSIS | DT_PATH_ELLIPSIS)) == 0) {
+    return std::wstring(text);
+  }
+  const std::wstring ellipsis = L"…";
+  size_t lo = 0, hi = text.size();
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo + 1) / 2;
+    size_t len = mid;
+    if (len > 0 && len < text.size() &&
+        text[len - 1] >= 0xD800 && text[len - 1] <= 0xDBFF) {
+      --len;
+    }
+    const std::wstring cand = std::wstring(text.substr(0, len)) + ellipsis;
+    if (measure_mixed_width(dc, primary_font, cjk_font, cand) <= max_width) lo = mid;
+    else hi = mid - 1;
+  }
+  if (lo > 0 && lo < text.size() &&
+      text[lo - 1] >= 0xD800 && text[lo - 1] <= 0xDBFF) {
+    --lo;
+  }
+  return std::wstring(text.substr(0, lo)) + ellipsis;
+}
+
+void draw_mixed_text(HDC dc, HFONT primary_font, HFONT cjk_font,
+                     std::wstring_view text, RECT rect, UINT flags) {
+  if (text.empty() || rect.right <= rect.left || rect.bottom <= rect.top) return;
+  const std::wstring fitted = fit_mixed_text(dc, primary_font, cjk_font, text,
+                                             rect.right - rect.left, flags);
+  const auto runs = split_font_runs(dc, primary_font, fitted);
+  if (runs.empty()) return;
+  const HGDIOBJ saved = SelectObject(dc, primary_font);
+  TEXTMETRICW primary_tm{}, cjk_tm{};
+  GetTextMetricsW(dc, &primary_tm);
+  if (cjk_font) {
+    SelectObject(dc, cjk_font);
+    GetTextMetricsW(dc, &cjk_tm);
+  } else {
+    cjk_tm = primary_tm;
+  }
+  const int total_width = measure_mixed_width(dc, primary_font, cjk_font, fitted);
+  int x = rect.left;
+  if ((flags & DT_CENTER) != 0) {
+    x = rect.left + std::max(0L, ((rect.right - rect.left) - total_width) / 2);
+  } else if ((flags & DT_RIGHT) != 0) {
+    x = rect.right - total_width;
+  }
+  const int base_y = (flags & DT_VCENTER) != 0
+      ? rect.top + ((rect.bottom - rect.top) - static_cast<int>(primary_tm.tmHeight)) / 2
+      : rect.top;
+  const int prev_bk = SetBkMode(dc, TRANSPARENT);
+  for (const auto& run : runs) {
+    SelectObject(dc, (run.use_cjk && cjk_font) ? cjk_font : primary_font);
+    const int run_y = (run.use_cjk && cjk_font)
+        ? base_y + static_cast<int>(primary_tm.tmAscent) - static_cast<int>(cjk_tm.tmAscent)
+        : base_y;
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, run.text.data(), static_cast<int>(run.text.size()), &sz);
+    ExtTextOutW(dc, x, run_y, ETO_CLIPPED, &rect, run.text.data(),
+                static_cast<UINT>(run.text.size()), nullptr);
+    x += sz.cx;
+  }
+  SetBkMode(dc, prev_bk);
+  SelectObject(dc, saved);
+}
+
+void draw_mixed_multiline(HDC dc, HFONT primary_font, HFONT cjk_font,
+                          std::wstring_view text, RECT rect, UINT flags) {
+  std::vector<std::wstring_view> lines;
+  size_t pos = 0;
+  while (pos <= text.size()) {
+    const size_t eol = text.find(L'\n', pos);
+    std::wstring_view line = eol == std::wstring_view::npos
+        ? text.substr(pos) : text.substr(pos, eol - pos);
+    if (!line.empty() && line.back() == L'\r') line.remove_suffix(1);
+    lines.push_back(line);
+    if (eol == std::wstring_view::npos) break;
+    pos = eol + 1;
+  }
+  const HGDIOBJ saved = SelectObject(dc, primary_font);
+  TEXTMETRICW tm{};
+  GetTextMetricsW(dc, &tm);
+  SelectObject(dc, saved);
+  const int line_h = std::max(1, static_cast<int>(tm.tmHeight + tm.tmExternalLeading));
+  const int total_h = static_cast<int>(lines.size()) * line_h;
+  int y = (flags & DT_VCENTER) != 0
+      ? rect.top + std::max(0, static_cast<int>((rect.bottom - rect.top) - total_h) / 2)
+      : rect.top;
+  for (const auto& line : lines) {
+    RECT row{rect.left, y, rect.right, std::min<LONG>(rect.bottom, y + line_h)};
+    draw_mixed_text(dc, primary_font, cjk_font, line, row,
+                    (flags & (DT_CENTER | DT_RIGHT | DT_END_ELLIPSIS)) | DT_VCENTER);
+    y += line_h;
+  }
+}
+
+bool draw_combobox_item(const DRAWITEMSTRUCT* draw, HWND window, HFONT primary_font,
+                        HFONT cjk_font, bool dark, COLORREF text_color,
+                        COLORREF muted_color, COLORREF surface_color) {
+  if (!draw || draw->CtlType != ODT_COMBOBOX ||
+      draw->itemID == static_cast<UINT>(-1)) {
+    return false;
+  }
+  const bool in_edit = (draw->itemState & ODS_COMBOBOXEDIT) != 0;
+  const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+  const bool disabled = (draw->itemState & ODS_DISABLED) != 0;
+  COLORREF fg = disabled ? muted_color : text_color;
+  if (!in_edit) {
+    const COLORREF bg = selected
+        ? (dark ? RGB(58, 96, 148) : GetSysColor(COLOR_HIGHLIGHT))
+        : surface_color;
+    if (selected) fg = dark ? RGB(245, 248, 252) : GetSysColor(COLOR_HIGHLIGHTTEXT);
+    HBRUSH bg_brush = CreateSolidBrush(bg);
+    FillRect(draw->hDC, &draw->rcItem, bg_brush);
+    DeleteObject(bg_brush);
+  }
+  const int len = static_cast<int>(SendMessageW(
+      draw->hwndItem, CB_GETLBTEXTLEN, draw->itemID, 0));
+  if (len > 0) {
+    std::wstring text(static_cast<size_t>(len) + 1u, L'\0');
+    const int copied = static_cast<int>(SendMessageW(
+        draw->hwndItem, CB_GETLBTEXT, draw->itemID,
+        reinterpret_cast<LPARAM>(text.data())));
+    if (copied > 0) {
+      text.resize(static_cast<size_t>(copied));
+      RECT tr = draw->rcItem;
+      const UINT dpi = GetDpiForWindow(window);
+      const int pad_x = MulDiv(in_edit ? 3 : 8, dpi, 96);
+      tr.left += pad_x;
+      tr.right -= pad_x;
+      SetTextColor(draw->hDC, fg);
+      draw_mixed_text(draw->hDC, primary_font, cjk_font, text, tr,
+                      DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+    }
+  }
+  if (!in_edit && (draw->itemState & ODS_FOCUS) != 0) {
+    DrawFocusRect(draw->hDC, &draw->rcItem);
+  }
+  return true;
+}
+
+void draw_combo_chrome(HDC dc, HWND control, RECT rc, bool dark,
+                       COLORREF surface_color, COLORREF bg_color,
+                       COLORREF text_color, COLORREF muted_color, int btn_w) {
+  HBRUSH bg_brush = CreateSolidBrush(bg_color);
+  FillRect(dc, &rc, bg_brush);
+  DeleteObject(bg_brush);
+  const bool disabled = !IsWindowEnabled(control);
+  const bool dropped = SendMessageW(control, CB_GETDROPPEDSTATE, 0, 0) != 0;
+  const bool hot = GetPropW(control, L"HBHot") != nullptr || GetFocus() == control;
+  const UINT dpi = GetDpiForWindow(control);
+  const COLORREF fill_color = disabled
+      ? (dark ? RGB(30, 33, 38) : RGB(240, 242, 245))
+      : dropped ? (dark ? RGB(45, 51, 59) : RGB(230, 236, 244))
+      : hot ? (dark ? RGB(42, 47, 55) : RGB(248, 250, 252))
+      : surface_color;
+  const COLORREF border_color = disabled
+      ? (dark ? RGB(58, 63, 70) : RGB(208, 214, 220))
+      : (dropped || hot) ? (dark ? RGB(105, 115, 128) : RGB(120, 140, 165))
+      : (dark ? RGB(75, 82, 91) : RGB(190, 199, 208));
+  HBRUSH fill_brush = CreateSolidBrush(fill_color);
+  HPEN border_pen = CreatePen(PS_SOLID, 1, border_color);
+  const HGDIOBJ old_brush = SelectObject(dc, fill_brush);
+  const HGDIOBJ old_pen = SelectObject(dc, border_pen);
+  const int radius = MulDiv(3, dpi, 96);
+  RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+  SelectObject(dc, old_pen);
+  SelectObject(dc, old_brush);
+  DeleteObject(border_pen);
+  DeleteObject(fill_brush);
+  const int cx = rc.right - btn_w / 2 - MulDiv(1, dpi, 96);
+  const int cy = (rc.top + rc.bottom) / 2 + MulDiv(1, dpi, 96);
+  const int arm = MulDiv(4, dpi, 96);
+  const int drop = MulDiv(2, dpi, 96);
+  HPEN arrow_pen = CreatePen(PS_SOLID, std::max(1, MulDiv(15, dpi, 960)),
+                             disabled ? muted_color : text_color);
+  const HGDIOBJ prev_pen = SelectObject(dc, arrow_pen);
+  const POINT pts[3] = {{cx - arm, cy - drop}, {cx, cy + drop}, {cx + arm, cy - drop}};
+  Polyline(dc, pts, 3);
+  SelectObject(dc, prev_pen);
+  DeleteObject(arrow_pen);
+}
+
+std::pair<LRESULT, LRESULT> measure_native_combo_heights(HFONT font, UINT dpi) {
+  HWND probe = CreateWindowExW(0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST,
+                               0, 0, 120, 200, nullptr, nullptr,
+                               GetModuleHandleW(nullptr), nullptr);
+  LRESULT sel_h = MulDiv(16, dpi, 96);
+  LRESULT list_h = MulDiv(20, dpi, 96);
+  if (probe) {
+    if (font) SendMessageW(probe, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+    sel_h = SendMessageW(probe, CB_GETITEMHEIGHT, static_cast<WPARAM>(-1), 0);
+    list_h = SendMessageW(probe, CB_GETITEMHEIGHT, 0, 0);
+    DestroyWindow(probe);
+  }
+  return {sel_h, list_h};
+}
+
 class PreviewRenderer {
  public:
   explicit PreviewRenderer(HWND owner) : owner_(owner) {}
   ~PreviewRenderer() {
+    if (zoom_edit_) RemoveWindowSubclass(zoom_edit_, zoom_edit_subclass, 1);
+    if (zoom_combo_) RemoveWindowSubclass(zoom_combo_, zoom_combo_subclass, 1);
     if (window_) DestroyWindow(window_);
+    if (surface_brush_) DeleteObject(surface_brush_);
     if (toolbar_font_) DeleteObject(toolbar_font_);
+    if (cjk_toolbar_font_) DeleteObject(cjk_toolbar_font_);
     if (icon_font_) DeleteObject(icon_font_);
   }
 
@@ -325,13 +646,14 @@ class PreviewRenderer {
       RegisterClassExW(&cls);
     });
     window_ = CreateWindowExW(
-        0, L"HDRBridgePreviewWindow", L"HDR Bridge — Preview",
+        0, L"HDRBridgePreviewWindow", L"HDR Bridge",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
         720, 960, nullptr, nullptr, GetModuleHandleW(nullptr), this);
     if (!window_) {
-      error_ = L"Could not create the HDR preview window.";
+      error_ = HB_UI("Could not create the HDR preview window.");
       return nullptr;
     }
+    ui::set_text(window_, HB_UI("HDR Bridge — Preview"));
     create_toolbar();
     try {
       create_device();
@@ -381,34 +703,94 @@ class PreviewRenderer {
                  SWP_NOACTIVATE | SWP_NOZORDER);
   }
 
-  static const wchar_t* preview_font_family() {
-    static const bool ubuntu = [] {
-      LOGFONTW query{};
-      query.lfCharSet = DEFAULT_CHARSET;
-      wcsncpy_s(query.lfFaceName, L"Ubuntu", _TRUNCATE);
-      bool found = false;
-      HDC dc = GetDC(nullptr);
-      EnumFontFamiliesExW(dc, &query,
-          [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM parameter) -> int {
-            *reinterpret_cast<bool*>(parameter) = true;
-            return 0;
-          }, reinterpret_cast<LPARAM>(&found), 0);
-      ReleaseDC(nullptr, dc);
-      return found;
-    }();
-    return ubuntu ? L"Ubuntu" : L"Segoe UI";
+
+  static LRESULT CALLBACK zoom_edit_subclass(HWND edit, UINT message, WPARAM wparam,
+                                             LPARAM lparam, UINT_PTR, DWORD_PTR data) {
+    auto* self = reinterpret_cast<PreviewRenderer*>(data);
+    if (message == WM_PAINT && self && self->toolbar_font_ && GetFocus() != edit) {
+      const int length = GetWindowTextLengthW(edit);
+      std::wstring text(static_cast<size_t>(std::max(length, 0)) + 1u, L'\0');
+      if (length > 0) GetWindowTextW(edit, text.data(), length + 1);
+      text.resize(static_cast<size_t>(std::max(length, 0)));
+      const bool has_non_ascii = std::any_of(text.begin(), text.end(),
+                                             [](wchar_t ch) { return ch >= 0x80; });
+      if (has_non_ascii) {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(edit, &ps);
+        RECT rc{};
+        GetClientRect(edit, &rc);
+        const COLORREF bg = self->dark_ ? RGB(35, 39, 45) : RGB(255, 255, 255);
+        const COLORREF fg = self->dark_ ? RGB(235, 239, 243) : RGB(28, 35, 43);
+        HBRUSH brush = CreateSolidBrush(bg);
+        FillRect(dc, &rc, brush);
+        DeleteObject(brush);
+        rc.left += MulDiv(2, GetDpiForWindow(edit), 96);
+        SetTextColor(dc, fg);
+        draw_mixed_text(dc, self->toolbar_font_, self->cjk_toolbar_font_, text, rc,
+                        DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+        EndPaint(edit, &ps);
+        return 0;
+      }
+    }
+    return DefSubclassProc(edit, message, wparam, lparam);
+  }
+
+  static LRESULT CALLBACK zoom_combo_subclass(HWND control, UINT message, WPARAM wparam,
+                                              LPARAM lparam, UINT_PTR, DWORD_PTR data) {
+    auto* self = reinterpret_cast<PreviewRenderer*>(data);
+    if (message == WM_MOUSEMOVE) {
+      if (!GetPropW(control, L"HBHot")) {
+        SetPropW(control, L"HBHot", reinterpret_cast<HANDLE>(1));
+        TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, control, 0};
+        TrackMouseEvent(&tme);
+        InvalidateRect(control, nullptr, FALSE);
+      }
+    } else if (message == WM_MOUSELEAVE) {
+      RemovePropW(control, L"HBHot");
+      InvalidateRect(control, nullptr, FALSE);
+    } else if (message == WM_ERASEBKGND) {
+      return 1;
+    } else if (message == WM_PAINT && self) {
+      PAINTSTRUCT ps{};
+      HDC dc = BeginPaint(control, &ps);
+      RECT rc{};
+      GetClientRect(control, &rc);
+      const UINT dpi = GetDpiForWindow(control);
+      const int btn_w = MulDiv(22, dpi, 96);
+      const COLORREF surf = self->dark_ ? RGB(35, 39, 45) : RGB(255, 255, 255);
+      const COLORREF bg = self->dark_ ? RGB(24, 27, 31) : RGB(244, 246, 248);
+      const COLORREF fg = self->dark_ ? RGB(235, 239, 243) : RGB(28, 35, 43);
+      draw_combo_chrome(dc, control, rc, self->dark_, surf, bg, fg,
+                        RGB(140, 148, 158), btn_w);
+      EndPaint(control, &ps);
+      if (self->zoom_edit_) InvalidateRect(self->zoom_edit_, nullptr, FALSE);
+      return 0;
+    } else if (message == WM_NCDESTROY) {
+      RemovePropW(control, L"HBHot");
+    }
+    return DefSubclassProc(control, message, wparam, lparam);
   }
 
   void create_toolbar() {
     zoom_combo_ = CreateWindowExW(
-        0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | CBS_AUTOHSCROLL,
+        0, WC_COMBOBOXW, L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | CBS_DROPDOWN | CBS_AUTOHSCROLL |
+            CBS_OWNERDRAWFIXED | CBS_HASSTRINGS,
         0, 0, 110, 240, window_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PREVIEW_ZOOM)),
         GetModuleHandleW(nullptr), nullptr);
-    for (const wchar_t* item : {L"Fit", L"25%", L"50%", L"100%", L"200%", L"400%"}) {
-      SendMessageW(zoom_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
+    for (const wchar_t* item : {HB_UI("Fit"), L"25%", L"50%", L"100%", L"200%", L"400%"}) {
+      ui::send(zoom_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
     }
     SendMessageW(zoom_combo_, CB_SETCURSEL, 0, 0);
+    SetWindowSubclass(zoom_combo_, zoom_combo_subclass, 1,
+                      reinterpret_cast<DWORD_PTR>(this));
+    COMBOBOXINFO info{sizeof(info)};
+    if (GetComboBoxInfo(zoom_combo_, &info) && info.hwndItem) {
+      zoom_edit_ = info.hwndItem;
+      SetWindowSubclass(zoom_edit_, zoom_edit_subclass, 1,
+                        reinterpret_cast<DWORD_PTR>(this));
+    }
     fullscreen_button_ = CreateWindowExW(
         0, L"BUTTON", L"\xE740", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         0, 0, 38, 30, window_,
@@ -418,13 +800,21 @@ class PreviewRenderer {
     toolbar_font_ = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL,
         FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-        preview_font_family());
+        ui_english_font_family());
+    cjk_toolbar_font_ = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+        ui_cjk_font_family());
     icon_font_ = CreateFontW(-MulDiv(14, dpi, 72), 0, 0, 0, FW_NORMAL,
-        FALSE, FALSE, FALSE, SYMBOL_CHARSET, OUT_DEFAULT_PRECIS,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
         L"Segoe MDL2 Assets");
     SendMessageW(zoom_combo_, WM_SETFONT,
                  reinterpret_cast<WPARAM>(toolbar_font_), TRUE);
+    const auto [sel_h, list_h] = measure_native_combo_heights(
+        toolbar_font_, dpi);
+    SendMessageW(zoom_combo_, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), sel_h);
+    SendMessageW(zoom_combo_, CB_SETITEMHEIGHT, 0, list_h);
     SendMessageW(fullscreen_button_, WM_SETFONT,
                  reinterpret_cast<WPARAM>(icon_font_), TRUE);
     layout_toolbar();
@@ -469,13 +859,13 @@ class PreviewRenderer {
       require_hr(device_->CreateShaderResourceView(texture_.Get(), nullptr, &shader_view_),
                   "create preview shader view");
       error_.clear();
-      const std::wstring title = L"HDR Bridge — Preview — " +
+      const std::wstring title = HB_UI("HDR Bridge — Preview — ") +
           std::to_wstring(image_width_) + L" × " + std::to_wstring(image_height_);
-      SetWindowTextW(window_, title.c_str());
+      ui::set_text(window_, title.c_str());
       render();
     } catch (const std::exception& error) {
       error_ = widen(error.what());
-      SetWindowTextW(window_, L"HDR Bridge — Preview (unavailable)");
+      ui::set_text(window_, HB_UI("HDR Bridge — Preview (unavailable)"));
       texture_.Reset();
       shader_view_.Reset();
       if (window_) InvalidateRect(window_, nullptr, TRUE);
@@ -487,6 +877,34 @@ class PreviewRenderer {
     texture_.Reset();
     shader_view_.Reset();
     render();
+  }
+
+  void refresh_fonts() {
+    if (!window_ || !zoom_combo_) return;
+    const UINT dpi = GetDpiForWindow(window_);
+    const auto next = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0,
+        FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+        ui_english_font_family());
+    const auto next_cjk = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0,
+        FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+        ui_cjk_font_family());
+    if (!next || !next_cjk) {
+      if (next) DeleteObject(next);
+      if (next_cjk) DeleteObject(next_cjk);
+      return;
+    }
+    SendMessageW(zoom_combo_, WM_SETFONT, reinterpret_cast<WPARAM>(next), TRUE);
+    const auto [sel_h, list_h] = measure_native_combo_heights(next, dpi);
+    SendMessageW(zoom_combo_, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), sel_h);
+    SendMessageW(zoom_combo_, CB_SETITEMHEIGHT, 0, list_h);
+    if (toolbar_font_) DeleteObject(toolbar_font_);
+    if (cjk_toolbar_font_) DeleteObject(cjk_toolbar_font_);
+    toolbar_font_ = next;
+    cjk_toolbar_font_ = next_cjk;
+    InvalidateRect(window_, nullptr, TRUE);
+    if (zoom_edit_) InvalidateRect(zoom_edit_, nullptr, TRUE);
   }
 
  private:
@@ -509,6 +927,9 @@ class PreviewRenderer {
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
         L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size) == ERROR_SUCCESS &&
         light == 0;
+    dark_ = dark;
+    if (surface_brush_) DeleteObject(surface_brush_);
+    surface_brush_ = CreateSolidBrush(dark ? RGB(35, 39, 45) : RGB(255, 255, 255));
     const BOOL dark_title = dark ? TRUE : FALSE;
     DwmSetWindowAttribute(window_, 20, &dark_title, sizeof(dark_title));
     if (zoom_combo_) SetWindowTheme(zoom_combo_, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
@@ -721,7 +1142,7 @@ class PreviewRenderer {
     pan_x_ = pan_y_ = 0.0f;
     if (zoom_combo_) {
       updating_zoom_text_ = true;
-      SetWindowTextW(zoom_combo_, L"Fit");
+      ui::set_text(zoom_combo_, HB_UI("Fit"));
       SendMessageW(zoom_combo_, CB_SETCURSEL, 0, 0);
       updating_zoom_text_ = false;
     }
@@ -738,9 +1159,9 @@ class PreviewRenderer {
     }
     updating_zoom_text_ = true;
     const std::wstring label = std::to_wstring(percent) + L"%";
-    SetWindowTextW(zoom_combo_, label.c_str());
+    ui::set_text(zoom_combo_, label.c_str());
     SendMessageW(zoom_combo_, CB_SETCURSEL, selection, 0);
-    if (selection == CB_ERR) SetWindowTextW(zoom_combo_, label.c_str());
+    if (selection == CB_ERR) ui::set_text(zoom_combo_, label.c_str());
     updating_zoom_text_ = false;
   }
 
@@ -752,7 +1173,7 @@ class PreviewRenderer {
     value.erase(std::remove_if(value.begin(), value.end(),
         [](wchar_t ch) { return std::iswspace(ch) != 0; }), value.end());
     if (!value.empty() && value.back() == L'%') value.pop_back();
-    if (_wcsicmp(value.c_str(), L"fit") == 0) {
+    if (_wcsicmp(value.c_str(), L"fit") == 0 || value == ui::render(HB_UI("Fit"))) {
       set_fit();
       return;
     }
@@ -806,11 +1227,11 @@ class PreviewRenderer {
     FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(220, 225, 232));
-    const std::wstring message = error_.empty()
-        ? L"HDR preview is unavailable"
-        : L"HDR preview unavailable\r\n" + error_;
-    DrawTextW(dc, message.c_str(), -1, &rect,
-              DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+    const std::wstring message = ui::render(error_.empty()
+        ? HB_UI("HDR preview is unavailable")
+        : HB_UI("HDR preview unavailable\r\n") + error_);
+    draw_mixed_multiline(dc, toolbar_font_, cjk_toolbar_font_, message, rect,
+                         DT_CENTER | DT_VCENTER);
   }
 
   static LRESULT CALLBACK window_proc(HWND window, UINT message,
@@ -837,6 +1258,27 @@ class PreviewRenderer {
         self->resize();
         self->render();
         return 0;
+      case WM_MEASUREITEM: {
+        auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
+        if (measure && measure->CtlType == ODT_COMBOBOX) {
+          measure->itemHeight = static_cast<UINT>(
+              MulDiv(20, GetDpiForWindow(window), 96));
+          return TRUE;
+        }
+        break;
+      }
+      case WM_DRAWITEM: {
+        const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
+        if (draw && draw->CtlID == IDC_PREVIEW_ZOOM &&
+            draw_combobox_item(draw, window, self->toolbar_font_,
+                               self->cjk_toolbar_font_, self->dark_,
+                               self->dark_ ? RGB(235, 239, 243) : RGB(28, 35, 43),
+                               RGB(140, 148, 158),
+                               self->dark_ ? RGB(35, 39, 45) : RGB(255, 255, 255))) {
+          return TRUE;
+        }
+        break;
+      }
       case WM_COMMAND:
         if (LOWORD(wparam) == IDC_PREVIEW_ZOOM && HIWORD(wparam) == CBN_SELCHANGE) {
           self->select_zoom(static_cast<int>(SendMessageW(
@@ -907,6 +1349,12 @@ class PreviewRenderer {
           return 0;
         }
         break;
+      case WM_CTLCOLOREDIT: {
+        const auto dc = reinterpret_cast<HDC>(wparam);
+        SetBkColor(dc, self->dark_ ? RGB(35, 39, 45) : RGB(255, 255, 255));
+        SetTextColor(dc, self->dark_ ? RGB(235, 239, 243) : RGB(28, 35, 43));
+        return reinterpret_cast<LRESULT>(self->surface_brush_);
+      }
       case WM_ERASEBKGND:
         return 1;
       case WM_CLOSE:
@@ -938,8 +1386,10 @@ class PreviewRenderer {
   Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> view_buffer_;
   HWND zoom_combo_ = nullptr;
+  HWND zoom_edit_ = nullptr;
   HWND fullscreen_button_ = nullptr;
   static constexpr int toolbar_height_ = 44;
+  bool dark_ = false;
   bool fit_ = true;
   float zoom_ = 1.0f;
   float pan_x_ = 0.0f;
@@ -952,7 +1402,9 @@ class PreviewRenderer {
   LONG_PTR saved_style_ = 0;
   WINDOWPLACEMENT saved_placement_{sizeof(WINDOWPLACEMENT)};
   HFONT toolbar_font_ = nullptr;
+  HFONT cjk_toolbar_font_ = nullptr;
   HFONT icon_font_ = nullptr;
+  HBRUSH surface_brush_ = nullptr;
   bool updating_zoom_text_ = false;
 };
 
@@ -985,21 +1437,6 @@ void open_folder_for(HWND owner, const std::filesystem::path& path, bool select_
   }
 }
 
-bool font_available(const wchar_t* family) {
-  LOGFONTW query{};
-  query.lfCharSet = DEFAULT_CHARSET;
-  wcsncpy_s(query.lfFaceName, family, _TRUNCATE);
-  bool found = false;
-  HDC dc = GetDC(nullptr);
-  EnumFontFamiliesExW(dc, &query,
-      [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM parameter) -> int {
-        *reinterpret_cast<bool*>(parameter) = true;
-        return 0;
-      }, reinterpret_cast<LPARAM>(&found), 0);
-  ReleaseDC(nullptr, dc);
-  return found;
-}
-
 bool system_prefers_dark() {
   DWORD value = 1;
   DWORD size = sizeof(value);
@@ -1011,29 +1448,149 @@ bool system_prefers_dark() {
   return value == 0;
 }
 
+void set_rich_selection_format(HWND rich, const wchar_t* family, COLORREF color) {
+  CHARFORMAT2W cf{};
+  cf.cbSize = sizeof(cf);
+  cf.dwMask = CFM_FACE | CFM_SIZE | CFM_COLOR | CFM_BOLD | CFM_ITALIC | CFM_UNDERLINE | CFM_STRIKEOUT;
+  cf.yHeight = 200;
+  cf.crTextColor = color;
+  wcsncpy_s(cf.szFaceName, family, _TRUNCATE);
+  SendMessageW(rich, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
+}
+
+void append_rich_mixed(HWND rich, std::wstring_view visible_text,
+                       HFONT primary_font, COLORREF color) {
+  if (!rich || visible_text.empty()) return;
+  HDC dc = GetDC(rich);
+  const auto runs = split_font_runs(dc, primary_font, visible_text);
+  if (dc) ReleaseDC(rich, dc);
+  const wchar_t* eng_family = ui_english_font_family();
+  const wchar_t* cjk_family = ui_cjk_font_family();
+  for (const auto& run : runs) {
+    CHARRANGE at_end{std::numeric_limits<LONG>::max(), std::numeric_limits<LONG>::max()};
+    SendMessageW(rich, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&at_end));
+    set_rich_selection_format(rich, run.use_cjk ? cjk_family : eng_family, color);
+    std::wstring chunk(run.text);
+    SendMessageW(rich, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(chunk.c_str()));
+  }
+}
+
+void set_rich_text_mixed(HWND rich, std::wstring_view visible_text,
+                         HFONT primary_font, COLORREF color, bool preserve_scroll) {
+  if (!rich) return;
+  CHARRANGE saved_sel{0, 0};
+  LRESULT first_line = 0;
+  if (preserve_scroll) {
+    SendMessageW(rich, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&saved_sel));
+    first_line = SendMessageW(rich, EM_GETFIRSTVISIBLELINE, 0, 0);
+  }
+  SendMessageW(rich, WM_SETREDRAW, FALSE, 0);
+  const LRESULT prev_mask = SendMessageW(rich, EM_GETEVENTMASK, 0, 0);
+  if ((prev_mask & ENM_CHANGE) != 0) {
+    SendMessageW(rich, EM_SETEVENTMASK, 0, prev_mask & ~ENM_CHANGE);
+  }
+  SetWindowTextW(rich, L"");
+  append_rich_mixed(rich, visible_text, primary_font, color);
+  if ((prev_mask & ENM_CHANGE) != 0) {
+    SendMessageW(rich, EM_SETEVENTMASK, 0, prev_mask);
+  }
+  if (preserve_scroll) {
+    SendMessageW(rich, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&saved_sel));
+    const LRESULT now_line = SendMessageW(rich, EM_GETFIRSTVISIBLELINE, 0, 0);
+    if (first_line != now_line) {
+      SendMessageW(rich, EM_LINESCROLL, 0, first_line - now_line);
+    }
+  } else {
+    CHARRANGE start_sel{0, 0};
+    SendMessageW(rich, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&start_sel));
+    SendMessageW(rich, EM_LINESCROLL, 0, -SendMessageW(rich, EM_GETFIRSTVISIBLELINE, 0, 0));
+  }
+  SendMessageW(rich, WM_SETREDRAW, TRUE, 0);
+  InvalidateRect(rich, nullptr, TRUE);
+}
+
+void refresh_rich_mixed_style(HWND rich, HFONT primary_font, COLORREF bg, COLORREF fg) {
+  if (!rich) return;
+  SendMessageW(rich, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(bg));
+  CHARFORMAT2W def_cf{};
+  def_cf.cbSize = sizeof(def_cf);
+  def_cf.dwMask = CFM_FACE | CFM_SIZE | CFM_COLOR | CFM_BOLD | CFM_ITALIC;
+  def_cf.yHeight = 200;
+  def_cf.crTextColor = fg;
+  wcsncpy_s(def_cf.szFaceName, ui_english_font_family(), _TRUNCATE);
+  SendMessageW(rich, EM_SETCHARFORMAT, SCF_DEFAULT, reinterpret_cast<LPARAM>(&def_cf));
+  const int len = GetWindowTextLengthW(rich);
+  if (len <= 0) return;
+  std::wstring current(static_cast<size_t>(len) + 1u, L'\0');
+  GetWindowTextW(rich, current.data(), len + 1);
+  current.resize(static_cast<size_t>(len));
+  set_rich_text_mixed(rich, current, primary_font, fg, true);
+}
+
 void apply_fonts(AppState* state) {
-  const wchar_t* family = font_available(L"Ubuntu") ? L"Ubuntu" : L"Segoe UI";
+  const wchar_t* english_family = ui_english_font_family();
+  const wchar_t* cjk_family = ui_cjk_font_family();
   const UINT dpi = GetDpiForWindow(state->window);
   const int pixels = -MulDiv(10, dpi, 72);
+  const int small_pixels = -MulDiv(9, dpi, 72);
   HFONT next = CreateFontW(pixels, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                           family);
+                           english_family);
+  HFONT next_cjk = CreateFontW(pixels, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                               cjk_family);
+  HFONT next_small = CreateFontW(small_pixels, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                 english_family);
+  HFONT next_small_cjk = CreateFontW(small_pixels, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                     cjk_family);
   HFONT next_title = CreateFontW(-MulDiv(12, dpi, 72), 0, 0, 0, FW_SEMIBOLD,
                                  FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                                 family);
-  if (!next || !next_title) {
+                                 english_family);
+  HFONT next_version = CreateFontW(pixels, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                   english_family);
+  if (!next || !next_cjk || !next_small || !next_small_cjk || !next_title || !next_version) {
     if (next) DeleteObject(next);
+    if (next_cjk) DeleteObject(next_cjk);
+    if (next_small) DeleteObject(next_small);
+    if (next_small_cjk) DeleteObject(next_small_cjk);
     if (next_title) DeleteObject(next_title);
+    if (next_version) DeleteObject(next_version);
     return;
   }
+  const auto [combo_sel_h, combo_list_h] = measure_native_combo_heights(next, dpi);
+  struct FontUpdate {
+    HWND title;
+    HWND version;
+    HFONT font;
+    LRESULT combo_sel_h;
+    LRESULT combo_list_h;
+  };
+  FontUpdate update{state->title, state->version, next, combo_sel_h, combo_list_h};
   EnumChildWindows(state->window, [](HWND child, LPARAM parameter) -> BOOL {
-    SendMessageW(child, WM_SETFONT, static_cast<WPARAM>(parameter), TRUE);
+    const auto* update = reinterpret_cast<const FontUpdate*>(parameter);
+    if (child != update->title && child != update->version) {
+      SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(update->font), TRUE);
+      wchar_t cls[64]{};
+      GetClassNameW(child, cls, 64);
+      if (_wcsicmp(cls, L"ComboBox") == 0) {
+        SendMessageW(child, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), update->combo_sel_h);
+        SendMessageW(child, CB_SETITEMHEIGHT, 0, update->combo_list_h);
+      }
+    }
     return TRUE;
-  }, reinterpret_cast<LPARAM>(next));
+  }, reinterpret_cast<LPARAM>(&update));
   SendMessageW(state->title, WM_SETFONT, reinterpret_cast<WPARAM>(next_title), TRUE);
+  SendMessageW(state->version, WM_SETFONT, reinterpret_cast<WPARAM>(next_version), TRUE);
   if (state->queue) {
     SendMessageW(state->queue, LB_SETITEMHEIGHT, 0, MulDiv(30, dpi, 96));
   }
@@ -1041,9 +1598,21 @@ void apply_fonts(AppState* state) {
     SendMessageW(state->tasks, LB_SETITEMHEIGHT, 0, MulDiv(52, dpi, 96));
   }
   if (state->font) DeleteObject(state->font);
+  if (state->cjk_font) DeleteObject(state->cjk_font);
+  if (state->small_font) DeleteObject(state->small_font);
+  if (state->small_cjk_font) DeleteObject(state->small_cjk_font);
   if (state->title_font) DeleteObject(state->title_font);
+  if (state->version_font) DeleteObject(state->version_font);
   state->font = next;
+  state->cjk_font = next_cjk;
+  state->small_font = next_small;
+  state->small_cjk_font = next_small_cjk;
   state->title_font = next_title;
+  state->version_font = next_version;
+  refresh_rich_mixed_style(state->inspector, state->font, state->surface_color, state->text_color);
+  refresh_rich_mixed_style(state->log, state->font, state->surface_color, state->text_color);
+  refresh_rich_mixed_style(state->base_name, state->font, state->surface_color, state->text_color);
+  refresh_rich_mixed_style(state->name_suffix, state->font, state->surface_color, state->text_color);
   RECT rect{};
   GetClientRect(state->window, &rect);
   layout(state, rect.right, rect.bottom);
@@ -1067,6 +1636,10 @@ void apply_theme(AppState* state) {
     SetWindowTheme(child, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
     return TRUE;
   }, state->dark ? 1 : 0);
+  refresh_rich_mixed_style(state->inspector, state->font, state->surface_color, state->text_color);
+  refresh_rich_mixed_style(state->log, state->font, state->surface_color, state->text_color);
+  refresh_rich_mixed_style(state->base_name, state->font, state->surface_color, state->text_color);
+  refresh_rich_mixed_style(state->name_suffix, state->font, state->surface_color, state->text_color);
   SendMessageW(state->progress, PBM_SETBARCOLOR, 0,
                state->dark ? RGB(92, 151, 224) : RGB(45, 112, 190));
   InvalidateRect(state->window, nullptr, TRUE);
@@ -1119,14 +1692,14 @@ void load_conversion_settings(AppState* state) {
   SendMessageW(state->transfer, CB_SETCURSEL,
                saved_index(L"OutputTransfer", 0, 2), 0);
   SendMessageW(state->gainmap_resolution, CB_SETCURSEL,
-               saved_index(L"GainMapResolution", 1, 2), 0);
+               saved_index(L"GainMapResolution", 2, 2), 0);
   SendMessageW(state->gainmap_channels, CB_SETCURSEL,
-               saved_index(L"GainMapChannels", 0, 1), 0);
+               saved_index(L"GainMapChannels", 1, 1), 0);
   state->uhdr_gainmap_channels = static_cast<int>(
       SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0));
   SendMessageW(state->peak, CB_SETCURSEL,
                saved_index(L"TargetPeak", 0, 4), 0);
-  state->normal_gainmap_resolution = saved_index(L"GainMapResolution", 1, 2);
+  state->normal_gainmap_resolution = saved_index(L"GainMapResolution", 2, 2);
   state->frame_gainmap_resolution = saved_index(L"FrameGainMapResolution", 2, 2);
   state->frame_gainmap_channels = saved_index(L"FrameGainMapChannels", 1, 1);
   state->frame_gamut = saved_index(L"FrameGamut", 12, 12) == 1 ? 1 : 12;
@@ -1159,7 +1732,7 @@ void load_conversion_settings(AppState* state) {
 }
 
 void reset_conversion_settings(AppState* state) {
-  state->encoding_values = {95, 4, 6, 95, 95, 95, 95, 95};
+  state->encoding_values = {95, 4, 6, 90, 95, 95, 95, 95};
   state->lossless_setting = true;
   state->tiff_compressed = true;
   SendMessageW(state->tiff_compression, CB_SETCURSEL, 0, 0);
@@ -1167,10 +1740,10 @@ void reset_conversion_settings(AppState* state) {
   SendMessageW(state->format, CB_SETCURSEL, 0, 0);
   SendMessageW(state->representation, CB_SETCURSEL, 0, 0);
   SendMessageW(state->transfer, CB_SETCURSEL, 0, 0);
-  SendMessageW(state->gainmap_resolution, CB_SETCURSEL, 1, 0);
-  SendMessageW(state->gainmap_channels, CB_SETCURSEL, 0, 0);
-  state->uhdr_gainmap_channels = 0;
-  state->normal_gainmap_resolution = 1; state->frame_gainmap_resolution = 2;
+  SendMessageW(state->gainmap_resolution, CB_SETCURSEL, 2, 0);
+  SendMessageW(state->gainmap_channels, CB_SETCURSEL, 1, 0);
+  state->uhdr_gainmap_channels = 1;
+  state->normal_gainmap_resolution = 2; state->frame_gainmap_resolution = 2;
   state->frame_gainmap_channels = 1; state->frame_gamut = 12;
   state->normal_copy_exif = true; state->normal_copy_xmp = true;
   SendMessageW(state->peak, CB_SETCURSEL, 0, 0);
@@ -1284,7 +1857,7 @@ std::wstring queue_summary(const std::filesystem::path& path,
       << L" · " << info.bit_depth << L"-bit";
   if (info.transfer == 16) out << L" PQ";
   else if (info.transfer == 18) out << L" HLG";
-  if (info.gain_map_present) out << L" · Gain map";
+  if (info.gain_map_present) out << L" · Gain Map";
   return out.str();
 }
 
@@ -1372,144 +1945,377 @@ LRESULT CALLBACK splitter_subclass(HWND control, UINT message, WPARAM wparam,
   return DefSubclassProc(control, message, wparam, lparam);
 }
 
+LRESULT CALLBACK mixed_static_subclass(HWND control, UINT message, WPARAM wparam,
+                                       LPARAM lparam, UINT_PTR, DWORD_PTR data) {
+  auto* state = reinterpret_cast<AppState*>(data);
+  if (message == WM_SETTEXT) {
+    const LRESULT result = DefSubclassProc(control, message, wparam, lparam);
+    InvalidateRect(control, nullptr, TRUE);
+    return result;
+  }
+  if (message == WM_ERASEBKGND) {
+    return 1;
+  }
+  if (message == WM_PAINT && state && state->font) {
+    PAINTSTRUCT ps{};
+    HDC dc = BeginPaint(control, &ps);
+    RECT rc{};
+    GetClientRect(control, &rc);
+    HBRUSH bg = reinterpret_cast<HBRUSH>(SendMessageW(
+        GetParent(control), WM_CTLCOLORSTATIC,
+        reinterpret_cast<WPARAM>(dc), reinterpret_cast<LPARAM>(control)));
+    FillRect(dc, &rc, bg ? bg : state->background_brush);
+    const int len = GetWindowTextLengthW(control);
+    if (len > 0) {
+      std::wstring text(static_cast<size_t>(len) + 1u, L'\0');
+      GetWindowTextW(control, text.data(), len + 1);
+      text.resize(static_cast<size_t>(len));
+      const LONG_PTR style = GetWindowLongPtrW(control, GWL_STYLE);
+      const LONG_PTR align = style & SS_TYPEMASK;
+      UINT flags = DT_TOP | (align == SS_CENTER ? DT_CENTER :
+                             align == SS_RIGHT ? DT_RIGHT : DT_LEFT);
+      if ((style & SS_PATHELLIPSIS) == SS_PATHELLIPSIS) flags |= DT_PATH_ELLIPSIS;
+      else if ((style & SS_ENDELLIPSIS) == SS_ENDELLIPSIS) flags |= DT_END_ELLIPSIS;
+      HFONT primary = control == state->title ? state->title_font :
+                      control == state->version ? state->version_font : state->font;
+      draw_mixed_text(dc, primary, state->cjk_font, text, rc, flags);
+    }
+    EndPaint(control, &ps);
+    return 0;
+  }
+  return DefSubclassProc(control, message, wparam, lparam);
+}
+
+LRESULT CALLBACK combo_mixed_subclass(HWND control, UINT message, WPARAM wparam,
+                                        LPARAM lparam, UINT_PTR, DWORD_PTR data) {
+  auto* state = reinterpret_cast<AppState*>(data);
+  if (message == WM_MOUSEMOVE) {
+    if (!GetPropW(control, L"HBHot")) {
+      SetPropW(control, L"HBHot", reinterpret_cast<HANDLE>(1));
+      TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, control, 0};
+      TrackMouseEvent(&tme);
+      InvalidateRect(control, nullptr, FALSE);
+    }
+  } else if (message == WM_MOUSELEAVE) {
+    RemovePropW(control, L"HBHot");
+    InvalidateRect(control, nullptr, FALSE);
+  } else if (message == WM_ERASEBKGND) {
+    return 1;
+  } else if (message == WM_PAINT && state && state->font) {
+    PAINTSTRUCT ps{};
+    HDC dc = BeginPaint(control, &ps);
+    RECT rc{};
+    GetClientRect(control, &rc);
+    const bool disabled = !IsWindowEnabled(control);
+    const UINT dpi = GetDpiForWindow(control);
+    const int btn_w = MulDiv(22, dpi, 96);
+    draw_combo_chrome(dc, control, rc, state->dark, state->surface_color,
+                      state->background_color, state->text_color,
+                      state->muted_text_color, btn_w);
+    const int sel = static_cast<int>(SendMessageW(control, CB_GETCURSEL, 0, 0));
+    if (sel >= 0) {
+      const int len = static_cast<int>(SendMessageW(control, CB_GETLBTEXTLEN, sel, 0));
+      if (len > 0) {
+        std::wstring text(static_cast<size_t>(len) + 1u, L'\0');
+        const int copied = static_cast<int>(SendMessageW(
+            control, CB_GETLBTEXT, sel, reinterpret_cast<LPARAM>(text.data())));
+        if (copied > 0) {
+          text.resize(static_cast<size_t>(copied));
+          RECT tr = rc;
+          tr.left += MulDiv(8, dpi, 96);
+          tr.right = std::max<LONG>(tr.left, rc.right - btn_w - MulDiv(2, dpi, 96));
+          SetTextColor(dc, disabled ? state->muted_text_color : state->text_color);
+          draw_mixed_text(dc, state->font, state->cjk_font, text, tr,
+                          DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+        }
+      }
+    }
+    if (GetFocus() == control &&
+        (SendMessageW(GetParent(control), WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS) == 0) {
+      RECT focus = rc;
+      InflateRect(&focus, -MulDiv(3, dpi, 96), -MulDiv(3, dpi, 96));
+      DrawFocusRect(dc, &focus);
+    }
+    EndPaint(control, &ps);
+    return 0;
+  } else if (message == WM_NCDESTROY) {
+    RemovePropW(control, L"HBHot");
+  }
+  return DefSubclassProc(control, message, wparam, lparam);
+}
+
+void update_rich_insets(HWND control) {
+  if (!control) return;
+  const UINT dpi = GetDpiForWindow(control);
+  const LONG_PTR style = GetWindowLongPtrW(control, GWL_STYLE);
+  if ((style & ES_MULTILINE) != 0) {
+    RECT rc{};
+    GetClientRect(control, &rc);
+    InflateRect(&rc, -MulDiv(8, dpi, 96), -MulDiv(6, dpi, 96));
+    SendMessageW(control, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&rc));
+  } else {
+    SendMessageW(control, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                 MAKELPARAM(MulDiv(6, dpi, 96), MulDiv(6, dpi, 96)));
+  }
+}
+
+LRESULT CALLBACK rich_edit_subclass(HWND control, UINT message, WPARAM wparam,
+                                    LPARAM lparam, UINT_PTR, DWORD_PTR data) {
+  auto* state = reinterpret_cast<AppState*>(data);
+  if (message == WM_NCCALCSIZE) {
+    const LRESULT res = DefSubclassProc(control, message, wparam, lparam);
+    if (wparam == TRUE && lparam) {
+      auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+      InflateRect(&params->rgrc[0], -1, -1);
+    }
+    return res;
+  }
+  if (message == WM_NCPAINT && state) {
+    const LRESULT res = DefSubclassProc(control, message, wparam, lparam);
+    HDC dc = GetWindowDC(control);
+    if (dc) {
+      RECT wr{};
+      GetWindowRect(control, &wr);
+      RECT frame{0, 0, wr.right - wr.left, wr.bottom - wr.top};
+      HBRUSH br = CreateSolidBrush(state->dark ? RGB(75, 82, 91) : RGB(190, 199, 208));
+      FrameRect(dc, &frame, br);
+      DeleteObject(br);
+      ReleaseDC(control, dc);
+    }
+    return res;
+  }
+  if (message == WM_SIZE) {
+    const LRESULT res = DefSubclassProc(control, message, wparam, lparam);
+    update_rich_insets(control);
+    return res;
+  }
+  if (message == WM_PAINT && state && state->font &&
+      control == state->base_name &&
+      GetWindowTextLengthW(control) == 0 && !state->base_name_cue.empty()) {
+    const LRESULT result = DefSubclassProc(control, message, wparam, lparam);
+    RECT rc{};
+    GetClientRect(control, &rc);
+    const UINT dpi = GetDpiForWindow(control);
+    rc.left += MulDiv(6, dpi, 96);
+    rc.right -= MulDiv(6, dpi, 96);
+    HDC dc = GetDC(control);
+    if (dc) {
+      SetTextColor(dc, state->muted_text_color);
+      draw_mixed_text(dc, state->font, state->cjk_font,
+                      ui::render(state->base_name_cue), rc,
+                      DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+      ReleaseDC(control, dc);
+    }
+    return result;
+  }
+  if (message == WM_PASTE && state &&
+      (control == state->base_name || control == state->name_suffix)) {
+    if (OpenClipboard(control)) {
+      std::wstring plain;
+      if (HANDLE handle = GetClipboardData(CF_UNICODETEXT)) {
+        if (const auto* ptr = static_cast<const wchar_t*>(GlobalLock(handle))) {
+          plain = ptr;
+          GlobalUnlock(handle);
+        }
+      }
+      CloseClipboard();
+      plain.erase(std::remove_if(plain.begin(), plain.end(), [](wchar_t ch) {
+        return ch == L'\r' || ch == L'\n';
+      }), plain.end());
+      if (!plain.empty()) {
+        HDC dc = GetDC(control);
+        const auto runs = split_font_runs(dc, state->font, plain);
+        if (dc) ReleaseDC(control, dc);
+        const wchar_t* eng_family = ui_english_font_family();
+        const wchar_t* cjk_family = ui_cjk_font_family();
+        for (const auto& run : runs) {
+          set_rich_selection_format(control, run.use_cjk ? cjk_family : eng_family,
+                                    state->text_color);
+          std::wstring chunk(run.text);
+          SendMessageW(control, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(chunk.c_str()));
+        }
+      }
+    }
+    return 0;
+  }
+  if (message == WM_CHAR && wparam == L'\r' &&
+      (GetWindowLongPtrW(control, GWL_STYLE) & ES_MULTILINE) == 0) {
+    return 0;
+  }
+  if (control == state->base_name &&
+      (message == WM_SETFOCUS || message == WM_KILLFOCUS || message == WM_CHAR ||
+       message == WM_SETTEXT || message == EM_REPLACESEL)) {
+    const LRESULT result = DefSubclassProc(control, message, wparam, lparam);
+    InvalidateRect(control, nullptr, TRUE);
+    return result;
+  }
+  return DefSubclassProc(control, message, wparam, lparam);
+}
+
+void refresh_inspector(AppState* state) {
+  set_rich_text_mixed(state->inspector, ui::render(state->inspector_text),
+                      state->font, state->text_color, true);
+}
+
+void set_inspector_text(AppState* state, const std::wstring& canonical,
+                        bool scroll_top = true) {
+  state->inspector_text = canonical;
+  set_rich_text_mixed(state->inspector, ui::render(canonical),
+                      state->font, state->text_color, !scroll_top);
+}
+
+void set_base_name_cue(AppState* state, const std::wstring& canonical) {
+  state->base_name_cue = canonical;
+  if (state->base_name) InvalidateRect(state->base_name, nullptr, TRUE);
+}
+
+void set_rich_editable_text(AppState* state, HWND rich, const std::wstring& text) {
+  set_rich_text_mixed(rich, text, state->font, state->text_color, false);
+}
+
+void refresh_activity(AppState* state) {
+  set_rich_text_mixed(state->log, ui::render(state->activity_text),
+                      state->font, state->text_color, true);
+}
+
 void append_log(AppState* state, const std::wstring& line) {
   const int length = GetWindowTextLengthW(state->log);
-  const std::wstring text = (length ? L"\r\n" : L"") + line;
-  SendMessageW(state->log, EM_SETSEL, length, length);
-  SendMessageW(state->log, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
+  const std::wstring canonical = (length > 0 ? L"\r\n" : L"") + line;
+  state->activity_text += canonical;
+  append_rich_mixed(state->log, ui::render(canonical), state->font, state->text_color);
   SendMessageW(state->log, EM_SCROLLCARET, 0, 0);
 }
 
 std::wstring metadata_status_label(const std::string& status) {
-  if (status == "present") return L"Present";
-  if (status == "absent") return L"Absent";
-  if (status == "read-error") return L"Read error";
-  return L"Unsupported";
+  if (status == "present") return HB_UI("Present");
+  if (status == "absent") return HB_UI("Absent");
+  if (status == "read-error") return HB_UI("Read error");
+  return HB_UI("Unsupported");
 }
 
 std::wstring primaries_label(uint16_t value) {
   if (value == 9) return L"BT.2020";
   if (value == 12) return L"Display P3 / P3-D65";
-  if (value == 1) return L"BT.709 / sRGB primaries";
-  return L"Unspecified / other primaries";
+  if (value == 1) return HB_UI("BT.709 / sRGB primaries");
+  return HB_UI("Unspecified / other primaries");
 }
 
 std::wstring transfer_label(uint16_t value) {
   if (value == 16) return L"PQ / ST 2084";
   if (value == 18) return L"HLG / BT.2100";
-  if (value == 13) return L"sRGB transfer";
-  if (value == 8) return L"Linear";
-  return L"Unspecified / other transfer";
+  if (value == 13) return HB_UI("sRGB transfer");
+  if (value == 8) return HB_UI("Linear");
+  return HB_UI("Unspecified / other transfer");
 }
 
 std::wstring matrix_label(uint16_t value) {
-  if (value == 0) return L"RGB / identity";
-  if (value == 9) return L"BT.2020 non-constant luminance";
-  return L"Matrix " + std::to_wstring(value);
+  if (value == 0) return HB_UI("RGB / identity");
+  if (value == 9) return HB_UI("BT.2020 non-constant luminance");
+  return HB_UI("Matrix ") + std::to_wstring(value);
 }
 
 std::wstring source_summary(const hdrbridge::SourceInfo& i) {
   std::wostringstream out;
-  out << L"IMAGE\r\n" << i.width << L" × " << i.height
+  out << HB_UI("IMAGE\r\n") << i.width << L" × " << i.height
       << L"\r\n" << widen(i.format) << L"  •  " << widen(i.asset_kind)
-      << L"\r\n\r\nCONTAINER\r\n" << widen(i.container_brand)
+      << HB_UI("\r\n\r\nCONTAINER\r\n") << widen(i.container_brand)
       << L"\r\n" << widen(i.codec);
 
   if (i.gain_map_present) {
-    out << L"\r\n\r\nBASE RENDITION\r\n"
+    out << HB_UI("\r\n\r\nBASE RENDITION\r\n")
         << i.base_width << L" × " << i.base_height << L"  •  "
         << i.base_bit_depth << L"-bit  •  " << widen(i.base_codec)
-        << L"  •  " << i.base_channels << L" channels"
+        << L"  •  " << i.base_channels << HB_UI(" channels")
         << L"\r\n" << widen(i.base_color_space) << L"  •  "
         << widen(i.base_transfer) << L"  •  "
-        << (!i.range_known ? L"Unknown range" : i.full_range ? L"Full range" : L"Limited range")
-        << L"\r\nSource color  " << primaries_label(i.primaries)
+        << (!i.range_known ? HB_UI("Unknown range") : i.full_range ? HB_UI("Full range") : HB_UI("Limited range"))
+        << HB_UI("\r\nSource color  ") << primaries_label(i.primaries)
         << L"  •  " << transfer_label(i.transfer)
         << L"  •  " << matrix_label(i.matrix)
-        << L"\r\n\r\nGAIN MAP\r\nFamily  " << widen(i.gain_map_family)
-        << L"\r\nMap  " << i.gain_map_width << L" × " << i.gain_map_height
-        << L"  •  " << (i.gain_map_channels == 3 ? L"RGB (3 channels)" :
-                          i.gain_map_channels == 1 ? L"Mono (1 channel)" : L"Unknown channels")
-        << L"\r\nScale  " << i.gain_map_scale_x << L"× × "
+        << HB_UI("\r\n\r\nGAIN MAP\r\nFamily  ") << widen(i.gain_map_family)
+        << HB_UI("\r\nMap  ") << i.gain_map_width << L" × " << i.gain_map_height
+        << L"  •  " << (i.gain_map_channels == 3 ? HB_UI("RGB (3 channels)") :
+                          i.gain_map_channels == 1 ? HB_UI("Mono (1 channel)") : HB_UI("Unknown channels"))
+        << HB_UI("\r\nScale  ") << i.gain_map_scale_x << L"× × "
         << i.gain_map_scale_y << L"×"
-        << L"\r\nCapacity  " << i.hdr_capacity_min << L" – "
+        << HB_UI("\r\nCapacity  ") << i.hdr_capacity_min << L" – "
         << i.hdr_capacity_max << L"×  (log2 " << i.base_hdr_headroom
         << L" – " << i.alternate_hdr_headroom << L")"
-        << L"\r\nGain min/max  R " << i.gain_map_min[0] << L" / " << i.gain_map_max[0]
+        << HB_UI("\r\nGain min/max  R ") << i.gain_map_min[0] << L" / " << i.gain_map_max[0]
         << L"  G " << i.gain_map_min[1] << L" / " << i.gain_map_max[1]
         << L"  B " << i.gain_map_min[2] << L" / " << i.gain_map_max[2]
-        << L"\r\nGamma  " << i.gain_map_gamma[0] << L" / "
+        << HB_UI("\r\nGamma  ") << i.gain_map_gamma[0] << L" / "
         << i.gain_map_gamma[1] << L" / " << i.gain_map_gamma[2];
     if (i.base_item_id || i.gain_map_item_id || i.tone_map_item_id) {
-      out << L"\r\nItems  base " << i.base_item_id << L" / map "
+      out << HB_UI("\r\nItems  base ") << i.base_item_id << HB_UI(" / map ")
           << i.gain_map_item_id << L" / tmap " << i.tone_map_item_id;
     }
     if (!i.auxiliary_type.empty()) {
-      out << L"\r\nAuxiliary type  " << widen(i.auxiliary_type);
+      out << HB_UI("\r\nAuxiliary type  ") << widen(i.auxiliary_type);
     }
-    out << L"\r\n\r\nRECONSTRUCTED HDR\r\n"
+    out << HB_UI("\r\n\r\nRECONSTRUCTED HDR\r\n")
         << i.width << L" × " << i.height << L"  •  "
         << widen(i.reconstructed_color_space) << L"  •  "
         << widen(i.reconstructed_transfer) << L"  •  "
         << widen(i.reconstructed_precision);
   } else {
-    out << L"\r\n\r\nPRIMARY ITEM\r\n";
+    out << HB_UI("\r\n\r\nPRIMARY ITEM\r\n");
     if (i.is_grid) {
-      out << L"Grid " << i.grid_columns << L" × " << i.grid_rows
-          << L"\r\nTile " << i.tile_width << L" × " << i.tile_height;
+      out << HB_UI("Grid ") << i.grid_columns << L" × " << i.grid_rows
+          << HB_UI("\r\nTile ") << i.tile_width << L" × " << i.tile_height;
     } else {
-      out << L"Single image";
+      out << HB_UI("Single image");
     }
-    out << L"\r\n\r\nSOURCE SIGNAL\r\n" << i.bit_depth << L"-bit  "
+    out << HB_UI("\r\n\r\nSOURCE SIGNAL\r\n") << i.bit_depth << L"-bit  "
         << widen(i.pixel_format) << L"  •  "
-        << (!i.range_known ? L"Unknown range" : i.full_range ? L"Full range" : L"Limited range")
-        << L"\r\n\r\nNATIVE SIGNAL\r\n";
+        << (!i.range_known ? HB_UI("Unknown range") : i.full_range ? HB_UI("Full range") : HB_UI("Limited range"))
+        << HB_UI("\r\n\r\nNATIVE SIGNAL\r\n");
     if (i.native_color_present) {
       out << widen(i.native_color_description) << L"  " << i.native_primaries
           << L" / " << i.native_transfer << L" / " << i.native_matrix
           << L"\r\n" << primaries_label(i.native_primaries) << L" / "
           << transfer_label(i.native_transfer);
     } else {
-      out << L"CICP/NCLX: Absent / Unspecified";
+      out << HB_UI("CICP/NCLX: Absent / Unspecified");
     }
-    out << L"\r\n\r\nICC SIGNAL\r\n";
+    out << HB_UI("\r\n\r\nICC SIGNAL\r\n");
     if (i.icc_present) {
-      out << L"Present\r\nProfile  "
-          << (i.icc_description.empty() ? L"Unreadable / unnamed" : widen(i.icc_description));
-      if (!i.icc_version.empty()) out << L"\r\nICC version  " << widen(i.icc_version);
+      out << HB_UI("Present\r\nProfile  ")
+          << (i.icc_description.empty() ? HB_UI("Unreadable / unnamed") : widen(i.icc_description));
+      if (!i.icc_version.empty()) out << HB_UI("\r\nICC version  ") << widen(i.icc_version);
       if (i.icc_cicp_present) {
         out << L"\r\nICC CICP  " << i.icc_primaries << L" / " << i.icc_transfer
             << L" / " << i.icc_matrix << L" / " << (i.icc_full_range ? 1 : 0)
             << L"\r\n" << primaries_label(i.icc_primaries) << L" / "
             << transfer_label(i.icc_transfer);
       } else {
-        out << L"\r\nICC CICP  Absent";
+        out << HB_UI("\r\nICC CICP  Absent");
         if (i.icc_transfer != 0 || i.icc_primaries != 0) {
-          out << L"\r\nICC transform  " << primaries_label(i.icc_primaries)
+          out << HB_UI("\r\nICC transform  ") << primaries_label(i.icc_primaries)
               << L" / " << transfer_label(i.icc_transfer);
         }
       }
       if (!i.icc_transfer_interpretation.empty()) {
-        out << L"\r\nInterpretation  " << widen(i.icc_transfer_interpretation);
+        out << HB_UI("\r\nInterpretation  ") << widen(i.icc_transfer_interpretation);
       }
     } else {
-      out << L"Absent";
+      out << HB_UI("Absent");
     }
-    out << L"\r\n\r\nRESOLVED COLOR\r\n"
+    out << HB_UI("\r\n\r\nRESOLVED COLOR\r\n")
         << primaries_label(i.primaries) << L" / " << transfer_label(i.transfer)
-        << L"\r\nHDR signaling  " << widen(i.resolved_signaling_source)
-        << (i.color_signaling_conflict ? L" — Color signaling conflict" : L"")
-        << L"\r\nRepresentation  " << widen(i.asset_kind)
-        << L"\r\nPrimaries  " << primaries_label(i.primaries)
-        << L"\r\nTransfer   " << transfer_label(i.transfer)
-        << L"\r\nMatrix     " << matrix_label(i.matrix);
+        << HB_UI("\r\nHDR signaling  ") << widen(i.resolved_signaling_source)
+        << (i.color_signaling_conflict ? HB_UI(" — Color signaling conflict") : L"")
+        << HB_UI("\r\nRepresentation  ") << widen(i.asset_kind)
+        << HB_UI("\r\nPrimaries  ") << primaries_label(i.primaries)
+        << HB_UI("\r\nTransfer   ") << transfer_label(i.transfer)
+        << HB_UI("\r\nMatrix     ") << matrix_label(i.matrix);
   }
-  out << L"\r\n\r\nSOURCE METADATA\r\nEXIF  " << metadata_status_label(i.exif_status)
+  out << HB_UI("\r\n\r\nSOURCE METADATA\r\nEXIF  ") << metadata_status_label(i.exif_status)
       << L"\r\nXMP   " << metadata_status_label(i.xmp_status)
       << L"\r\nICC   " << metadata_status_label(i.icc_status)
-      << L"\r\nOrientation  " << metadata_status_label(i.orientation_status)
-      << L"  •  source " << static_cast<int>(i.original_orientation)
-      << L" -> canonical " << static_cast<int>(
+      << HB_UI("\r\nOrientation  ") << metadata_status_label(i.orientation_status)
+      << HB_UI("  •  source ") << static_cast<int>(i.original_orientation)
+      << HB_UI(" -> canonical ") << static_cast<int>(
           i.orientation_normalized ? 1 : i.original_orientation);
   return out.str();
 }
@@ -1545,27 +2351,27 @@ std::wstring format_label_for_mode(const std::wstring& mode) {
   if (mode == L"jxr-scrgb-fp16") return L"JPEG XR FP16";
   if (mode == L"avif-pq10") return L"HDR AVIF";
   if (mode == L"tiff-pq16") return L"HDR TIFF";
-  if (mode == L"photo-frame") return L"Photo Frame";
-  return L"Gain Map";
+  if (mode == L"photo-frame") return HB_UI("Photo Frame");
+  return HB_UI("Gain Map");
 }
 
 std::wstring source_format_label(const std::filesystem::path& path) {
   std::wstring extension = path.extension().wstring();
   if (!extension.empty() && extension.front() == L'.') extension.erase(extension.begin());
   std::transform(extension.begin(), extension.end(), extension.begin(), towupper);
-  return extension.empty() ? L"Image" : extension;
+  return extension.empty() ? HB_UI("Image") : extension;
 }
 
 std::wstring task_summary(const ConversionTask& task) {
-  const wchar_t* marker = L"Pending";
-  if (task.status == QueueStatus::running) marker = L"PROCESSING";
-  else if (task.status == QueueStatus::success) marker = L"Complete";
-  else if (task.status == QueueStatus::skipped) marker = L"Skipped";
-  else if (task.status == QueueStatus::failed) marker = L"Failed";
+  const wchar_t* marker = HB_UI("Pending");
+  if (task.status == QueueStatus::running) marker = HB_UI("PROCESSING");
+  else if (task.status == QueueStatus::success) marker = HB_UI("Complete");
+  else if (task.status == QueueStatus::skipped) marker = HB_UI("Skipped");
+  else if (task.status == QueueStatus::failed) marker = HB_UI("Failed");
   std::wstring output_label = format_label_for_mode(task.options.mode);
   if (task.options.conversion.output_representation == "gainmap" &&
       (task.options.mode == L"jxl-pq16" || task.options.mode == L"avif-pq10")) {
-    output_label += L" (Gain Map)";
+    output_label += HB_UI(" (Gain Map)");
   }
   return source_format_label(task.source) + L" → " + output_label +
       L"    " + marker + L"\r\n" +
@@ -1575,10 +2381,10 @@ std::wstring task_summary(const ConversionTask& task) {
 void rebuild_task_list(AppState* state) {
   const LRESULT previous_top = SendMessageW(state->tasks, LB_GETTOPINDEX, 0, 0);
   const LRESULT previous_selection = SendMessageW(state->tasks, LB_GETCURSEL, 0, 0);
-  SendMessageW(state->tasks, LB_RESETCONTENT, 0, 0);
+  ui::send(state->tasks, LB_RESETCONTENT, 0, 0);
   for (const auto& task : state->conversion_tasks) {
     const auto text = task_summary(task);
-    SendMessageW(state->tasks, LB_ADDSTRING, 0,
+    ui::send(state->tasks, LB_ADDSTRING, 0,
                  reinterpret_cast<LPARAM>(text.c_str()));
   }
   SendMessageW(state->tasks, LB_SETITEMHEIGHT, 0,
@@ -1637,9 +2443,9 @@ void update_output_preview(AppState* state) {
         ? hdrbridge::desktop::CollisionPolicy::overwrite
         : hdrbridge::desktop::CollisionPolicy::auto_number;
     state->output = hdrbridge::desktop::resolve_output_path(request);
-    SetWindowTextW(state->output_path, state->output.c_str());
+    ui::set_text(state->output_path, state->output.c_str());
   } catch (const std::exception& error) {
-    SetWindowTextW(state->output_path, widen(error.what()).c_str());
+    ui::set_text(state->output_path, ui::mark_known(widen(error.what())).c_str());
   }
 }
 
@@ -1729,7 +2535,7 @@ void add_or_update_task(AppState* state) {
       task.status = QueueStatus::pending;
       state->conversion_tasks[static_cast<size_t>(state->editing_task)] = std::move(task);
       state->editing_task = -1;
-      SetWindowTextW(state->convert, L"Add to queue");
+      ui::set_text(state->convert, HB_UI("Add to queue"));
     } else {
       const int selected_count = static_cast<int>(SendMessageW(state->queue, LB_GETSELCOUNT, 0, 0));
       std::vector<int> selected(static_cast<size_t>(std::max(selected_count, 0)));
@@ -1755,21 +2561,8 @@ void add_or_update_task(AppState* state) {
     EnableWindow(state->cancel_button, !state->conversion_tasks.empty());
     EnableWindow(state->remove_all_tasks, !state->conversion_tasks.empty());
   } catch (const std::exception& error) {
-    MessageBoxW(state->window, widen(error.what()).c_str(), L"HDR Bridge", MB_OK | MB_ICONERROR);
+    ui::message_box(state->window, widen(error.what()).c_str(), L"HDR Bridge", MB_OK | MB_ICONERROR);
   }
-}
-
-void update_uhdr_format_note(AppState* state) {
-  constexpr const wchar_t* notes[] = {
-      L"Faithful / Auto • SDR base + ISO gain map",
-      L"1000-nit target • SDR base + ISO gain map",
-      L"2000-nit target • SDR base + ISO gain map",
-      L"4000-nit target • SDR base + ISO gain map",
-      L"10000-nit target • SDR base + ISO gain map",
-  };
-  const int peak_index = std::clamp(static_cast<int>(
-      SendMessageW(state->peak, CB_GETCURSEL, 0, 0)), 0, 4);
-  SetWindowTextW(state->format_note, notes[peak_index]);
 }
 
 void update_mode_ui(AppState* state, bool restore_saved_gamut) {
@@ -1803,27 +2596,15 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
   if (transfer_index == CB_ERR) transfer_index = saved_index(L"OutputTransfer", 0, 2);
   const bool representation_output = index == 3 || index == 5;
   if (!representation_output && transfer_index == 2) transfer_index = 0;
-  SendMessageW(state->transfer, CB_RESETCONTENT, 0, 0);
-  SendMessageW(state->transfer, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"PQ / ST2084 — default"));
-  SendMessageW(state->transfer, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"HLG"));
+  ui::send(state->transfer, CB_RESETCONTENT, 0, 0);
+  ui::send(state->transfer, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("PQ / ST2084 — default")));
+  ui::send(state->transfer, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"HLG"));
   if (representation_output) {
-    SendMessageW(state->transfer, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Gain Map"));
+    ui::send(state->transfer, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("Gain Map")));
   }
   SendMessageW(state->transfer, CB_SETCURSEL, transfer_index, 0);
   const int representation_index = (index == 3 || index == 5) && transfer_index == 2 ? 1 : 0;
   const bool hlg = transfer_index == 1;
-  std::wstring note;
-  if (index == 0) update_uhdr_format_note(state);
-  else if (index == 1) note = hlg ? L"16-bit HLG • cICP 9/18/0/1" : L"16-bit PQ • cICP 9/16/0/1 • Rec.2100 PQ ICC";
-  else if (index == 2) note = L"RGB16 PQ • professional interchange";
-  else if (index == 3) note = representation_index == 1 ? L"ISO gain map • edit / master" :
-      hlg ? L"HLG • edit / master" : L"PQ • edit / master";
-  else if (index == 4) note = L"FP16 linear scRGB • Windows workflow";
-  else if (index == 5) note = representation_index == 1 ? L"ISO gain map • compact delivery" :
-      hlg ? L"HLG • compact delivery" : L"PQ • compact delivery";
-  else if (index == 6) note = L"Extract embedded Gain Map • original payload when available";
-  else note = L"Photo Frame • camera logo and caption";
-  if (index != 0) SetWindowTextW(state->format_note, note.c_str());
   const bool ultrahdr_output = index == 0 || index == 7;
   const bool gainmap_output = ultrahdr_output ||
       (representation_output && representation_index == 1);
@@ -1843,21 +2624,21 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
   ShowWindow(state->gainmap_export_format, index == 6 ? SW_SHOW : SW_HIDE);
   ShowWindow(state->gamut, (ultrahdr_output || index == 1 || index == 2 ||
                             index == 3 || index == 5) ? SW_SHOW : SW_HIDE);
-  SendMessageW(state->gamut, CB_RESETCONTENT, 0, 0);
+  ui::send(state->gamut, CB_RESETCONTENT, 0, 0);
   const auto add_gamut = [&](const wchar_t* label, int cicp) {
-    const int item = static_cast<int>(SendMessageW(
+    const int item = static_cast<int>(ui::send(
         state->gamut, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label)));
     SendMessageW(state->gamut, CB_SETITEMDATA, item, cicp);
   };
   if (ultrahdr_output) {
     add_gamut(L"Rec.709", 1);
-    add_gamut(L"Display P3 — default", 12);
+    add_gamut(HB_UI("Display P3 — default"), 12);
   } else if (gainmap_output) {
     add_gamut(L"Rec.709", 1);
-    add_gamut(L"Display P3 — default", 12);
+    add_gamut(HB_UI("Display P3 — default"), 12);
     add_gamut(L"Rec.2020", 9);
   } else {
-    add_gamut(L"Rec.2020 — Video default", 9);
+    add_gamut(HB_UI("Rec.2020 — default"), 9);
     add_gamut(L"Display P3", 12);
   }
   int saved_gamut = -1;
@@ -1888,7 +2669,7 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
                  index == 7 ? state->frame_gainmap_channels : state->uhdr_gainmap_channels, 0);
   }
   EnableWindow(state->gainmap_channels, ultrahdr_output);
-  SetWindowTextW(state->lossless, L"Lossless");
+  ui::set_text(state->lossless, HB_UI("Lossless"));
   SendMessageW(state->lossless, BM_SETCHECK,
                (index != 7 && (index == 1 || index == 2 || state->lossless_setting))
                    ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1904,7 +2685,7 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
                  compression ? MAKELPARAM(1, 9) : MAKELPARAM(1, 100));
     const int value = state->encoding_values[static_cast<size_t>(std::clamp(index, 0, 7))];
     SendMessageW(state->quality, TBM_SETPOS, TRUE, value);
-    SetWindowTextW(state->quality_value,
+    ui::set_text(state->quality_value,
                    (std::to_wstring(value) + (compression ? L"" : L"%")).c_str());
     state->last_encoding_format_index = index;
   }
@@ -1927,8 +2708,9 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
     const auto extension = hdrbridge::desktop::extension_for_mode(
         mode, gainmap_format == 1 ? L"png" : gainmap_format == 2 ? L"tiff" :
               gainmap_format == 3 ? L"jpeg" : L"original", state->input);
-    SetWindowTextW(state->name_suffix, mode == L"gainmap-extract" ? L"_gainmap" : mode == L"photo-frame" ? L"_frame" :
-                   complete_suffix.substr(0, complete_suffix.size() - extension.size()).c_str());
+    set_rich_editable_text(state, state->name_suffix,
+        mode == L"gainmap-extract" ? L"_gainmap" : mode == L"photo-frame" ? L"_frame" :
+        complete_suffix.substr(0, complete_suffix.size() - extension.size()));
     state->last_format_index = index;
     state->last_transfer_index = transfer_index;
   }
@@ -1949,7 +2731,7 @@ void layout(AppState* s, int width, int height) {
   const auto previous_font = SelectObject(dc, s->title_font);
   GetTextExtentPoint32W(dc, L"HDR Bridge", 10, &title_size);
   GetTextMetricsW(dc, &title_metrics);
-  SelectObject(dc, s->font);
+  SelectObject(dc, s->version_font ? s->version_font : s->font);
   wchar_t version_text[256]{};
   GetWindowTextW(s->version, version_text, 256);
   GetTextExtentPoint32W(dc, version_text, static_cast<int>(wcslen(version_text)), &version_size);
@@ -2013,22 +2795,21 @@ void layout(AppState* s, int width, int height) {
 
   MoveWindow(s->output_label, right_x, content_top + 3, right_width, 26, TRUE);
   MoveWindow(s->format, right_x, content_top + 36, right_width, 220, TRUE);
-  MoveWindow(s->format_note, right_x, content_top + 72, right_width, 24, TRUE);
   const int peak_row_gap = 8;
   const int peak_row_width = (right_width - peak_row_gap) / 2;
-  MoveWindow(s->representation, right_x, content_top + 100, right_width, 150, TRUE);
+  MoveWindow(s->representation, right_x, content_top + 72, right_width, 150, TRUE);
   const int format_index = static_cast<int>(SendMessageW(s->format, CB_GETCURSEL, 0, 0));
   const bool jpeg_gainmap = format_index == 0 || format_index == 7;
   const bool non_jpeg_gainmap = (format_index == 3 || format_index == 5) &&
       SendMessageW(s->transfer, CB_GETCURSEL, 0, 0) == 2;
   const int representation_offset = non_jpeg_gainmap ? 34 : 0;
-  const int color_row_y = content_top + 100;
+  const int color_row_y = content_top + 72;
   MoveWindow(s->gamut, right_x, color_row_y,
              (jpeg_gainmap || non_jpeg_gainmap) ? peak_row_width : right_width, 150, TRUE);
   MoveWindow(s->peak, right_x + peak_row_width + peak_row_gap, color_row_y,
              peak_row_width, 170, TRUE);
-  const int transfer_row_y = non_jpeg_gainmap ? content_top + 168 : content_top + 134;
-  const int parameter_row_y = non_jpeg_gainmap ? content_top + 134 : content_top + 134;
+  const int transfer_row_y = non_jpeg_gainmap ? content_top + 140 : content_top + 106;
+  const int parameter_row_y = content_top + 106;
   MoveWindow(s->transfer, right_x, transfer_row_y, right_width, 170, TRUE);
   const int gainmap_option_gap = 8;
   const int gainmap_option_width = (right_width - gainmap_option_gap) / 2;
@@ -2037,51 +2818,52 @@ void layout(AppState* s, int width, int height) {
   MoveWindow(s->gainmap_channels,
              right_x + gainmap_option_width + gainmap_option_gap,
              parameter_row_y, gainmap_option_width, 150, TRUE);
-  MoveWindow(s->tiff_compression, right_x, content_top + 134, right_width, 150, TRUE);
-  MoveWindow(s->gainmap_export_format, right_x, content_top + 100, right_width, 150, TRUE);
+  MoveWindow(s->tiff_compression, right_x, content_top + 106, right_width, 150, TRUE);
+  MoveWindow(s->gainmap_export_format, right_x, content_top + 72, right_width, 150, TRUE);
   const int lower_offset = representation_offset;
   const int option_gap = 8;
   const int option_width = (right_width - option_gap * 2) / 3;
-  MoveWindow(s->lossless, right_x, content_top + 170 + lower_offset, option_width, 28, TRUE);
+  MoveWindow(s->lossless, right_x, content_top + 142 + lower_offset, option_width, 28, TRUE);
   MoveWindow(s->copy_exif, right_x + option_width + option_gap,
-             content_top + 170 + lower_offset, option_width, 28, TRUE);
+             content_top + 142 + lower_offset, option_width, 28, TRUE);
   MoveWindow(s->copy_xmp, right_x + (option_width + option_gap) * 2,
-             content_top + 170 + lower_offset, option_width, 28, TRUE);
-  MoveWindow(s->quality, right_x, content_top + 202 + lower_offset, right_width - 62, 24, TRUE);
-  MoveWindow(s->quality_value, right_x + right_width - 54, content_top + 202 + lower_offset, 54, 24, TRUE);
-  MoveWindow(s->source_folder, right_x, content_top + 234 + lower_offset, 160, 28, TRUE);
-  MoveWindow(s->choose_folder, right_x + 168, content_top + 232 + lower_offset, 104, 32, TRUE);
-  MoveWindow(s->folder_path, right_x + 282, content_top + 236 + lower_offset, right_width - 282, 24, TRUE);
-  MoveWindow(s->base_name, right_x, content_top + 270 + lower_offset, right_width * 57 / 100, 30, TRUE);
-  MoveWindow(s->name_suffix, right_x + right_width * 59 / 100, content_top + 270 + lower_offset,
+             content_top + 142 + lower_offset, option_width, 28, TRUE);
+  MoveWindow(s->quality, right_x, content_top + 174 + lower_offset, right_width - 62, 24, TRUE);
+  MoveWindow(s->quality_value, right_x + right_width - 54, content_top + 174 + lower_offset, 54, 24, TRUE);
+  MoveWindow(s->source_folder, right_x, content_top + 206 + lower_offset, 160, 28, TRUE);
+  MoveWindow(s->choose_folder, right_x + 168, content_top + 204 + lower_offset, 104, 32, TRUE);
+  MoveWindow(s->folder_path, right_x + 282, content_top + 208 + lower_offset, right_width - 282, 24, TRUE);
+  MoveWindow(s->base_name, right_x, content_top + 242 + lower_offset, right_width * 57 / 100, 30, TRUE);
+  MoveWindow(s->name_suffix, right_x + right_width * 59 / 100, content_top + 242 + lower_offset,
              right_width * 41 / 100, 30, TRUE);
   const int collision_width = right_width * 72 / 100;
-  MoveWindow(s->collision, right_x, content_top + 306 + lower_offset, collision_width, 110, TRUE);
-  MoveWindow(s->use_suffix, right_x + collision_width + 8, content_top + 306 + lower_offset,
+  MoveWindow(s->collision, right_x, content_top + 278 + lower_offset, collision_width, 110, TRUE);
+  MoveWindow(s->use_suffix, right_x + collision_width + 8, content_top + 278 + lower_offset,
              right_width - collision_width - 8, 30, TRUE);
   const int action_gap = 10;
   constexpr int action_height = 38;
   const int task_action_width = (right_width - action_gap * 2) / 3;
-  MoveWindow(s->convert, right_x, content_top + 344 + lower_offset,
+  MoveWindow(s->convert, right_x, content_top + 316 + lower_offset,
              task_action_width, action_height, TRUE);
   MoveWindow(s->remove_all_tasks,
              right_x + task_action_width + action_gap,
-             content_top + 344 + lower_offset,
+             content_top + 316 + lower_offset,
              task_action_width, action_height, TRUE);
   MoveWindow(s->cancel_button,
              right_x + (task_action_width + action_gap) * 2,
-             content_top + 344 + lower_offset,
+             content_top + 316 + lower_offset,
              right_width - task_action_width * 2 - action_gap * 2,
              action_height, TRUE);
-  MoveWindow(s->tasks_label, right_x, content_top + 390 + lower_offset, right_width, 24, TRUE);
-  MoveWindow(s->tasks, right_x, content_top + 416 + lower_offset, right_width,
-             std::max(100, content_bottom - (content_top + 416 + lower_offset)), TRUE);
+  MoveWindow(s->tasks_label, right_x, content_top + 362 + lower_offset, right_width, 24, TRUE);
+  MoveWindow(s->tasks, right_x, content_top + 388 + lower_offset, right_width,
+             std::max(100, content_bottom - (content_top + 388 + lower_offset)), TRUE);
 
   const int status_y = split_y + 12;
   MoveWindow(s->progress, margin, status_y, width - margin * 2, 8, TRUE);
   MoveWindow(s->activity_label, margin, status_y + 16, width - margin * 2, 24, TRUE);
   MoveWindow(s->log, margin, status_y + 44, width - margin * 2,
              height - (status_y + 44) - margin, TRUE);
+  RedrawWindow(s->title, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
 }
 
 bool supported_source(const std::filesystem::path& path) {
@@ -2095,19 +2877,19 @@ std::wstring pending_queue_summary(const std::filesystem::path& path) {
   std::wstring extension = path.extension().wstring();
   if (!extension.empty() && extension.front() == L'.') extension.erase(extension.begin());
   std::transform(extension.begin(), extension.end(), extension.begin(), towupper);
-  return path.filename().wstring() + L"    " + extension + L" • Metadata pending";
+  return path.filename().wstring() + L"    " + extension + HB_UI(" • Metadata pending");
 }
 
 std::wstring queue_result_summary(const std::filesystem::path& path,
                                   QueueStatus status) {
   if (status == QueueStatus::success) {
-    return path.filename().wstring() + L"    Converted";
+    return path.filename().wstring() + HB_UI("    Converted");
   }
   if (status == QueueStatus::skipped) {
-    return path.filename().wstring() + L"    Skipped \u2014 No HDR data";
+    return path.filename().wstring() + HB_UI("    Skipped \u2014 No HDR data");
   }
   if (status == QueueStatus::failed) {
-    return path.filename().wstring() + L"    Failed \u2014 Decode error";
+    return path.filename().wstring() + HB_UI("    Failed \u2014 Decode error");
   }
   return pending_queue_summary(path);
 }
@@ -2121,8 +2903,8 @@ void replace_queue_summary(HWND queue, int index, const std::wstring& text) {
   }
   const int caret = static_cast<int>(SendMessageW(queue, LB_GETCARETINDEX, 0, 0));
   const int top = static_cast<int>(SendMessageW(queue, LB_GETTOPINDEX, 0, 0));
-  SendMessageW(queue, LB_DELETESTRING, index, 0);
-  SendMessageW(queue, LB_INSERTSTRING, index, reinterpret_cast<LPARAM>(text.c_str()));
+  ui::send(queue, LB_DELETESTRING, index, 0);
+  ui::send(queue, LB_INSERTSTRING, index, reinterpret_cast<LPARAM>(text.c_str()));
   for (int item = 0; item < count; ++item) {
     if (selected[static_cast<size_t>(item)]) SendMessageW(queue, LB_SETSEL, TRUE, item);
   }
@@ -2160,7 +2942,7 @@ void load_source(AppState* state, const std::filesystem::path& path) {
     if (!supported_source(path)) {
       throw std::runtime_error("Select a supported HDR HIF/HEIF, UHDR, PNG, TIFF, AVIF, JXL, or JXR asset.");
     }
-    SetWindowTextW(state->status, L"Inspecting source…");
+    ui::set_text(state->status, HB_UI("Inspecting source…"));
     hdrbridge::SourceInfo info;
     const auto found = std::find(state->inputs.begin(), state->inputs.end(), path);
     const size_t cached_index = found == state->inputs.end()
@@ -2178,25 +2960,27 @@ void load_source(AppState* state, const std::filesystem::path& path) {
     state->input = path;
     const std::wstring path_text = path.wstring();
     const std::wstring inspector_text = source_summary(info);
-    SendMessageW(state->source_path, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(path_text.c_str()));
-    SendMessageW(state->inspector, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(inspector_text.c_str()));
-    SetWindowTextW(state->status, L"Source ready");
-    SetWindowTextW(state->base_name,
-                   state->inputs.size() > 1u ? L"Per-source base names" : path.stem().c_str());
+    ui::send(state->source_path, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(path_text.c_str()));
+    set_inspector_text(state, inspector_text, true);
+    ui::set_text(state->status, HB_UI("Source ready"));
+    set_rich_editable_text(state, state->base_name,
+                           state->inputs.size() > 1u ? std::wstring() : path.stem().wstring());
+    set_base_name_cue(state, state->inputs.size() > 1u ? HB_UI("Per-source base names")
+                                                       : HB_UI("Base name"));
     if (state->use_source_folder) {
-      SetWindowTextW(state->folder_path, path.parent_path().c_str());
+      ui::set_text(state->folder_path, path.parent_path().c_str());
     } else if (!state->selected_folder.empty()) {
-      SetWindowTextW(state->folder_path, state->selected_folder.c_str());
+      ui::set_text(state->folder_path, state->selected_folder.c_str());
     }
     update_mode_ui(state);
     request_preview(state, path);
     EnableWindow(state->convert, TRUE);
-    append_log(state, L"Source inspected: " + std::to_wstring(info.width) + L"×" + std::to_wstring(info.height) +
+    append_log(state, HB_UI("Source inspected: ") + std::to_wstring(info.width) + L"×" + std::to_wstring(info.height) +
                       L", " + widen(info.chroma) + L", " + std::to_wstring(info.bit_depth) + L"-bit, CICP " +
                       std::to_wstring(info.primaries) + L"/" + std::to_wstring(info.transfer) + L"/" + std::to_wstring(info.matrix));
   } catch (const std::exception& e) {
-    SetWindowTextW(state->status, L"Inspection failed");
-    MessageBoxW(state->window, widen(e.what()).c_str(), L"HDR Bridge", MB_OK | MB_ICONERROR);
+    ui::set_text(state->status, HB_UI("Inspection failed"));
+    ui::message_box(state->window, widen(e.what()).c_str(), L"HDR Bridge", MB_OK | MB_ICONERROR);
   }
 }
 
@@ -2205,7 +2989,7 @@ void add_sources(AppState* state, const std::vector<std::filesystem::path>& path
   size_t first_added = state->inputs.size();
   for (const auto& path : paths) {
     if (!supported_source(path)) {
-      append_log(state, L"Skipped unsupported file: " + path.wstring());
+      append_log(state, HB_UI("Skipped unsupported file: ") + path.wstring());
       continue;
     }
     const auto absolute = std::filesystem::absolute(path).lexically_normal();
@@ -2214,7 +2998,7 @@ void add_sources(AppState* state, const std::vector<std::filesystem::path>& path
     state->input_infos.emplace_back(std::nullopt);
     state->input_statuses.emplace_back();
     const auto label = pending_queue_summary(absolute);
-    SendMessageW(state->queue, LB_ADDSTRING, 0,
+    ui::send(state->queue, LB_ADDSTRING, 0,
                  reinterpret_cast<LPARAM>(label.c_str()));
   }
   if (state->inputs.empty()) return;
@@ -2225,8 +3009,8 @@ void add_sources(AppState* state, const std::vector<std::filesystem::path>& path
   load_source(state, state->inputs[first_added]);
   EnableWindow(state->remove, TRUE);
   EnableWindow(state->clear, TRUE);
-  SetWindowTextW(state->convert, L"Add to queue");
-  append_log(state, L"Batch queue: " + std::to_wstring(state->inputs.size()) + L" file(s), sequential processing");
+  ui::set_text(state->convert, HB_UI("Add to queue"));
+  append_log(state, HB_UI("Batch queue: ") + std::to_wstring(state->inputs.size()) + HB_UI(" file(s), sequential processing"));
 }
 
 std::filesystem::path shell_item_path(IShellItem* item) {
@@ -2253,12 +3037,12 @@ void choose_source(AppState* state) {
   HRESULT result = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
                                     IID_PPV_ARGS(&dialog));
   if (FAILED(result)) {
-    MessageBoxW(state->window, L"The Windows file picker could not be created.",
+    ui::message_box(state->window, HB_UI("The Windows file picker could not be created."),
                 L"HDR Bridge", MB_OK | MB_ICONERROR);
     return;
   }
-  constexpr COMDLG_FILTERSPEC filters[] = {
-      {L"All supported HDR images", L"*.avif;*.heif;*.heic;*.hif;*.jpg;*.jpeg;*.jpe;*.jxl;*.jxr;*.wdp;*.hdp;*.png;*.tif;*.tiff"},
+  const COMDLG_FILTERSPEC canonical_filters[] = {
+      {HB_UI("All supported HDR images"), L"*.avif;*.heif;*.heic;*.hif;*.jpg;*.jpeg;*.jpe;*.jxl;*.jxr;*.wdp;*.hdp;*.png;*.tif;*.tiff"},
       {L"AVIF (*.avif)", L"*.avif"},
       {L"HEIF (*.heif;*.heic;*.hif)", L"*.heif;*.heic;*.hif"},
       {L"JPEG (*.jpg;*.jpeg;*.jpe)", L"*.jpg;*.jpeg;*.jpe"},
@@ -2266,14 +3050,21 @@ void choose_source(AppState* state) {
       {L"JPEG XR (*.jxr;*.wdp;*.hdp)", L"*.jxr;*.wdp;*.hdp"},
       {L"PNG (*.png)", L"*.png"},
       {L"TIFF (*.tif;*.tiff)", L"*.tif;*.tiff"},
-      {L"All files (*.*)", L"*.*"}};
+      {HB_UI("All files (*.*)"), L"*.*"}};
   DWORD options = 0;
   dialog->GetOptions(&options);
   dialog->SetOptions(options | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST |
                      FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
-  dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
+  std::vector<std::wstring> filter_names;
+  std::vector<COMDLG_FILTERSPEC> filters;
+  filter_names.reserve(std::size(canonical_filters));
+  for (const auto& filter : canonical_filters) filter_names.push_back(ui::render(filter.pszName));
+  for (size_t index = 0; index < filter_names.size(); ++index)
+    filters.push_back({filter_names[index].c_str(), canonical_filters[index].pszSpec});
+  dialog->SetFileTypes(static_cast<UINT>(filters.size()), filters.data());
   dialog->SetFileTypeIndex(1);
-  dialog->SetTitle(L"Add HDR images");
+  dialog->SetTitle(ui::render(HB_UI("Add HDR images")).c_str());
+  dialog->SetOkButtonLabel(ui::render(HB_UI("Add")).c_str());
   set_dialog_initial_folder(dialog, state->input.empty()
       ? state->selected_folder : state->input.parent_path());
   result = dialog->Show(state->window);
@@ -2296,7 +3087,7 @@ void choose_source(AppState* state) {
       add_sources(state, paths);
     }
   } else if (result != HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
-    MessageBoxW(state->window, L"The Windows file picker failed.",
+    ui::message_box(state->window, HB_UI("The Windows file picker failed."),
                 L"HDR Bridge", MB_OK | MB_ICONERROR);
   }
   dialog->Release();
@@ -2307,14 +3098,15 @@ void choose_output_folder(AppState* state) {
   HRESULT result = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
                                     IID_PPV_ARGS(&dialog));
   if (FAILED(result)) {
-    MessageBoxW(state->window, L"The Windows folder picker could not be created.",
+    ui::message_box(state->window, HB_UI("The Windows folder picker could not be created."),
                 L"HDR Bridge", MB_OK | MB_ICONERROR);
     return;
   }
   DWORD options = 0;
   dialog->GetOptions(&options);
   dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
-  dialog->SetTitle(L"Choose output folder");
+  dialog->SetTitle(ui::render(HB_UI("Choose output folder")).c_str());
+  dialog->SetOkButtonLabel(ui::render(HB_UI("Select folder")).c_str());
   const auto initial = !state->selected_folder.empty() ? state->selected_folder :
       (!state->input.empty() ? state->input.parent_path() : std::filesystem::path{});
   set_dialog_initial_folder(dialog, initial);
@@ -2327,13 +3119,13 @@ void choose_output_folder(AppState* state) {
       if (!path.empty()) {
         state->selected_folder = path;
         state->use_source_folder = false;
-        SetWindowTextW(state->folder_path, path.c_str());
+        ui::set_text(state->folder_path, path.c_str());
         SendMessageW(state->source_folder, BM_SETCHECK, BST_UNCHECKED, 0);
         update_output_preview(state);
       }
     }
   } else if (result != HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
-    MessageBoxW(state->window, L"The Windows folder picker failed.",
+    ui::message_box(state->window, HB_UI("The Windows folder picker failed."),
                 L"HDR Bridge", MB_OK | MB_ICONERROR);
   }
   dialog->Release();
@@ -2359,15 +3151,15 @@ void remove_selected_source(AppState* state) {
     if (static_cast<size_t>(index) < state->input_statuses.size()) {
       state->input_statuses.erase(state->input_statuses.begin() + index);
     }
-    SendMessageW(state->queue, LB_DELETESTRING, index, 0);
+    ui::send(state->queue, LB_DELETESTRING, index, 0);
   }
   if (state->inputs.empty()) {
     state->input.clear();
     state->output.clear();
-    SetWindowTextW(state->source_path, L"Drop or add supported HDR still images");
-    SetWindowTextW(state->inspector, L"SOURCE INSPECTOR\r\n\r\nNo image selected");
-    SetWindowTextW(state->output_path, L"No output yet");
-    SetWindowTextW(state->status, L"Ready");
+    ui::set_text(state->source_path, HB_UI("Drop or add supported HDR still images"));
+    set_inspector_text(state, HB_UI("SOURCE INSPECTOR\r\n\r\nNo image selected"), true);
+    ui::set_text(state->output_path, HB_UI("No output yet"));
+    ui::set_text(state->status, HB_UI("Ready"));
     EnableWindow(state->convert, FALSE);
     EnableWindow(state->remove, FALSE);
     EnableWindow(state->clear, FALSE);
@@ -2377,7 +3169,7 @@ void remove_selected_source(AppState* state) {
   SendMessageW(state->queue, LB_SETSEL, TRUE, next);
   SendMessageW(state->queue, LB_SETCARETINDEX, next, FALSE);
   load_source(state, state->inputs[static_cast<size_t>(next)]);
-  SetWindowTextW(state->convert, L"Add to queue");
+  ui::set_text(state->convert, HB_UI("Add to queue"));
 }
 
 void clear_sources(AppState* state) {
@@ -2387,12 +3179,12 @@ void clear_sources(AppState* state) {
   state->input_statuses.clear();
   state->input.clear();
   state->output.clear();
-  SendMessageW(state->queue, LB_RESETCONTENT, 0, 0);
-  SetWindowTextW(state->source_path, L"Drop or add supported HDR still images");
-  SetWindowTextW(state->inspector, L"SOURCE INSPECTOR\r\n\r\nNo image selected");
-  SetWindowTextW(state->output_path, L"No output yet");
-  SetWindowTextW(state->status, L"Ready");
-  SetWindowTextW(state->convert, L"Add to queue");
+  ui::send(state->queue, LB_RESETCONTENT, 0, 0);
+  ui::set_text(state->source_path, HB_UI("Drop or add supported HDR still images"));
+  set_inspector_text(state, HB_UI("SOURCE INSPECTOR\r\n\r\nNo image selected"), true);
+  ui::set_text(state->output_path, HB_UI("No output yet"));
+  ui::set_text(state->status, HB_UI("Ready"));
+  ui::set_text(state->convert, HB_UI("Add to queue"));
   EnableWindow(state->convert, FALSE);
   EnableWindow(state->remove, FALSE);
   EnableWindow(state->clear, FALSE);
@@ -2424,149 +3216,8 @@ void set_running(AppState* state, bool running) {
   EnableWindow(state->convert, !running && !state->inputs.empty());
   EnableWindow(state->cancel_button, running || !state->conversion_tasks.empty());
   EnableWindow(state->remove_all_tasks, !running && !state->conversion_tasks.empty());
-  SetWindowTextW(state->cancel_button, running ? L"Stop" : L"Start all");
+  ui::set_text(state->cancel_button, running ? HB_UI("Stop") : HB_UI("Start all"));
   if (!running) update_mode_ui(state);
-}
-
-void start_conversion(AppState* state) {
-  if (state->running || state->inputs.empty()) return;
-  const int index = static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0));
-  const std::wstring mode_w = mode_for_index(index);
-  update_output_preview(state);
-  if (state->output.empty()) return;
-  EnableWindow(state->reveal, FALSE);
-  EnableWindow(state->open_output, FALSE);
-  state->cancel.store(false);
-  for (size_t item = 0; item < state->inputs.size(); ++item) {
-    if (item < state->input_statuses.size()) state->input_statuses[item] = {};
-    replace_queue_summary(state->queue, static_cast<int>(item),
-                          state->input_infos[item]
-                              ? queue_summary(state->inputs[item], *state->input_infos[item])
-                              : pending_queue_summary(state->inputs[item]));
-  }
-  InvalidateRect(state->queue, nullptr, TRUE);
-  KillTimer(state->window, kProgressResetTimer);
-  ShowWindow(state->progress, SW_SHOW);
-  SendMessageW(state->progress, PBM_SETPOS, 0, 0);
-  SetWindowTextW(state->status, L"Converting…");
-  append_log(state, L"Starting " + mode_w + L" → " + state->output.wstring());
-  set_running(state, true);
-
-  const auto inputs = state->inputs;
-  const HWND window = state->window;
-  hdrbridge::ConversionOptions options;
-  options.mode = narrow(mode_w);
-  options.lossless = SendMessageW(state->lossless, BM_GETCHECK, 0, 0) == BST_CHECKED;
-  options.copy_exif = SendMessageW(state->copy_exif, BM_GETCHECK, 0, 0) == BST_CHECKED;
-  options.copy_xmp = SendMessageW(state->copy_xmp, BM_GETCHECK, 0, 0) == BST_CHECKED;
-  const int quality = static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0));
-  options.image_quality = quality / 100.0f;
-  options.base_quality = quality;
-  options.gainmap_quality = std::max(1, quality - 5);
-  if (index == 1) options.png_compression_level = quality;
-  if (index == 2) {
-    options.tiff_compression_level = quality;
-    options.tiff_compressed = SendMessageW(state->tiff_compression, CB_GETCURSEL, 0, 0) != 1;
-  }
-  const int gainmap_resolution_index = static_cast<int>(
-      SendMessageW(state->gainmap_resolution, CB_GETCURSEL, 0, 0));
-  constexpr int gainmap_scales[] = {4, 2, 1};
-  options.gainmap_scale = gainmap_scales[
-      std::clamp(gainmap_resolution_index, 0, 2)];
-  options.multi_channel_gainmap =
-      SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0) == 1;
-  const int gamut_index = static_cast<int>(SendMessageW(state->gamut, CB_GETCURSEL, 0, 0));
-  options.output_gamut = gamut_index == 1 ? "p3" : "rec2020";
-  const int transfer_index = static_cast<int>(SendMessageW(state->transfer, CB_GETCURSEL, 0, 0));
-  const bool transfer_output = index == 1 || index == 3 || index == 5;
-  options.output_transfer = transfer_output && transfer_index == 1 ? "hlg" : "pq";
-  if (options.output_transfer == "hlg") options.output_gamut = "rec2020";
-  const int peak_index = static_cast<int>(SendMessageW(state->peak, CB_GETCURSEL, 0, 0));
-  constexpr float peaks[] = {0.0f, 1000.0f, 2000.0f, 4000.0f, 10000.0f};
-  options.target_peak_nits = peaks[std::clamp(peak_index, 0, 4)];
-  options.overwrite = SendMessageW(state->collision, CB_GETCURSEL, 0, 0) == 1;
-  const bool use_source_folder = state->use_source_folder;
-  const auto selected_folder = state->selected_folder;
-  const auto edited_base = control_text(state->base_name);
-  const auto suffix = control_text(state->name_suffix);
-  const auto collision = options.overwrite
-      ? hdrbridge::desktop::CollisionPolicy::overwrite
-      : hdrbridge::desktop::CollisionPolicy::auto_number;
-  std::thread([state, window, inputs, options, mode_w, use_source_folder,
-               selected_folder, edited_base, suffix, collision] {
-    try {
-      std::vector<hdrbridge::ConversionResult> results;
-      results.reserve(inputs.size());
-      size_t succeeded = 0;
-      size_t skipped = 0;
-      size_t failed = 0;
-      for (size_t index = 0; index < inputs.size(); ++index) {
-        if (state->cancel.load()) throw std::runtime_error("conversion cancelled");
-        try {
-          const hdrbridge::SourceInfo info = hdrbridge::inspect(inputs[index]);
-          if (info.asset_kind != "direct-hdr" && info.asset_kind != "gain-map-hdr") {
-            ++skipped;
-            PostMessageW(window, WM_APP_ITEM_STATUS, 0,
-                reinterpret_cast<LPARAM>(new ItemStatusPayload{
-                    index, QueueStatus::skipped,
-                    queue_result_summary(inputs[index], QueueStatus::skipped),
-                    L"No HDR gain map or direct HDR signal"}));
-            const int overall = static_cast<int>((index + 1u) * 100u / inputs.size());
-            PostMessageW(window, WM_APP_PROGRESS, static_cast<WPARAM>(overall),
-                reinterpret_cast<LPARAM>(new std::wstring(
-                    L"[" + std::to_wstring(index + 1u) + L"/" +
-                    std::to_wstring(inputs.size()) + L"] Skipped \u2014 No HDR data")));
-            continue;
-          }
-          hdrbridge::desktop::NamingRequest request;
-          request.source = inputs[index];
-          request.selected_folder = selected_folder;
-          request.use_source_folder = use_source_folder;
-          request.base_name = inputs.size() == 1u ? edited_base : inputs[index].stem().wstring();
-          request.suffix = suffix;
-          request.mode = mode_w;
-          request.collision = collision;
-          const auto output = hdrbridge::desktop::resolve_output_path(request);
-          auto result = hdrbridge::convert(inputs[index], output, options,
-            [window, index, count = inputs.size()](int value, const std::string& stage) {
-              const int overall = static_cast<int>((index * 100u + static_cast<size_t>(value)) / count);
-              auto text = L"[" + std::to_wstring(index + 1u) + L"/" + std::to_wstring(count) +
-                          L"] " + widen(stage);
-              PostMessageW(window, WM_APP_PROGRESS, static_cast<WPARAM>(overall),
-                           reinterpret_cast<LPARAM>(new std::wstring(std::move(text))));
-            }, &state->cancel);
-          PostMessageW(window, WM_APP_RESULT, 0,
-              reinterpret_cast<LPARAM>(new hdrbridge::ConversionResult(result)));
-          results.push_back(std::move(result));
-          ++succeeded;
-          PostMessageW(window, WM_APP_ITEM_STATUS, 0,
-              reinterpret_cast<LPARAM>(new ItemStatusPayload{
-                  index, QueueStatus::success,
-                  queue_result_summary(inputs[index], QueueStatus::success), L""}));
-        } catch (const std::exception& item_error) {
-          if (state->cancel.load()) throw;
-          ++failed;
-          std::wstring reason = widen(item_error.what());
-          if (reason.size() > 180u) reason.resize(180u);
-          PostMessageW(window, WM_APP_ITEM_STATUS, 0,
-              reinterpret_cast<LPARAM>(new ItemStatusPayload{
-                  index, QueueStatus::failed,
-                  queue_result_summary(inputs[index], QueueStatus::failed),
-                  std::move(reason)}));
-          const int overall = static_cast<int>((index + 1u) * 100u / inputs.size());
-          PostMessageW(window, WM_APP_PROGRESS, static_cast<WPARAM>(overall),
-              reinterpret_cast<LPARAM>(new std::wstring(
-                  L"[" + std::to_wstring(index + 1u) + L"/" +
-                  std::to_wstring(inputs.size()) + L"] Failed \u2014 Decode error")));
-        }
-      }
-      PostMessageW(window, WM_APP_SUCCESS, 0,
-                   reinterpret_cast<LPARAM>(new SuccessPayload{
-                       std::move(results), succeeded, skipped, failed}));
-    } catch (const std::exception& e) {
-      PostMessageW(window, WM_APP_ERROR, 0, reinterpret_cast<LPARAM>(new std::wstring(widen(e.what()))));
-    }
-  }).detach();
 }
 
 void start_task_queue(AppState* state,
@@ -2669,9 +3320,10 @@ void start_task_queue(AppState* state,
 }
 
 HWND add_control(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int id) {
-  HWND control = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style,
+  HWND control = CreateWindowExW(0, cls, L"", WS_CHILD | WS_VISIBLE | style,
                                  0, 0, 10, 10, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                                  GetModuleHandleW(nullptr), nullptr);
+  ui::set_text(control, text);
   SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
   return control;
 }
@@ -2680,16 +3332,16 @@ void start_update_check(AppState* state, bool manual) {
   if (state->update_busy) {
     if (manual) {
       state->update_manual_requested = true;
-      append_log(state, L"An update check or download is already in progress.");
+      append_log(state, HB_UI("An update check or download is already in progress."));
     }
     return;
   }
   if (manual && state->ready_installer) {
     if (state->running) {
-      MessageBoxW(state->window, L"Finish the current conversion before installing.", L"Update ready", MB_OK | MB_ICONINFORMATION);
-    } else if (MessageBoxW(state->window, L"The installer was verified. Launch it now?", L"Update ready", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+      ui::message_box(state->window, HB_UI("Finish the current conversion before installing."), HB_UI("Update ready"), MB_OK | MB_ICONINFORMATION);
+    } else if (ui::message_box(state->window, HB_UI("The installer was verified. Launch it now?"), HB_UI("Update ready"), MB_YESNO | MB_ICONQUESTION) == IDYES) {
       std::string error;
-      if (!hdrbridge::app_update::launch_installer(*state->ready_installer, &error)) MessageBoxW(state->window, widen(error).c_str(), L"Update failed", MB_OK | MB_ICONERROR);
+      if (!hdrbridge::app_update::launch_installer(*state->ready_installer, &error)) ui::message_box(state->window, widen(error).c_str(), HB_UI("Update failed"), MB_OK | MB_ICONERROR);
       else PostMessageW(state->window, WM_CLOSE, 0, 0);
     }
     return;
@@ -2714,9 +3366,11 @@ void start_update_check(AppState* state, bool manual) {
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   auto* state = reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
   if (message == WM_CREATE) {
+    LoadLibraryW(L"msftedit.dll");
     auto owned = std::make_unique<AppState>();
+    ui::load_language();
     owned->window = window;
-    owned->title = add_control(window, L"STATIC", L"HDR Bridge", SS_LEFT, IDC_TITLE);
+    owned->title = add_control(window, L"STATIC", L"HDR Bridge", SS_LEFT | SS_NOTIFY, IDC_TITLE);
     owned->version = add_control(window, L"STATIC", HDRBRIDGE_VERSION_WIDE, SS_NOTIFY, IDC_VERSION);
     HWND version_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
         WS_POPUP | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -2725,88 +3379,102 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     tip.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     tip.hwnd = window;
     tip.uId = reinterpret_cast<UINT_PTR>(owned->version);
-    tip.lpszText = const_cast<wchar_t*>(L"Check for updates");
+    tip.lpszText = LPSTR_TEXTCALLBACKW;
     SendMessageW(version_tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
-    owned->reset_layout = add_control(window, L"BUTTON", L"Reset layout", BS_PUSHBUTTON, IDC_RESET_LAYOUT);
-    owned->reset_settings = add_control(window, L"BUTTON", L"Reset settings", BS_PUSHBUTTON, IDC_RESET_SETTINGS);
-    owned->preview_toggle = add_control(window, L"BUTTON", L"Preview", BS_PUSHBUTTON,
+    tip.uId = reinterpret_cast<UINT_PTR>(owned->title);
+    SendMessageW(version_tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    owned->reset_layout = add_control(window, L"BUTTON", HB_UI("Reset layout"), BS_PUSHBUTTON, IDC_RESET_LAYOUT);
+    owned->reset_settings = add_control(window, L"BUTTON", HB_UI("Reset settings"), BS_PUSHBUTTON, IDC_RESET_SETTINGS);
+    owned->preview_toggle = add_control(window, L"BUTTON", HB_UI("Preview"), BS_PUSHBUTTON,
                                         IDC_PREVIEW_TOGGLE);
     owned->preview_renderer = std::make_unique<PreviewRenderer>(window);
     owned->preview_renderer->create();
     owned->vertical_splitter = add_control(window, L"STATIC", L"", SS_NOTIFY, IDC_VERTICAL_SPLITTER);
     owned->horizontal_splitter = add_control(window, L"STATIC", L"", SS_NOTIFY, IDC_HORIZONTAL_SPLITTER);
     owned->files_splitter = add_control(window, L"STATIC", L"", SS_NOTIFY, IDC_FILES_SPLITTER);
-    owned->queue_label = add_control(window, L"STATIC", L"FILES", SS_LEFT, IDC_QUEUE_LABEL);
-    owned->output_label = add_control(window, L"STATIC", L"OUTPUT", SS_LEFT, IDC_OUTPUT_LABEL);
-    owned->inspector_label = add_control(window, L"STATIC", L"SOURCE INSPECTOR", SS_LEFT, IDC_INSPECTOR_LABEL);
-    owned->activity_label = add_control(window, L"STATIC", L"ACTIVITY", SS_LEFT, IDC_ACTIVITY_LABEL);
-    owned->tasks_label = add_control(window, L"STATIC", L"TASKS", SS_LEFT, IDC_TASKS_LABEL);
-    owned->open = add_control(window, L"BUTTON", L"Add files", BS_PUSHBUTTON, IDC_OPEN);
-    owned->source_path = add_control(window, L"STATIC", L"Drop or add supported HDR still images", SS_LEFT | SS_PATHELLIPSIS, IDC_SOURCE_PATH);
+    owned->queue_label = add_control(window, L"STATIC", HB_UI("FILES"), SS_LEFT, IDC_QUEUE_LABEL);
+    owned->output_label = add_control(window, L"STATIC", HB_UI("OUTPUT"), SS_LEFT, IDC_OUTPUT_LABEL);
+    owned->inspector_label = add_control(window, L"STATIC", HB_UI("SOURCE INSPECTOR"), SS_LEFT, IDC_INSPECTOR_LABEL);
+    owned->activity_label = add_control(window, L"STATIC", HB_UI("ACTIVITY"), SS_LEFT, IDC_ACTIVITY_LABEL);
+    owned->tasks_label = add_control(window, L"STATIC", HB_UI("TASKS"), SS_LEFT, IDC_TASKS_LABEL);
+    owned->open = add_control(window, L"BUTTON", HB_UI("Add files"), BS_PUSHBUTTON, IDC_OPEN);
+    owned->source_path = add_control(window, L"STATIC", HB_UI("Drop or add supported HDR still images"), SS_LEFT | SS_PATHELLIPSIS, IDC_SOURCE_PATH);
     owned->queue = add_control(window, L"LISTBOX", L"", LBS_NOTIFY | LBS_EXTENDEDSEL |
                                LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_BORDER |
                                WS_VSCROLL | LBS_NOINTEGRALHEIGHT, IDC_QUEUE);
     SendMessageW(owned->queue, LB_SETITEMHEIGHT, 0,
                  MulDiv(26, GetDpiForWindow(window), 96));
-    owned->remove = add_control(window, L"BUTTON", L"Remove", BS_PUSHBUTTON, IDC_REMOVE);
-    owned->clear = add_control(window, L"BUTTON", L"Clear", BS_PUSHBUTTON, IDC_CLEAR);
-    owned->inspector = add_control(window, L"EDIT", L"No file selected", ES_MULTILINE | ES_READONLY | WS_VSCROLL | WS_BORDER, IDC_INSPECTOR);
-    owned->format = add_control(window, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_FORMAT);
-    for (const wchar_t* item : {L"Share / Web — Ultra HDR JPEG",
-                                L"Interchange — HDR PNG",
-                                L"Interchange — HDR TIFF",
-                                L"Master — JPEG XL",
-                                L"Windows — FP16 scRGB JPEG XR",
-                                L"Compact — AVIF",
-                                L"Inspect — Extract Gain Map",
-                                L"Create — Photo Frame"}) {
-      SendMessageW(owned->format, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
+    owned->remove = add_control(window, L"BUTTON", HB_UI("Remove"), BS_PUSHBUTTON, IDC_REMOVE);
+    owned->clear = add_control(window, L"BUTTON", HB_UI("Clear"), BS_PUSHBUTTON, IDC_CLEAR);
+    const auto configure_rich = [](HWND rich, bool editable) {
+      if (!rich) return;
+      const LRESULT lang_opts = SendMessageW(rich, EM_GETLANGOPTIONS, 0, 0);
+      SendMessageW(rich, EM_SETLANGOPTIONS, 0,
+                   lang_opts | IMF_UIFONTS | IMF_DUALFONT | IMF_AUTOFONT);
+      SendMessageW(rich, EM_SETEDITSTYLE, SES_NOEALINEHEIGHTADJUST,
+                   SES_NOEALINEHEIGHTADJUST);
+      SendMessageW(rich, EM_EXLIMITTEXT, 0, 16 * 1024 * 1024);
+      if (editable) SendMessageW(rich, EM_SETEVENTMASK, 0, ENM_CHANGE);
+    };
+    owned->inspector = add_control(window, MSFTEDIT_CLASS, L"", ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_NOHIDESEL, IDC_INSPECTOR);
+    ui::captions.erase(owned->inspector);
+    configure_rich(owned->inspector, false);
+    constexpr DWORD kComboStyle = CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL;
+    owned->format = add_control(window, WC_COMBOBOXW, L"", kComboStyle, IDC_FORMAT);
+    for (const wchar_t* item : {L"Ultra HDR JPEG",
+                                L"HDR PNG",
+                                L"HDR TIFF",
+                                L"JPEG XL",
+                                L"JPEG XR FP16",
+                                L"HDR AVIF",
+                                HB_UI("Extract Gain Map"),
+                                HB_UI("Photo Frame")}) {
+      ui::send(owned->format, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
     }
     SendMessageW(owned->format, CB_SETCURSEL, 0, 0);
-    owned->format_note = add_control(window, L"STATIC", L"", SS_LEFT, IDC_FORMAT_NOTE);
-    owned->gamut = add_control(window, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_GAMUT);
-    owned->transfer = add_control(window, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_TRANSFER);
-    owned->representation = add_control(window, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_REPRESENTATION);
-    SendMessageW(owned->representation, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"JPEG — HDR / SDR"));
-    SendMessageW(owned->representation, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"PNG — HDR / SDR"));
+    owned->gamut = add_control(window, WC_COMBOBOXW, L"", kComboStyle, IDC_GAMUT);
+    owned->transfer = add_control(window, WC_COMBOBOXW, L"", kComboStyle, IDC_TRANSFER);
+    owned->representation = add_control(window, WC_COMBOBOXW, L"", kComboStyle, IDC_REPRESENTATION);
+    ui::send(owned->representation, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"JPEG — HDR / SDR"));
+    ui::send(owned->representation, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"PNG — HDR / SDR"));
     SendMessageW(owned->representation, CB_SETCURSEL, 0, 0);
-    owned->gainmap_resolution = add_control(window, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_GAINMAP_RESOLUTION);
-    SendMessageW(owned->gainmap_resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Gain map: 1/4"));
-    SendMessageW(owned->gainmap_resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Gain map: 1/2 — default"));
-    SendMessageW(owned->gainmap_resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Gain map: Full resolution"));
-    SendMessageW(owned->gainmap_resolution, CB_SETCURSEL, 1, 0);
-    owned->gainmap_channels = add_control(window, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_GAINMAP_CHANNELS);
-    SendMessageW(owned->gainmap_channels, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Channels: Mono — default"));
-    SendMessageW(owned->gainmap_channels, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Channels: RGB"));
-    SendMessageW(owned->gainmap_channels, CB_SETCURSEL, 0, 0);
-    owned->peak = add_control(window, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_PEAK);
-    for (const wchar_t* item : {L"Peak: Faithful / Auto", L"Peak: 1000 nits",
-                                L"Peak: 2000 nits", L"Peak: 4000 nits", L"Peak: 10000 nits"}) {
-      SendMessageW(owned->peak, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
+    owned->gainmap_resolution = add_control(window, WC_COMBOBOXW, L"", kComboStyle, IDC_GAINMAP_RESOLUTION);
+    ui::send(owned->gainmap_resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("Gain map: 1/4")));
+    ui::send(owned->gainmap_resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("Gain map: 1/2")));
+    ui::send(owned->gainmap_resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("Gain map: Full resolution — default")));
+    SendMessageW(owned->gainmap_resolution, CB_SETCURSEL, 2, 0);
+    owned->gainmap_channels = add_control(window, WC_COMBOBOXW, L"", kComboStyle, IDC_GAINMAP_CHANNELS);
+    ui::send(owned->gainmap_channels, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("Channels: Mono")));
+    ui::send(owned->gainmap_channels, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("Channels: RGB — default")));
+    SendMessageW(owned->gainmap_channels, CB_SETCURSEL, 1, 0);
+    owned->peak = add_control(window, WC_COMBOBOXW, L"", kComboStyle, IDC_PEAK);
+    for (const wchar_t* item : {HB_UI("Peak: Faithful / Auto"), HB_UI("Peak: 1000 nits"),
+                                HB_UI("Peak: 2000 nits"), HB_UI("Peak: 4000 nits"), HB_UI("Peak: 10000 nits")}) {
+      ui::send(owned->peak, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
     }
     SendMessageW(owned->peak, CB_SETCURSEL, 0, 0);
     owned->tiff_compression = add_control(window, WC_COMBOBOXW, L"",
-                                          CBS_DROPDOWNLIST | WS_VSCROLL,
+                                          kComboStyle,
                                           IDC_TIFF_COMPRESSION);
-    SendMessageW(owned->tiff_compression, CB_ADDSTRING, 0,
-                 reinterpret_cast<LPARAM>(L"Compression: Deflate — default"));
-    SendMessageW(owned->tiff_compression, CB_ADDSTRING, 0,
-                 reinterpret_cast<LPARAM>(L"Compression: Uncompressed"));
+    ui::send(owned->tiff_compression, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(HB_UI("Compression: Deflate — default")));
+    ui::send(owned->tiff_compression, CB_ADDSTRING, 0,
+                 reinterpret_cast<LPARAM>(HB_UI("Compression: Uncompressed")));
     SendMessageW(owned->tiff_compression, CB_SETCURSEL, 0, 0);
     ShowWindow(owned->tiff_compression, SW_HIDE);
     owned->gainmap_export_format = add_control(
-        window, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL,
+        window, WC_COMBOBOXW, L"", kComboStyle,
         IDC_GAINMAP_EXPORT_FORMAT);
-    for (const wchar_t* item : {L"Format: Original — default",
-                                L"Format: PNG",
-                                L"Format: TIFF",
-                                L"Format: JPEG"}) {
-      SendMessageW(owned->gainmap_export_format, CB_ADDSTRING, 0,
+    for (const wchar_t* item : {HB_UI("Format: Original — default"),
+                                HB_UI("Format: PNG"),
+                                HB_UI("Format: TIFF"),
+                                HB_UI("Format: JPEG")}) {
+      ui::send(owned->gainmap_export_format, CB_ADDSTRING, 0,
                    reinterpret_cast<LPARAM>(item));
     }
     SendMessageW(owned->gainmap_export_format, CB_SETCURSEL, 0, 0);
     ShowWindow(owned->gainmap_export_format, SW_HIDE);
-    owned->lossless = add_control(window, L"BUTTON", L"Lossless", BS_AUTOCHECKBOX, IDC_LOSSLESS);
+    owned->lossless = add_control(window, L"BUTTON", HB_UI("Lossless"), BS_AUTOCHECKBOX, IDC_LOSSLESS);
     owned->copy_exif = add_control(window, L"BUTTON", L"EXIF", BS_AUTOCHECKBOX, IDC_COPY_EXIF);
     owned->copy_xmp = add_control(window, L"BUTTON", L"XMP", BS_AUTOCHECKBOX, IDC_COPY_XMP);
     SendMessageW(owned->lossless, BM_SETCHECK, BST_CHECKED, 0);
@@ -2816,22 +3484,26 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     SendMessageW(owned->quality, TBM_SETRANGE, TRUE, MAKELPARAM(1, 100));
     SendMessageW(owned->quality, TBM_SETPOS, TRUE, 95);
     owned->quality_value = add_control(window, L"STATIC", L"95%", SS_CENTER, IDC_QUALITY_VALUE);
-    owned->source_folder = add_control(window, L"BUTTON", L"Source folder", BS_AUTOCHECKBOX, IDC_SOURCE_FOLDER);
+    owned->source_folder = add_control(window, L"BUTTON", HB_UI("Source folder"), BS_AUTOCHECKBOX, IDC_SOURCE_FOLDER);
     SendMessageW(owned->source_folder, BM_SETCHECK, BST_CHECKED, 0);
-    owned->choose_folder = add_control(window, L"BUTTON", L"Choose...", BS_PUSHBUTTON, IDC_CHOOSE_FOLDER);
-    owned->folder_path = add_control(window, L"STATIC", L"Source folder", SS_LEFT | SS_PATHELLIPSIS, IDC_FOLDER_PATH);
-    owned->base_name = add_control(window, L"EDIT", L"Base name", ES_AUTOHSCROLL | WS_BORDER, IDC_BASE_NAME);
-    owned->name_suffix = add_control(window, L"EDIT", L"_ultrahdr", ES_AUTOHSCROLL | WS_BORDER, IDC_NAME_SUFFIX);
-    owned->collision = add_control(window, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_COLLISION);
-    SendMessageW(owned->collision, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"If file exists: auto-number"));
-    SendMessageW(owned->collision, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"If file exists: overwrite"));
+    owned->choose_folder = add_control(window, L"BUTTON", HB_UI("Choose..."), BS_PUSHBUTTON, IDC_CHOOSE_FOLDER);
+    owned->folder_path = add_control(window, L"STATIC", HB_UI("Source folder"), SS_LEFT | SS_PATHELLIPSIS, IDC_FOLDER_PATH);
+    owned->base_name = add_control(window, MSFTEDIT_CLASS, L"", ES_AUTOHSCROLL, IDC_BASE_NAME);
+    ui::captions.erase(owned->base_name);
+    configure_rich(owned->base_name, true);
+    owned->name_suffix = add_control(window, MSFTEDIT_CLASS, L"_ultrahdr", ES_AUTOHSCROLL, IDC_NAME_SUFFIX);
+    ui::captions.erase(owned->name_suffix);
+    configure_rich(owned->name_suffix, true);
+    owned->collision = add_control(window, WC_COMBOBOXW, L"", kComboStyle, IDC_COLLISION);
+    ui::send(owned->collision, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("If file exists: auto-number")));
+    ui::send(owned->collision, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("If file exists: overwrite")));
     SendMessageW(owned->collision, CB_SETCURSEL, 0, 0);
-    owned->use_suffix = add_control(window, L"BUTTON", L"Use suffix", BS_AUTOCHECKBOX, IDC_USE_SUFFIX);
+    owned->use_suffix = add_control(window, L"BUTTON", HB_UI("Use suffix"), BS_AUTOCHECKBOX, IDC_USE_SUFFIX);
     SendMessageW(owned->use_suffix, BM_SETCHECK, BST_CHECKED, 0);
-    owned->convert = add_control(window, L"BUTTON", L"Add to queue", BS_DEFPUSHBUTTON, IDC_CONVERT);
-    owned->remove_all_tasks = add_control(window, L"BUTTON", L"Remove all", BS_PUSHBUTTON,
+    owned->convert = add_control(window, L"BUTTON", HB_UI("Add to queue"), BS_DEFPUSHBUTTON, IDC_CONVERT);
+    owned->remove_all_tasks = add_control(window, L"BUTTON", HB_UI("Remove all"), BS_PUSHBUTTON,
                                           IDC_REMOVE_ALL_TASKS);
-    owned->cancel_button = add_control(window, L"BUTTON", L"Start all", BS_PUSHBUTTON, IDC_CANCEL);
+    owned->cancel_button = add_control(window, L"BUTTON", HB_UI("Start all"), BS_PUSHBUTTON, IDC_CANCEL);
     owned->tasks = add_control(window, L"LISTBOX", L"", LBS_NOTIFY | LBS_OWNERDRAWFIXED |
                                LBS_HASSTRINGS | WS_BORDER | WS_VSCROLL |
                                LBS_NOINTEGRALHEIGHT, IDC_TASKS);
@@ -2839,11 +3511,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                  MulDiv(52, GetDpiForWindow(window), 96));
     owned->progress = add_control(window, PROGRESS_CLASSW, L"", PBS_SMOOTH, IDC_PROGRESS);
     SendMessageW(owned->progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-    owned->status = add_control(window, L"STATIC", L"Ready", SS_LEFT, IDC_STATUS);
-    owned->output_path = add_control(window, L"STATIC", L"No output yet", SS_LEFT | SS_PATHELLIPSIS, IDC_OUTPUT_PATH);
-    owned->log = add_control(window, L"EDIT", L"Ready. Detailed conversion activity appears here.",
-                             ES_MULTILINE | ES_READONLY | WS_VSCROLL | WS_BORDER, IDC_LOG);
-    SendMessageW(owned->log, EM_SETLIMITTEXT, 16 * 1024 * 1024, 0);
+    owned->status = add_control(window, L"STATIC", HB_UI("Ready"), SS_LEFT, IDC_STATUS);
+    owned->output_path = add_control(window, L"STATIC", HB_UI("No output yet"), SS_LEFT | SS_PATHELLIPSIS, IDC_OUTPUT_PATH);
+    owned->log = add_control(window, MSFTEDIT_CLASS, L"",
+                             ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_NOHIDESEL, IDC_LOG);
+    ui::captions.erase(owned->log);
+    configure_rich(owned->log, false);
     EnableWindow(owned->convert, FALSE);
     EnableWindow(owned->remove, FALSE);
     EnableWindow(owned->clear, FALSE);
@@ -2855,6 +3528,27 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     SetWindowSubclass(owned->vertical_splitter, splitter_subclass, 1, 1);
     SetWindowSubclass(owned->horizontal_splitter, splitter_subclass, 1, 2);
     SetWindowSubclass(owned->files_splitter, splitter_subclass, 1, 3);
+    const auto static_data = reinterpret_cast<DWORD_PTR>(owned.get());
+    for (HWND label : {owned->title, owned->version, owned->queue_label,
+                       owned->output_label, owned->inspector_label,
+                       owned->activity_label, owned->tasks_label,
+                       owned->source_path, owned->quality_value,
+                       owned->folder_path, owned->status, owned->output_path}) {
+      SetWindowSubclass(label, mixed_static_subclass, 1, static_data);
+    }
+    for (HWND combo : {owned->format, owned->gamut, owned->transfer,
+                       owned->representation, owned->gainmap_resolution,
+                       owned->gainmap_channels, owned->peak,
+                       owned->tiff_compression, owned->gainmap_export_format,
+                       owned->collision}) {
+      SetWindowSubclass(combo, combo_mixed_subclass, 1, static_data);
+    }
+    for (HWND rich : {owned->inspector, owned->log, owned->base_name, owned->name_suffix}) {
+      SetWindowSubclass(rich, rich_edit_subclass, 1, static_data);
+      SetWindowPos(rich, nullptr, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+      update_rich_insets(rich);
+    }
     DragAcceptFiles(window, TRUE);
     SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(owned.release()));
     state = reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -2862,6 +3556,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     load_conversion_settings(state);
     apply_fonts(state);
     apply_theme(state);
+    refresh_inspector(state);
+    refresh_activity(state);
     update_mode_ui(state);
     start_update_check(state, false);
     return 0;
@@ -2869,39 +3565,122 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
   if (!state) return DefWindowProcW(window, message, wparam, lparam);
   switch (message) {
     case WM_SETCURSOR:
-      if (reinterpret_cast<HWND>(wparam) == state->version) {
+      if (reinterpret_cast<HWND>(wparam) == state->version || reinterpret_cast<HWND>(wparam) == state->title) {
         SetCursor(LoadCursorW(nullptr, IDC_HAND));
         return TRUE;
       }
       break;
+    case WM_NOTIFY: {
+      const auto* nmhdr = reinterpret_cast<NMHDR*>(lparam);
+      if (nmhdr->code == TTN_GETDISPINFOW) {
+        auto* info = reinterpret_cast<NMTTDISPINFOW*>(lparam);
+        static std::wstring tooltip;
+        tooltip = ui::render(info->hdr.idFrom == reinterpret_cast<UINT_PTR>(state->title)
+            ? HB_UI("Switch to Simplified Chinese") : HB_UI("Check for updates"));
+        info->lpszText = tooltip.data();
+        return 0;
+      }
+      if (nmhdr->code == NM_CUSTOMDRAW && state->font) {
+        const auto* nm = reinterpret_cast<const NMCUSTOMDRAW*>(lparam);
+        if (nm->dwDrawStage == CDDS_PREPAINT) {
+          wchar_t cls[32]{};
+          GetClassNameW(nm->hdr.hwndFrom, cls, 32);
+          if (_wcsicmp(cls, L"Button") == 0) {
+            const LONG_PTR style = GetWindowLongPtrW(nm->hdr.hwndFrom, GWL_STYLE);
+            const LONG_PTR type = style & BS_TYPEMASK;
+            const UINT dpi = GetDpiForWindow(window);
+            if (type == BS_PUSHBUTTON || type == BS_DEFPUSHBUTTON) {
+              HTHEME theme = OpenThemeData(nm->hdr.hwndFrom, L"BUTTON");
+              if (!theme) return CDRF_DODEFAULT;
+              const bool disabled = (nm->uItemState & CDIS_DISABLED) != 0;
+              const bool pressed = (nm->uItemState & CDIS_SELECTED) != 0;
+              const bool hot = (nm->uItemState & CDIS_HOT) != 0;
+              const int part_state = disabled ? PBS_DISABLED :
+                  pressed ? PBS_PRESSED :
+                  hot ? PBS_HOT :
+                  (type == BS_DEFPUSHBUTTON ? PBS_DEFAULTED : PBS_NORMAL);
+              DrawThemeParentBackground(nm->hdr.hwndFrom, nm->hdc, &nm->rc);
+              DrawThemeBackground(theme, nm->hdc, BP_PUSHBUTTON, part_state, &nm->rc, nullptr);
+              RECT text_rc = nm->rc;
+              SetTextColor(nm->hdc, disabled ? state->muted_text_color : state->text_color);
+              draw_mixed_text(nm->hdc, state->font, state->cjk_font,
+                              control_text(nm->hdr.hwndFrom), text_rc,
+                              DT_CENTER | DT_VCENTER);
+              if ((nm->uItemState & CDIS_FOCUS) != 0 &&
+                  (SendMessageW(window, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS) == 0) {
+                RECT focus_rc = nm->rc;
+                InflateRect(&focus_rc, -MulDiv(3, dpi, 96), -MulDiv(3, dpi, 96));
+                DrawFocusRect(nm->hdc, &focus_rc);
+              }
+              CloseThemeData(theme);
+              return CDRF_SKIPDEFAULT;
+            }
+            if (type == BS_CHECKBOX || type == BS_AUTOCHECKBOX) {
+              HTHEME theme = OpenThemeData(nm->hdr.hwndFrom, L"BUTTON");
+              if (!theme) return CDRF_DODEFAULT;
+              const bool checked = SendMessageW(nm->hdr.hwndFrom, BM_GETCHECK, 0, 0) == BST_CHECKED;
+              const bool disabled = (nm->uItemState & CDIS_DISABLED) != 0;
+              const bool pressed = (nm->uItemState & CDIS_SELECTED) != 0;
+              const bool hot = (nm->uItemState & CDIS_HOT) != 0;
+              const int part_state = checked
+                  ? (disabled ? CBS_CHECKEDDISABLED : pressed ? CBS_CHECKEDPRESSED :
+                     hot ? CBS_CHECKEDHOT : CBS_CHECKEDNORMAL)
+                  : (disabled ? CBS_UNCHECKEDDISABLED : pressed ? CBS_UNCHECKEDPRESSED :
+                     hot ? CBS_UNCHECKEDHOT : CBS_UNCHECKEDNORMAL);
+              FillRect(nm->hdc, &nm->rc, state->background_brush);
+              SIZE box_sz{MulDiv(13, dpi, 96), MulDiv(13, dpi, 96)};
+              GetThemePartSize(theme, nm->hdc, BP_CHECKBOX, part_state, nullptr, TS_TRUE, &box_sz);
+              RECT box_rc{nm->rc.left,
+                          nm->rc.top + ((nm->rc.bottom - nm->rc.top) - box_sz.cy) / 2,
+                          nm->rc.left + box_sz.cx, 0};
+              box_rc.bottom = box_rc.top + box_sz.cy;
+              DrawThemeBackground(theme, nm->hdc, BP_CHECKBOX, part_state, &box_rc, nullptr);
+              RECT text_rc = nm->rc;
+              text_rc.left += box_sz.cx + MulDiv(6, dpi, 96);
+              SetTextColor(nm->hdc, disabled ? state->muted_text_color : state->text_color);
+              draw_mixed_text(nm->hdc, state->font, state->cjk_font,
+                              control_text(nm->hdr.hwndFrom), text_rc,
+                              DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+              if ((nm->uItemState & CDIS_FOCUS) != 0 &&
+                  (SendMessageW(window, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS) == 0) {
+                DrawFocusRect(nm->hdc, &text_rc);
+              }
+              CloseThemeData(theme);
+              return CDRF_SKIPDEFAULT;
+            }
+          }
+        }
+      }
+      break;
+    }
     case WM_APP_UPDATE_CHECK: {
       std::unique_ptr<UpdateCheckPayload> result(reinterpret_cast<UpdateCheckPayload*>(lparam));
       state->update_busy = false;
       result->manual = result->manual || state->update_manual_requested;
       state->update_manual_requested = false;
       if (!result->release) {
-        if (result->manual) MessageBoxW(window, widen(result->error).c_str(), L"Update check", MB_OK | MB_ICONINFORMATION);
+        if (result->manual) ui::message_box(window, widen(result->error).c_str(), HB_UI("Update check"), MB_OK | MB_ICONINFORMATION);
         return 0;
       }
       const auto comparison = hdrbridge::app_update::compare_versions(result->release->version, HDRBRIDGE_VERSION_STRING);
       if (!comparison) {
-        if (result->manual) MessageBoxW(window, L"The release version could not be compared.", L"Update check", MB_OK | MB_ICONINFORMATION);
+        if (result->manual) ui::message_box(window, HB_UI("The release version could not be compared."), HB_UI("Update check"), MB_OK | MB_ICONINFORMATION);
         return 0;
       }
       if (*comparison <= 0) {
-        if (result->manual) MessageBoxW(window, L"You have the latest version.", L"Update check", MB_OK | MB_ICONINFORMATION);
+        if (result->manual) ui::message_box(window, HB_UI("You have the latest version."), HB_UI("Update check"), MB_OK | MB_ICONINFORMATION);
         return 0;
       }
       state->pending_release = *result->release;
       if (!result->manual && state->running) {
-        const auto label = std::wstring(HDRBRIDGE_VERSION_WIDE) + L" • update available";
-        SetWindowTextW(state->version, label.c_str());
-        append_log(state, L"Update available: " + widen(result->release->version) + L". Click the version to download.");
+        const auto label = std::wstring(HDRBRIDGE_VERSION_WIDE) + HB_UI(" • update available");
+        ui::set_text(state->version, label.c_str());
+        append_log(state, HB_UI("Update available: ") + widen(result->release->version) + HB_UI(". Click the version to download."));
         RECT client{}; GetClientRect(window, &client); layout(state, client.right, client.bottom);
         return 0;
       }
-      const auto prompt = L"Version " + widen(result->release->version) + L" is available. Download the installer?";
-      if (MessageBoxW(window, prompt.c_str(), L"Update available", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+      const auto prompt = HB_UI("Version ") + widen(result->release->version) + HB_UI(" is available. Download the installer?");
+      if (ui::message_box(window, prompt.c_str(), HB_UI("Update available"), MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
       state->update_busy = true;
       auto release = std::move(*result->release);
       std::thread([window, release = std::move(release)] {
@@ -2916,17 +3695,17 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       state->update_busy = false;
       state->update_manual_requested = false;
       if (!result->path) {
-        MessageBoxW(window, widen(result->error).c_str(), L"Update download failed", MB_OK | MB_ICONERROR);
+        ui::message_box(window, widen(result->error).c_str(), HB_UI("Update download failed"), MB_OK | MB_ICONERROR);
         return 0;
       }
       state->ready_installer = std::move(result->path);
       if (state->running) {
-        append_log(state, L"Update installer ready. Click the version after conversion to install.");
+        append_log(state, HB_UI("Update installer ready. Click the version after conversion to install."));
         return 0;
       }
-      if (MessageBoxW(window, L"The installer was verified. Launch it now?", L"Update ready", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+      if (ui::message_box(window, HB_UI("The installer was verified. Launch it now?"), HB_UI("Update ready"), MB_YESNO | MB_ICONQUESTION) == IDYES) {
         std::string error;
-        if (!hdrbridge::app_update::launch_installer(*state->ready_installer, &error)) MessageBoxW(window, widen(error).c_str(), L"Update failed", MB_OK | MB_ICONERROR);
+        if (!hdrbridge::app_update::launch_installer(*state->ready_installer, &error)) ui::message_box(window, widen(error).c_str(), HB_UI("Update failed"), MB_OK | MB_ICONERROR);
         else PostMessageW(window, WM_CLOSE, 0, 0);
       }
       return 0;
@@ -2965,11 +3744,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         const int selected = static_cast<int>(SendMessageW(state->queue, LB_GETCARETINDEX, 0, 0));
         if (selected == LB_ERR || static_cast<size_t>(selected) >= state->inputs.size()) return 0;
         HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, ID_CONTEXT_OPEN, L"Open file");
-        AppendMenuW(menu, MF_STRING, ID_CONTEXT_FOLDER, L"Open containing folder");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, state->running ? MF_STRING | MF_GRAYED : MF_STRING,
-                    ID_CONTEXT_REMOVE, L"Remove");
+        ui::append_menu(menu, MF_STRING, ID_CONTEXT_OPEN, HB_UI("Open file"));
+        ui::append_menu(menu, MF_STRING, ID_CONTEXT_FOLDER, HB_UI("Open containing folder"));
+        ui::append_menu(menu, MF_SEPARATOR, 0, nullptr);
+        ui::append_menu(menu, state->running ? MF_STRING | MF_GRAYED : MF_STRING,
+                    ID_CONTEXT_REMOVE, HB_UI("Remove"));
         const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                                             point.x, point.y, 0, window, nullptr);
         DestroyMenu(menu);
@@ -3005,10 +3784,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                 return task.status == QueueStatus::success;
               });
           HMENU menu = CreatePopupMenu();
-          AppendMenuW(menu, MF_STRING | (state->running || !has_completed ? MF_GRAYED : 0),
-                      ID_TASK_REMOVE_COMPLETED, L"Remove completed");
-          AppendMenuW(menu, MF_STRING | (state->running || state->conversion_tasks.empty() ? MF_GRAYED : 0),
-                      ID_TASK_REMOVE_ALL, L"Remove all");
+          ui::append_menu(menu, MF_STRING | (state->running || !has_completed ? MF_GRAYED : 0),
+                      ID_TASK_REMOVE_COMPLETED, HB_UI("Remove completed"));
+          ui::append_menu(menu, MF_STRING | (state->running || state->conversion_tasks.empty() ? MF_GRAYED : 0),
+                      ID_TASK_REMOVE_ALL, HB_UI("Remove all"));
           const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                                               point.x, point.y, 0, window, nullptr);
           DestroyMenu(menu);
@@ -3032,15 +3811,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         const auto& task = state->conversion_tasks[static_cast<size_t>(selected)];
         const bool output_ready = task.status == QueueStatus::success && std::filesystem::exists(task.output);
         HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING | (state->running ? MF_GRAYED : 0),
-                    ID_TASK_START, L"Start task");
-        AppendMenuW(menu, MF_STRING, ID_TASK_CLEAR_STATUS, L"Clear task status");
-        AppendMenuW(menu, MF_STRING | (state->running ? MF_GRAYED : 0), ID_TASK_DELETE, L"Delete task");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, ID_TASK_OPEN_SOURCE, L"Open source file");
-        AppendMenuW(menu, MF_STRING, ID_TASK_SOURCE_FOLDER, L"Open source folder");
-        AppendMenuW(menu, MF_STRING | (output_ready ? 0 : MF_GRAYED), ID_TASK_OPEN_OUTPUT, L"Open converted file");
-        AppendMenuW(menu, MF_STRING | (output_ready ? 0 : MF_GRAYED), ID_TASK_OUTPUT_FOLDER, L"Open converted folder");
+        ui::append_menu(menu, MF_STRING | (state->running ? MF_GRAYED : 0),
+                    ID_TASK_START, HB_UI("Start task"));
+        ui::append_menu(menu, MF_STRING, ID_TASK_CLEAR_STATUS, HB_UI("Clear task status"));
+        ui::append_menu(menu, MF_STRING | (state->running ? MF_GRAYED : 0), ID_TASK_DELETE, HB_UI("Delete task"));
+        ui::append_menu(menu, MF_SEPARATOR, 0, nullptr);
+        ui::append_menu(menu, MF_STRING, ID_TASK_OPEN_SOURCE, HB_UI("Open source file"));
+        ui::append_menu(menu, MF_STRING, ID_TASK_SOURCE_FOLDER, HB_UI("Open source folder"));
+        ui::append_menu(menu, MF_STRING | (output_ready ? 0 : MF_GRAYED), ID_TASK_OPEN_OUTPUT, HB_UI("Open converted file"));
+        ui::append_menu(menu, MF_STRING | (output_ready ? 0 : MF_GRAYED), ID_TASK_OUTPUT_FOLDER, HB_UI("Open converted folder"));
         const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                                             point.x, point.y, 0, window, nullptr);
         DestroyMenu(menu);
@@ -3073,10 +3852,21 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             measure->CtlID == IDC_TASKS ? 52 : 30, GetDpiForWindow(window), 96));
         return TRUE;
       }
+      if (measure && measure->CtlType == ODT_COMBOBOX) {
+        measure->itemHeight = static_cast<UINT>(MulDiv(
+            20, GetDpiForWindow(window), 96));
+        return TRUE;
+      }
       break;
     }
     case WM_DRAWITEM: {
       auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
+      if (draw && draw->CtlType == ODT_COMBOBOX &&
+          draw_combobox_item(draw, window, state->font, state->cjk_font,
+                             state->dark, state->text_color,
+                             state->muted_text_color, state->surface_color)) {
+        return TRUE;
+      }
       if (!draw || (draw->CtlID != IDC_QUEUE && draw->CtlID != IDC_TASKS) ||
           draw->itemID == static_cast<UINT>(-1)) break;
       const size_t index = static_cast<size_t>(draw->itemID);
@@ -3135,22 +3925,17 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         RECT first_rect = text_rect;
         first_rect.top += MulDiv(2, GetDpiForWindow(window), 96);
         first_rect.bottom = first_rect.top + MulDiv(19, GetDpiForWindow(window), 96);
-        DrawTextW(draw->hDC, first.c_str(), -1, &first_rect,
-                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-        HFONT small_font = CreateFontW(-MulDiv(9, GetDpiForWindow(window), 72), 0, 0, 0,
-                                 FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                                 font_available(L"Ubuntu") ? L"Ubuntu" : L"Segoe UI");
-        HGDIOBJ normal_font = small_font ? SelectObject(draw->hDC, small_font) : nullptr;
+        draw_mixed_text(draw->hDC, state->font, state->cjk_font, first,
+                        first_rect, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
         SetTextColor(draw->hDC, processing ? foreground : state->muted_text_color);
         RECT second_rect = text_rect;
         second_rect.top = first_rect.bottom;
         second_rect.bottom = second_rect.top + MulDiv(18, GetDpiForWindow(window), 96);
-        DrawTextW(draw->hDC, second.c_str(), -1, &second_rect,
-                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-        if (small_font && normal_font) SelectObject(draw->hDC, normal_font);
-        if (small_font) DeleteObject(small_font);
+        draw_mixed_text(draw->hDC,
+                        state->small_font ? state->small_font : state->font,
+                        state->small_cjk_font ? state->small_cjk_font : state->cjk_font,
+                        second, second_rect,
+                        DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
         RECT item_progress = card;
         item_progress.left += MulDiv(7, GetDpiForWindow(window), 96);
         item_progress.right -= MulDiv(103, GetDpiForWindow(window), 96);
@@ -3182,15 +3967,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         edit_rect.right = edit_rect.left + (edit_rect.right - edit_rect.left) / 2;
         RECT delete_rect = icon_rect;
         delete_rect.left = edit_rect.right;
-        DrawTextW(draw->hDC, L"✎", -1, &edit_rect,
+        ui::draw(draw->hDC, L"✎", -1, &edit_rect,
                   DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
-        DrawTextW(draw->hDC, L"×", -1, &delete_rect,
+        ui::draw(draw->hDC, L"×", -1, &delete_rect,
                   DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
         if (action_font && prior_action_font) SelectObject(draw->hDC, prior_action_font);
         if (action_font) DeleteObject(action_font);
       } else {
-        DrawTextW(draw->hDC, text.c_str(), static_cast<int>(text.size()), &text_rect,
-                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        draw_mixed_text(draw->hDC, state->font, state->cjk_font, text,
+                        text_rect, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
       }
       if (original_font) SelectObject(draw->hDC, original_font);
       if (draw->itemState & ODS_FOCUS) DrawFocusRect(draw->hDC, &draw->rcItem);
@@ -3228,12 +4013,42 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           state->encoding_values[static_cast<size_t>(format_index)] = value;
         }
         const bool compression = format_index == 1 || format_index == 2;
-        SetWindowTextW(state->quality_value,
+        ui::set_text(state->quality_value,
                        (std::to_wstring(value) + (compression ? L"" : L"%")).c_str());
       }
       return 0;
     case WM_COMMAND:
       switch (LOWORD(wparam)) {
+        case IDC_TITLE:
+          if (HIWORD(wparam) == STN_CLICKED) {
+            HMENU menu = CreatePopupMenu();
+            if (!menu) return 0;
+            AppendMenuW(menu, MF_STRING | (!ui::chinese ? MF_CHECKED : 0), 1, L"English");
+            AppendMenuW(menu, MF_STRING | (ui::chinese ? MF_CHECKED : 0), 2, L"简体中文");
+            RECT title_rect{};
+            GetWindowRect(state->title, &title_rect);
+            const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
+                                               title_rect.left, title_rect.bottom, 0, window, nullptr);
+            DestroyMenu(menu);
+            if (choice == 0 || (choice == 2) == ui::chinese) return 0;
+            ui::chinese = choice == 2;
+            ui::save_language();
+            ui::apply_dialog_language();
+            ui::refresh();
+            apply_fonts(state);
+            if (state->preview_renderer) state->preview_renderer->refresh_fonts();
+            refresh_inspector(state);
+            refresh_activity(state);
+            set_base_name_cue(state, state->inputs.size() > 1u ? HB_UI("Per-source base names")
+                                                               : HB_UI("Base name"));
+            RECT client{};
+            GetClientRect(window, &client);
+            layout(state, client.right, client.bottom);
+            if (state->preview_renderer) InvalidateRect(state->preview_renderer->window(), nullptr, TRUE);
+            RedrawWindow(window, nullptr, nullptr, RDW_UPDATENOW | RDW_ALLCHILDREN);
+            RedrawWindow(state->title, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+          }
+          return 0;
         case IDC_VERSION:
           if (HIWORD(wparam) == STN_CLICKED) start_update_check(state, true);
           return 0;
@@ -3247,8 +4062,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             if (state->preview_cancel) state->preview_cancel->store(true);
             state->preview_renderer->show(false);
           }
-          SetWindowTextW(state->preview_toggle,
-                         state->preview_enabled ? L"Hide" : L"Preview");
+          ui::set_text(state->preview_toggle,
+                         state->preview_enabled ? HB_UI("Hide") : HB_UI("Preview"));
           break;
         case IDC_OPEN: choose_source(state); break;
         case IDC_QUEUE:
@@ -3336,13 +4151,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             state->selected_folder = task.options.selected_folder;
             SendMessageW(state->source_folder, BM_SETCHECK,
                          state->use_source_folder ? BST_CHECKED : BST_UNCHECKED, 0);
-            SetWindowTextW(state->folder_path,
+            ui::set_text(state->folder_path,
                            (state->use_source_folder ? task.source.parent_path()
                                                      : state->selected_folder).c_str());
-            SetWindowTextW(state->base_name, task.options.base_name.c_str());
-            SetWindowTextW(state->name_suffix, task.options.suffix.c_str());
+            set_rich_editable_text(state, state->base_name, task.options.base_name);
+            set_rich_editable_text(state, state->name_suffix, task.options.suffix);
             SendMessageW(state->use_suffix, BM_SETCHECK, task.options.use_suffix ? BST_CHECKED : BST_UNCHECKED, 0);
-            SetWindowTextW(state->convert, L"Update task");
+            ui::set_text(state->convert, HB_UI("Update task"));
             if (format_index == 7) {
               state->frame_gainmap_resolution = scale_index;
               state->frame_gainmap_channels = task.options.conversion.multi_channel_gainmap ? 1 : 0;
@@ -3409,10 +4224,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           }
           break;
         case IDC_PEAK:
-          if (HIWORD(wparam) == CBN_SELCHANGE &&
-              SendMessageW(state->format, CB_GETCURSEL, 0, 0) == 0) {
-            update_uhdr_format_note(state);
-          }
           break;
         case IDC_LOSSLESS: update_mode_ui(state); break;
         case IDC_TIFF_COMPRESSION:
@@ -3432,9 +4243,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           state->use_source_folder =
               SendMessageW(state->source_folder, BM_GETCHECK, 0, 0) == BST_CHECKED;
           if (state->use_source_folder && !state->input.empty()) {
-            SetWindowTextW(state->folder_path, state->input.parent_path().c_str());
+            ui::set_text(state->folder_path, state->input.parent_path().c_str());
           } else if (!state->use_source_folder && !state->selected_folder.empty()) {
-            SetWindowTextW(state->folder_path, state->selected_folder.c_str());
+            ui::set_text(state->folder_path, state->selected_folder.c_str());
           }
           update_output_preview(state);
           break;
@@ -3453,7 +4264,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         case IDC_CANCEL:
           if (state->running) {
             state->cancel.store(true);
-            append_log(state, L"Cancellation requested");
+            append_log(state, HB_UI("Cancellation requested"));
           } else {
             start_task_queue(state);
           }
@@ -3494,7 +4305,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       if (payload->generation == state->preview_generation &&
           state->preview_renderer && state->preview_enabled) {
         state->preview_renderer->clear();
-        append_log(state, L"PREVIEW  " + payload->error);
+        append_log(state, HB_UI("PREVIEW  ") + ui::mark_known(payload->error));
       }
       return 0;
     }
@@ -3502,8 +4313,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       std::unique_ptr<std::wstring> stage(reinterpret_cast<std::wstring*>(lparam));
       ShowWindow(state->progress, SW_SHOW);
       SendMessageW(state->progress, PBM_SETPOS, wparam, 0);
-      SetWindowTextW(state->status, stage->c_str());
-      append_log(state, std::to_wstring(wparam) + L"%  " + *stage);
+      ui::set_text(state->status, ui::mark_progress(*stage).c_str());
+      append_log(state, std::to_wstring(wparam) + L"%  " + ui::mark_progress(*stage));
       return 0;
     }
     case WM_APP_TASK_PROGRESS: {
@@ -3516,7 +4327,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       }
       ShowWindow(state->progress, SW_SHOW);
       SendMessageW(state->progress, PBM_SETPOS, item->overall_progress, 0);
-      SetWindowTextW(state->status, item->stage.c_str());
+      ui::set_text(state->status, ui::mark_progress(item->stage).c_str());
       return 0;
     }
     case WM_APP_TASK_OUTPUT: {
@@ -3541,11 +4352,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         rebuild_task_list(state);
       }
       if (item->status == QueueStatus::skipped) {
-        append_log(state, L"SKIPPED  " + state->conversion_tasks[item->index].source.filename().wstring() +
-                          L" \u2014 " + item->reason);
+        append_log(state, HB_UI("SKIPPED  ") + state->conversion_tasks[item->index].source.filename().wstring() +
+                          L" \u2014 " + ui::mark_known(item->reason));
       } else if (item->status == QueueStatus::failed) {
-        append_log(state, L"FAILED  " + state->conversion_tasks[item->index].source.filename().wstring() +
-                          L" \u2014 " + item->reason);
+        append_log(state, HB_UI("FAILED  ") + state->conversion_tasks[item->index].source.filename().wstring() +
+                          L" \u2014 " + ui::mark_known(item->reason));
       }
       return 0;
     }
@@ -3555,16 +4366,16 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       SendMessageW(state->progress, PBM_SETPOS, 100, 0);
       SetTimer(window, kProgressResetTimer, 850, nullptr);
       const std::wstring summary =
-          L"Complete \u2014 " + std::to_wstring(payload->succeeded) + L" succeeded / " +
-          std::to_wstring(payload->skipped) + L" skipped / " +
-          std::to_wstring(payload->failed) + L" failed";
-      SetWindowTextW(state->status, summary.c_str());
-      append_log(state, L"BATCH SUMMARY  " + std::to_wstring(payload->succeeded) +
-                        L" succeeded / " + std::to_wstring(payload->skipped) +
-                        L" skipped / " + std::to_wstring(payload->failed) + L" failed");
+          HB_UI("Complete \u2014 ") + std::to_wstring(payload->succeeded) + HB_UI(" succeeded / ") +
+          std::to_wstring(payload->skipped) + HB_UI(" skipped / ") +
+          std::to_wstring(payload->failed) + HB_UI(" failed");
+      ui::set_text(state->status, summary.c_str());
+      append_log(state, HB_UI("BATCH SUMMARY  ") + std::to_wstring(payload->succeeded) +
+                        HB_UI(" succeeded / ") + std::to_wstring(payload->skipped) +
+                        HB_UI(" skipped / ") + std::to_wstring(payload->failed) + HB_UI(" failed"));
       if (payload->results.empty()) {
         state->output.clear();
-        SetWindowTextW(state->output_path, L"No output generated");
+        ui::set_text(state->output_path, HB_UI("No output generated"));
         return 0;
       }
       state->output = payload->results.back().output_path;
@@ -3577,37 +4388,37 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       const auto& result = *owned;
       const auto& v = result.verification;
       std::wostringstream line;
-      line << L"PASS  " << result.output_path.wstring() << L"  •  " << v.width << L"×" << v.height << L"  " << widen(v.pixel_format)
-           << L"  •  " << result.output_bytes << L" bytes  •  SHA-256 " << widen(result.sha256);
+      line << HB_UI("PASS  ") << result.output_path.wstring() << L"  •  " << v.width << L"×" << v.height << L"  " << widen(v.pixel_format)
+           << L"  •  " << result.output_bytes << HB_UI(" bytes  •  SHA-256 ") << widen(result.sha256);
       append_log(state, line.str());
       if (v.max_channel_nits > 0.0) {
         std::wostringstream diagnostics;
         diagnostics.setf(std::ios::fixed); diagnostics.precision(2);
-        diagnostics << L"HDR NUMBERS  max channel " << v.max_channel_nits << L" nit  •  max luminance "
+        diagnostics << HB_UI("HDR NUMBERS  max channel ") << v.max_channel_nits << HB_UI(" nit  •  max luminance ")
                     << v.max_luminance_nits << L" nit  •  P99.9 " << v.percentile_99_9_nits
-                    << L" nit  •  P99.99 " << v.percentile_99_99_nits << L" nit  •  chosen peak "
+                    << L" nit  •  P99.99 " << v.percentile_99_99_nits << HB_UI(" nit  •  chosen peak ")
                     << v.chosen_target_peak_nits << L" nit";
         append_log(state, diagnostics.str());
-        append_log(state, L"PEAK REASON  " + widen(v.peak_choice_reason));
+        append_log(state, HB_UI("PEAK REASON  ") + widen(v.peak_choice_reason));
       }
       if (v.hdr_capacity_max > 0.0 || v.reconstruction_rmse > 0.0) {
         std::wostringstream reconstruction;
         reconstruction.setf(std::ios::fixed); reconstruction.precision(6);
-        reconstruction << L"GAIN MAP  capacity " << v.hdr_capacity_max << L"×  •  linear RMSE "
-                       << v.reconstruction_rmse << L"  •  max abs error " << v.reconstruction_max_abs_error;
+        reconstruction << HB_UI("GAIN MAP  capacity ") << v.hdr_capacity_max << HB_UI("×  •  linear RMSE ")
+                       << v.reconstruction_rmse << HB_UI("  •  max abs error ") << v.reconstruction_max_abs_error;
         append_log(state, reconstruction.str());
       }
       const auto& timing = result.timings;
       std::wostringstream performance;
       performance.setf(std::ios::fixed); performance.precision(1);
-      performance << L"TIMING ms  decode " << timing.decode_ms
-                  << L" • orientation " << timing.orientation_ms
-                  << L" • color " << timing.color_conversion_ms
-                  << L" • gain map " << timing.gain_map_ms
-                  << L" • encode " << timing.encode_ms
-                  << L" • verify " << timing.verification_ms
-                  << L" • total " << timing.total_ms
-                  << (timing.canonical_cache_hit ? L" • canonical cache HIT" : L" • canonical cache MISS");
+      performance << HB_UI("TIMING ms  decode ") << timing.decode_ms
+                  << HB_UI(" • orientation ") << timing.orientation_ms
+                  << HB_UI(" • color ") << timing.color_conversion_ms
+                  << HB_UI(" • gain map ") << timing.gain_map_ms
+                  << HB_UI(" • encode ") << timing.encode_ms
+                  << HB_UI(" • verify ") << timing.verification_ms
+                  << HB_UI(" • total ") << timing.total_ms
+                  << (timing.canonical_cache_hit ? HB_UI(" • canonical cache HIT") : HB_UI(" • canonical cache MISS"));
       append_log(state, performance.str());
       return 0;
     }
@@ -3627,9 +4438,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       KillTimer(window, kProgressResetTimer);
       SendMessageW(state->progress, PBM_SETPOS, 0, 0);
       ShowWindow(state->progress, SW_HIDE);
-      SetWindowTextW(state->status, cancelled ? L"Cancelled" : L"Conversion failed");
-      append_log(state, (cancelled ? L"CANCELLED  " : L"ERROR  ") + *error);
-      if (!cancelled) MessageBoxW(window, error->c_str(), L"HDR Bridge conversion error", MB_OK | MB_ICONERROR);
+      ui::set_text(state->status, cancelled ? HB_UI("Cancelled") : HB_UI("Conversion failed"));
+      append_log(state, (cancelled ? HB_UI("CANCELLED  ") : HB_UI("ERROR  ")) + *error);
+      if (!cancelled) ui::message_box(window, error->c_str(), HB_UI("HDR Bridge conversion error"), MB_OK | MB_ICONERROR);
       return 0;
     }
     case WM_TIMER:
@@ -3668,7 +4479,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     case WM_CLOSE:
       if (state->running) {
         state->cancel.store(true);
-        MessageBoxW(window, L"Cancellation requested. Close HDR Bridge after the conversion worker stops.", L"HDR Bridge", MB_OK | MB_ICONINFORMATION);
+        ui::message_box(window, HB_UI("Cancellation requested. Close HDR Bridge after the conversion worker stops."), L"HDR Bridge", MB_OK | MB_ICONINFORMATION);
         return 0;
       }
       DestroyWindow(window);
@@ -3681,8 +4492,29 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       RemoveWindowSubclass(state->vertical_splitter, splitter_subclass, 1);
       RemoveWindowSubclass(state->horizontal_splitter, splitter_subclass, 1);
       RemoveWindowSubclass(state->files_splitter, splitter_subclass, 1);
+      for (HWND label : {state->title, state->version, state->queue_label,
+                         state->output_label, state->inspector_label,
+                         state->activity_label, state->tasks_label,
+                         state->source_path, state->quality_value,
+                         state->folder_path, state->status, state->output_path}) {
+        RemoveWindowSubclass(label, mixed_static_subclass, 1);
+      }
+      for (HWND combo : {state->format, state->gamut, state->transfer,
+                         state->representation, state->gainmap_resolution,
+                         state->gainmap_channels, state->peak,
+                         state->tiff_compression, state->gainmap_export_format,
+                         state->collision}) {
+        RemoveWindowSubclass(combo, combo_mixed_subclass, 1);
+      }
+      for (HWND rich : {state->inspector, state->log, state->base_name, state->name_suffix}) {
+        RemoveWindowSubclass(rich, rich_edit_subclass, 1);
+      }
       if (state->font) DeleteObject(state->font);
+      if (state->cjk_font) DeleteObject(state->cjk_font);
+      if (state->small_font) DeleteObject(state->small_font);
+      if (state->small_cjk_font) DeleteObject(state->small_cjk_font);
       if (state->title_font) DeleteObject(state->title_font);
+      if (state->version_font) DeleteObject(state->version_font);
       if (state->background_brush) DeleteObject(state->background_brush);
       if (state->surface_brush) DeleteObject(state->surface_brush);
       delete state;

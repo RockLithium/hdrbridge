@@ -4,9 +4,9 @@ Native Android interface to the shared HDR Bridge C++ core. Requires ARM64 and A
 
 ## Files and tasks
 
-On **FILES**, choose output settings, add images and select **Add to queue**. Each task stores its own settings. File rows show the source format, dimensions and bit depth; **Inspect** opens source metadata and **Preview** opens a supported native HDR preview.
+On **FILES**, choose output settings, add images and select **Add to queue**. Each task stores its own settings. File rows show the source format, dimensions and bit depth; **Preview** opens a supported native HDR preview, **Inspect** opens source metadata and **Delete** removes that file from the list.
 
-On **TASKS**, **Start all** converts pending tasks sequentially and becomes **Stop** while running. Completed and failed tasks are not repeated automatically. A task menu provides explicit restart, status reset, settings/name editing, reordering, file opening and removal. **Remove all** clears an idle queue.
+On **TASKS**, **Start all** converts pending tasks sequentially and becomes **Stop** while running. Completed and failed tasks are not repeated automatically. Each task card includes a direct remove button (`×`), and its menu provides explicit restart, status reset, settings/name editing, reordering, file opening and removal. **Remove all** clears an idle queue.
 
 Non-HDR files are skipped. A decode or conversion error affects only that task. Cancellation takes effect at codec checkpoints. Tasks survive activity recreation but are not restored after the app process exits.
 
@@ -16,7 +16,7 @@ Output representations and controls are listed in [Output formats](../docs/OUTPU
 
 Photo Frame adds a blurred border, camera logo and caption to an HDR image and exports Ultra HDR JPEG. Source EXIF supplies caption fields but is not copied to the output; source XMP is also omitted. Its Lossless, EXIF and XMP controls are fixed off.
 
-Tap the output path to select a folder. The folder grant, per-format parameters and suffixes are saved. **Reset settings** restores output parameters without clearing the selected folder or queued tasks.
+Tap the output path to select a folder. The folder grant, per-format parameters and suffixes are saved. On **FILES**, **Reset settings** restores output parameters without clearing the selected folder or queued tasks. Tap **HDR Bridge** in the header to switch between English and Simplified Chinese.
 
 Filenames use the source base name, optional suffix and format-controlled extension. Existing names are automatically numbered. Saving uses Android's document provider; the app cannot assume write access beside an imported document.
 

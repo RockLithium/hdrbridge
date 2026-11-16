@@ -4,7 +4,7 @@ Compression controls affect encoding size and quality. Gamut and transfer settin
 
 ## Ultra HDR JPEG
 
-An SDR JPEG base plus ISO gain map for sharing, Web and mobile use. Faithful/Auto measures the reconstructed source peak. Gain-map resolution is 1/4, 1/2 (default) or full; channels are mono (default) or true per-channel RGB. The quality slider controls both JPEG encoders. Ordinary JPEG readers display the SDR base. Ultra HDR is not a lossless HDR master format.
+An SDR JPEG base plus ISO gain map for sharing, Web and mobile use. Faithful/Auto measures the reconstructed source peak. Gain-map resolution is 1/4, 1/2 or full (default); channels are mono or true per-channel RGB (default). The quality slider controls both JPEG encoders and defaults to 95. Ordinary JPEG readers display the SDR base. Ultra HDR is not a lossless HDR master format.
 
 ## HDR PNG
 
@@ -16,7 +16,7 @@ RGB16 PQ with Rec.2020 or Display P3, Deflate compression and normalized metadat
 
 ## JPEG XL
 
-RGB16 PQ or HLG for edit/master use. Both transfers support Rec.2020 and Display P3. Native structured color encoding is used. Lossless mode is verified against the RGB16 encoder input, while quality modes permit lossy JXL compression. ISO gain-map output is also available with Rec.709, Display P3 or Rec.2020 SDR bases. Gain-map JPEG XL uses a true RGB map only and defaults to half resolution; mono output is intentionally unavailable.
+RGB16 PQ or HLG for edit/master use. Both transfers support Rec.2020 and Display P3. Native structured color encoding is used. Lossless mode is verified against the RGB16 encoder input, while quality modes permit lossy JXL compression. ISO gain-map output is also available with Rec.709, Display P3 or Rec.2020 SDR bases. Gain-map JPEG XL uses a true RGB map only and defaults to full resolution; mono output is intentionally unavailable.
 
 ## FP16 scRGB JPEG XR
 
@@ -24,7 +24,7 @@ Linear scRGB FP16, encoded through Windows WIC, with 1.0 representing 80 nits. I
 
 ## HDR AVIF
 
-10-bit 4:4:4 PQ or HLG using AV1, with Rec.2020 by default and optional Display P3. PQ is the default. This is a compact lossy HDR output whose application support is less universal than its container and color signaling suggest. ISO gain-map AVIF is an alternate representation with Rec.709, Display P3 or Rec.2020 SDR bases. It uses a true RGB gain map only and defaults to half resolution.
+10-bit 4:4:4 PQ or HLG using AV1, with Rec.2020 by default and optional Display P3. PQ is the default. This is a compact lossy HDR output. ISO gain-map AVIF is an alternate representation with Rec.709, Display P3 or Rec.2020 SDR bases. It uses a true RGB gain map only and defaults to full resolution.
 
 ## Gain Map extraction
 

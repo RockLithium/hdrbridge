@@ -248,7 +248,7 @@ final class UpdateManager {
     try {
       NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
       if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return;
-      if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(new NotificationChannel(CONFIRM_CHANNEL, "Update confirmation", NotificationManager.IMPORTANCE_LOW));
+      if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(new NotificationChannel(CONFIRM_CHANNEL, UiStrings.get(context, "Update confirmation"), NotificationManager.IMPORTANCE_LOW));
       Intent handoff = new Intent(context, UpdateConfirmActivity.class)
           .putExtra("session", sessionId).putExtra("confirmation", confirm);
       PendingIntent pending = PendingIntent.getActivity(context, CONFIRM_NOTIFICATION, handoff,
@@ -256,9 +256,22 @@ final class UpdateManager {
       synchronized (this) { confirmationPendingIntent = pending; }
       Notification.Builder builder = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(context, CONFIRM_CHANNEL) : new Notification.Builder(context);
       manager.notify(CONFIRM_NOTIFICATION, builder.setSmallIcon(android.R.drawable.stat_sys_download_done)
-          .setContentTitle("HDR Bridge").setContentText("Update installation requires confirmation")
+          .setContentTitle("HDR Bridge").setContentText(UiStrings.get(context, "Update installation requires confirmation"))
           .setContentIntent(pending).setAutoCancel(true).build());
     } catch (Exception ignored) { /* Confirmation remains available when the activity resumes. */ }
+  }
+  /** Update the presentation of an existing handoff without changing installer state. */
+  void refreshNotificationLanguage() {
+    NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+    for (android.service.notification.StatusBarNotification active : manager.getActiveNotifications()) {
+      if (active.getId() == CONFIRM_NOTIFICATION && CONFIRM_CHANNEL.equals(active.getNotification().getChannelId())) {
+        manager.createNotificationChannel(new NotificationChannel(CONFIRM_CHANNEL,
+            UiStrings.get(context, "Update confirmation"), NotificationManager.IMPORTANCE_LOW));
+        manager.notify(CONFIRM_NOTIFICATION, Notification.Builder.recoverBuilder(context, active.getNotification())
+            .setContentText(UiStrings.get(context, "Update installation requires confirmation")).build());
+        break;
+      }
+    }
   }
   private void cancelConfirmationNotification() {
     ((NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE)).cancel(CONFIRM_NOTIFICATION);

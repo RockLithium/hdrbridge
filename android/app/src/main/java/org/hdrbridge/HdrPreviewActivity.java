@@ -59,7 +59,7 @@ public final class HdrPreviewActivity extends Activity {
 
   @Override public void onCreate(Bundle saved) {
     super.onCreate(saved);
-    setTitle("HDR preview");
+    setTitle(UiStrings.get(this, "HDR preview"));
     if (Build.VERSION.SDK_INT < 34 || getDisplay() == null || !getDisplay().isHdr()) {
       unavailable("Native HDR preview requires Android 14 or later and an HDR display.");
       return;
@@ -280,8 +280,9 @@ public final class HdrPreviewActivity extends Activity {
   }
   private void unavailable(String message) {
     synchronized (lock) { if (closing || warned || isFinishing()) return; warned = true; }
-    new AlertDialog.Builder(this).setTitle("Preview unavailable").setMessage(message)
-        .setPositiveButton(android.R.string.ok, (d, w) -> finish())
+    new AlertDialog.Builder(this).setTitle(UiStrings.get(this, "Preview unavailable"))
+        .setMessage(UiStrings.get(this, message))
+        .setPositiveButton(UiStrings.get(this, "OK"), (d, w) -> finish())
         .setOnCancelListener(d -> finish()).show();
   }
   @Override public void onDestroy() {

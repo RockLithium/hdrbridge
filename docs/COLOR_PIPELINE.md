@@ -16,7 +16,7 @@ PQ output encodes absolute luminance with ST 2084. HLG output applies the invers
 
 Gain-map inputs reconstruct HDR from an SDR base, gain map, item relationship and family-specific metadata. ISO Ultra HDR JPEG, Apple auxiliary/MPF, gain-map AVIF `tmap`, gain-map TIFF SubIFD and gain-map JPEG XL (`jhgm`) remain separate adapters. Mono and RGB input maps are decoded according to their actual channel layout; the SDR base is linearized in its own signaled gamut before gain application. The reconstructed result is converted to the Rec.2020/PQ RGB16 working image.
 
-Ultra HDR decodes the working PQ16 image to linear light to derive an SDR base and ISO gain map. Its Faithful/Auto mode uses the measured content peak instead of the 10000-nit PQ code-space ceiling. It supports mono or true per-channel RGB maps and defaults to a half-resolution mono map. Gain-map JPEG XL and AVIF instead use a true per-channel RGB map only and default to half resolution; Rec.709, Display P3 and Rec.2020 SDR base gamuts are available, with Display P3 as the default. These are reconstructed HDR representations, not PQ/HLG metadata aliases.
+Ultra HDR decodes the working PQ16 image to linear light to derive an SDR base and ISO gain map. Its Faithful/Auto mode uses the measured content peak instead of the 10000-nit PQ code-space ceiling. It supports mono or true per-channel RGB maps and defaults to a full-resolution RGB map. Gain-map JPEG XL and AVIF instead use a true per-channel RGB map only and default to full resolution; Rec.709, Display P3 and Rec.2020 SDR base gamuts are available, with Display P3 as the default. These are reconstructed HDR representations, not PQ/HLG metadata aliases.
 
 ## Photo Frame
 

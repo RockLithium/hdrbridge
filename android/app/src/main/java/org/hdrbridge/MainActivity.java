@@ -22,7 +22,7 @@ public class MainActivity extends Activity {
   LinearLayout sourceList, taskList;
   TextView details, summary, folderLabel;
   LinearLayout filesPage, tasksPage, optionsPanel, optionsFooter;
-  Button filesTab, tasksTab, startButton;
+  Button filesTab, tasksTab, startButton, resetButton;
   ScrollView filesScroll, tasksScroll;
   boolean tasksSelected;
   final Map<Uri, String> outputNames = new WeakHashMap<>();
@@ -32,6 +32,35 @@ public class MainActivity extends Activity {
   String fullVersion = "", shortVersion = "";
   AlertDialog updateDialog;
   boolean resumed;
+  String t(String english) { return UiStrings.get(this, english); }
+  String tf(String english, Object... args) { return UiStrings.format(this, english, args); }
+  void text(TextView view, String english, Object... args) { UiStrings.bind(view, english, args); }
+  void setLanguage(String language) {
+    if (!"en".equals(language) && !"zh-CN".equals(language)) return;
+    if (language.equals(UiStrings.language(this))) return;
+    // Change labels in place: editable drafts, selections, jobs and native work stay attached.
+    getSharedPreferences(UiStrings.PREFERENCES, MODE_PRIVATE).edit().putString(UiStrings.LANGUAGE, language).commit();
+    UiStrings.refresh(this);
+    refresh();
+    refreshUpdate();
+    ConversionService.refreshNotification(this);
+    updates.refreshNotificationLanguage();
+  }
+  PopupMenu languageMenu;
+  void showLanguageMenu(View anchor) {
+    PopupMenu menu = new PopupMenu(this, anchor);
+    languageMenu = menu;
+    menu.getMenu().add(0, 1, 0, "English").setCheckable(true);
+    menu.getMenu().add(0, 2, 1, "简体中文").setCheckable(true);
+    menu.getMenu().setGroupCheckable(0, true, true);
+    menu.getMenu().findItem(UiStrings.chinese(this) ? 2 : 1).setChecked(true);
+    menu.setOnMenuItemClickListener(item -> {
+      setLanguage(item.getItemId() == 2 ? "zh-CN" : "en");
+      return true;
+    });
+    menu.setOnDismissListener(p -> { if (languageMenu == p) languageMenu = null; });
+    menu.show();
+  }
   final Runnable automaticUpdateCheck = new Runnable() {
     @Override public void run() {
       if (!resumed) return;
@@ -47,6 +76,7 @@ public class MainActivity extends Activity {
   @Override
   public void onCreate(Bundle state) {
     super.onCreate(state);
+    UiStrings.language(this);
     if (state != null) {
       pendingStart = state.getInt("pendingStart", -2);
       tasksSelected = state.getBoolean("tasksSelected", false);
@@ -100,8 +130,8 @@ public class MainActivity extends Activity {
   void openUpdates() {
     if (updates.state == UpdateManager.State.IDLE || updates.state == UpdateManager.State.UP_TO_DATE)
       updates.check(true);
-    updateDialog = new AlertDialog.Builder(this).setTitle("App updates")
-        .setMessage("").setPositiveButton("Close", null).setNegativeButton("Close", null).create();
+    updateDialog = new AlertDialog.Builder(this).setTitle(t("App updates"))
+        .setMessage("").setPositiveButton(t("Close"), null).setNegativeButton(t("Close"), null).create();
     updateDialog.setOnDismissListener(d -> updateDialog = null);
     updateDialog.show();
     refreshUpdate();
@@ -112,37 +142,37 @@ public class MainActivity extends Activity {
     boolean available = state == UpdateManager.State.AVAILABLE || state == UpdateManager.State.READY;
     if (versionView != null) {
       versionView.setText(shortVersion + (available ? " •" : ""));
-      versionView.setContentDescription(fullVersion + (available ? ", update available" : ", check for updates"));
+      versionView.setContentDescription(fullVersion + ", " + t(available ? "update available" : "check for updates"));
     }
     if (updateDialog == null || !updateDialog.isShowing()) return;
     String message = updates.message;
     if (state == UpdateManager.State.AVAILABLE && updates.release != null)
-      message = "Version " + updates.release.version + " is available.";
-    if (state == UpdateManager.State.DOWNLOADING) message = "Downloading update: " + updates.progress + "%";
-    updateDialog.setMessage(message.isEmpty() ? "Check for updates" : message);
+      message = tf("Version %s is available.", updates.release.version);
+    if (state == UpdateManager.State.DOWNLOADING) message = tf("Downloading update: %s%%", updates.progress);
+    updateDialog.setMessage(t(message.isEmpty() ? "Check for updates" : message));
     Button action = updateDialog.getButton(AlertDialog.BUTTON_POSITIVE);
     Button close = updateDialog.getButton(AlertDialog.BUTTON_NEGATIVE);
     close.setVisibility(View.VISIBLE);
     action.setVisibility(View.VISIBLE);
     if (state == UpdateManager.State.AVAILABLE) {
-      action.setText("Download");
+      text(action, "Download");
       action.setOnClickListener(v -> updates.download());
     } else if (state == UpdateManager.State.READY) {
-      action.setText("Install");
+      text(action, "Install");
       action.setOnClickListener(v -> {
         synchronized (model) {
-          if (model.running) { updateDialog.setMessage("Wait for conversion to finish before installing."); return; }
+          if (model.running) { updateDialog.setMessage(t("Wait for conversion to finish before installing.")); return; }
           for (AppModel.Source source : model.sources) if (source.inspecting) {
-            updateDialog.setMessage("Wait for inspection to finish before installing."); return;
+            updateDialog.setMessage(t("Wait for inspection to finish before installing.")); return;
           }
         }
         updates.install(this);
       });
     } else if (state == UpdateManager.State.INSTALLING && updates.canCancelInstall()) {
-      action.setText("Cancel installation");
+      text(action, "Cancel installation");
       action.setOnClickListener(v -> updates.cancelInstall());
     } else if (state == UpdateManager.State.ERROR || state == UpdateManager.State.UNAVAILABLE) {
-      action.setText("Retry");
+      text(action, "Retry");
       action.setOnClickListener(v -> updates.check(true));
     } else {
       action.setVisibility(View.GONE);
@@ -162,6 +192,10 @@ public class MainActivity extends Activity {
     setContentView(root);
     TextView title = new TextView(this);
     title.setText("HDR Bridge");
+    title.setTag("language_toggle");
+    title.setContentDescription("HDR Bridge");
+    title.setOnClickListener(this::showLanguageMenu);
+    title.setFocusable(true);
     title.setTextSize(20);
     title.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
     LinearLayout header = row(root);
@@ -184,7 +218,7 @@ public class MainActivity extends Activity {
       fullVersion = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
       shortVersion = fullVersion.split("-", 2)[0];
       version.setText(shortVersion);
-      version.setContentDescription(fullVersion + ", check for updates");
+      version.setContentDescription(fullVersion + ", " + t("check for updates"));
       version.setOnClickListener(v -> openUpdates());
     } catch (android.content.pm.PackageManager.NameNotFoundException ignored) {
       version.setVisibility(View.GONE);
@@ -194,7 +228,8 @@ public class MainActivity extends Activity {
     identity.addView(version, versionLayout);
     header.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
     Button reset = new Button(this);
-    reset.setText("Reset settings");
+    resetButton = reset;
+    text(reset, "Reset settings");
     reset.setTextSize(14);
     reset.setAllCaps(false);
     reset.setTag("reset_settings");
@@ -247,7 +282,6 @@ public class MainActivity extends Activity {
     LinearLayout r = row(filesPage);
     button(r, "Add files", this::pick);
     r.getChildAt(0).setTag("add_files");
-    button(r, "Remove", () -> { model.removeSelectedSources(); refresh(); });
     button(r, "Clear", () -> { model.clearSources(); refresh(); });
     filesScroll = new ScrollView(this);
     styleListPanel(filesScroll);
@@ -293,11 +327,11 @@ public class MainActivity extends Activity {
     r = row(root);
     filesTab = new Button(this);
     filesTab.setAllCaps(false);
-    filesTab.setText("FILES");
+    text(filesTab, "FILES");
     filesTab.setTag("files_tab");
     tasksTab = new Button(this);
     tasksTab.setAllCaps(false);
-    tasksTab.setText("TASKS");
+    text(tasksTab, "TASKS");
     tasksTab.setTag("tasks_tab");
     r.addView(filesTab, sizedButtonLayout(40));
     r.addView(tasksTab, sizedButtonLayout(40));
@@ -316,6 +350,10 @@ public class MainActivity extends Activity {
     tasksTab.setBackgroundColor(tasks ? getColor(R.color.tab_selected) : Color.TRANSPARENT);
     filesTab.setTextColor(tasks ? secondaryTextColor() : accentColor());
     tasksTab.setTextColor(tasks ? accentColor() : secondaryTextColor());
+    if (resetButton != null) {
+      resetButton.setVisibility(tasks ? View.INVISIBLE : View.VISIBLE);
+      resetButton.setEnabled(!tasks);
+    }
   }
   int themeColor(int attr) {
     android.content.res.TypedArray attrs = obtainStyledAttributes(new int[]{attr});
@@ -337,7 +375,7 @@ public class MainActivity extends Activity {
       return colon >= 0 && colon + 1 < id.length() ? id.substring(colon + 1) : id;
     } catch (Exception ignored) {
       String name = uri.getLastPathSegment();
-      return name == null ? "Output folder" : name;
+      return name == null ? t("Output folder") : name;
     }
   }
   final class ChoiceAdapter extends ArrayAdapter<String> {
@@ -346,6 +384,7 @@ public class MainActivity extends Activity {
     }
     @Override public View getView(int position, View convertView, android.view.ViewGroup parent) {
       TextView text = (TextView) super.getView(position, convertView, parent);
+      UiStrings.bind(text, getItem(position));
       text.setTextSize(15);
       text.setSingleLine(true);
       text.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -355,6 +394,7 @@ public class MainActivity extends Activity {
     }
     @Override public View getDropDownView(int position, View convertView, android.view.ViewGroup parent) {
       TextView text = (TextView) super.getDropDownView(position, convertView, parent);
+      UiStrings.bind(text, getItem(position));
       text.setTextSize(16);
       text.setMinHeight(dp(48));
       text.setGravity(Gravity.CENTER_VERTICAL);
@@ -368,10 +408,10 @@ public class MainActivity extends Activity {
   }
   void confirmResetSettings() {
     new AlertDialog.Builder(this)
-        .setTitle("Reset output settings?")
-        .setMessage("Restore defaults for all output formats.")
-        .setNegativeButton("Cancel", null)
-        .setPositiveButton("Reset", (dialog, which) -> resetOutputSettings()).show();
+        .setTitle(t("Reset output settings?"))
+        .setMessage(t("Restore defaults for all output formats."))
+        .setNegativeButton(t("Cancel"), null)
+        .setPositiveButton(t("Reset"), (dialog, which) -> resetOutputSettings()).show();
   }
   void resetOutputSettings() {
     int format = current.format;
@@ -389,7 +429,7 @@ public class MainActivity extends Activity {
     container.setGravity(Gravity.CENTER_VERTICAL);
     parent.addView(container, new LinearLayout.LayoutParams(cell ? 0 : -1, -2, cell ? 1 : 0));
     TextView text = new TextView(this);
-    text.setText(label);
+    text(text, label);
     text.setTextSize(13);
     text.setSingleLine(true);
     container.addView(text, cell ? new LinearLayout.LayoutParams(-1, -2)
@@ -490,8 +530,8 @@ public class MainActivity extends Activity {
       qualityRow.setGravity(Gravity.CENTER_VERTICAL);
       TextView quality = new TextView(this);
       quality.setTextSize(14);
-      String label = f == 1 || f == 2 ? "Compression: " : "Quality: ";
-      quality.setText(label + current.quality);
+      String label = f == 1 || f == 2 ? "Compression: %s" : "Quality: %s";
+      text(quality, label, current.quality);
       qualityRow.addView(quality);
       SeekBar seek = new SeekBar(this);
       seek.setTag("output_quality");
@@ -505,14 +545,14 @@ public class MainActivity extends Activity {
         public void onStartTrackingTouch(SeekBar b) {}
         public void onStopTrackingTouch(SeekBar b) { saveCurrent(); }
         public void onProgressChanged(SeekBar b, int n, boolean user) {
-          if (user) { current.quality = n; quality.setText(label + n); }
+          if (user) { current.quality = n; text(quality, label, n); }
         }
       });
     }
     LinearLayout suffixRow = row(optionsFooter);
     suffixRow.setGravity(Gravity.CENTER_VERTICAL);
     CheckBox suffixCheck = new CheckBox(this);
-    suffixCheck.setText("Use suffix");
+    text(suffixCheck, "Use suffix");
     suffixCheck.setTextSize(14);
     suffixCheck.setMinHeight(0);
     suffixCheck.setChecked(current.useSuffix);
@@ -542,7 +582,7 @@ public class MainActivity extends Activity {
   }
   CheckBox inlineCheck(LinearLayout parent, String label, boolean checked, String tag) {
     CheckBox check = new CheckBox(this);
-    check.setText(label);
+    text(check, label);
     check.setTextSize(14);
     check.setMinHeight(dp(36));
     check.setTag(tag);
@@ -558,7 +598,7 @@ public class MainActivity extends Activity {
   }
   void button(LinearLayout p, String text, Runnable action) {
     Button b = new Button(this);
-    b.setText(text);
+    text(b, text);
     b.setAllCaps(false);
     b.setTextSize(14);
     b.setMinHeight(dp(36));
@@ -591,7 +631,7 @@ public class MainActivity extends Activity {
   }
   void heading(LinearLayout p, String text) {
     TextView t = new TextView(this);
-    t.setText(text);
+    text(t, text);
     t.setTextSize(18);
     t.setPadding(0, dp(6), 0, dp(4));
     p.addView(t);
@@ -722,15 +762,15 @@ public class MainActivity extends Activity {
   void showInspector(AppModel.Source s) {
     activeSource = s; details = new TextView(this); details.setTextSize(14); details.setTextIsSelectable(true); details.setPadding(dp(20), dp(12), dp(20), dp(12));
     ScrollView scroll = new ScrollView(this); scroll.addView(details); inspectView(s);
-    AlertDialog dialog = new AlertDialog.Builder(this).setTitle("SOURCE INSPECTOR").setView(scroll).setPositiveButton("Close", null).create();
+    AlertDialog dialog = new AlertDialog.Builder(this).setTitle(t("SOURCE INSPECTOR")).setView(scroll).setPositiveButton(t("Close"), null).create();
     dialog.setOnDismissListener(d -> { activeSource = null; details = null; }); dialog.show();
   }
   void inspectView(AppModel.Source s) {
     if (s.info == null) {
       details.setText(s.name + "\n"
-          + (s.inspecting             ? "Inspecting…"
-                  : s.error.isEmpty() ? "Waiting"
-                                      : "Inspection failed: " + s.error));
+          + (s.inspecting             ? t("Inspecting…")
+                  : s.error.isEmpty() ? t("Waiting")
+                                      : t("Inspection failed: ") + t(s.error)));
       if (!s.inspecting && s.error.isEmpty())
         model.inspect(s);
       return;
@@ -756,7 +796,7 @@ public class MainActivity extends Activity {
     section(b, j, "iccSignal", "ICC profile signal");
     section(b, j, "metadata", "Metadata status");
     if (j.optBoolean("gainMapPresent")) {
-      b.append("\nGain map family: ").append(j.optString("gainMapFamily"));
+      b.append("\n").append(t("Gain map family")).append(": ").append(j.optString("gainMapFamily"));
       section(b, j, "baseRendition", "Base rendition");
       section(b, j, "gainMapSize", "Gain map size");
       section(b, j, "gainMapLayout", "Gain map layout");
@@ -769,7 +809,7 @@ public class MainActivity extends Activity {
     org.json.JSONObject j = root.optJSONObject(key);
     if (j == null)
       return;
-    b.append("\n\n").append(title).append(": ");
+    b.append("\n\n").append(t(title)).append(": ");
     Iterator<String> keys = j.keys();
     boolean first = true;
     while (keys.hasNext()) {
@@ -780,10 +820,26 @@ public class MainActivity extends Activity {
       first = false;
     }
   }
+  View deleteIconButton(String tag, Runnable action) {
+    TextView close = new TextView(this);
+    close.setText("×");
+    close.setTextSize(24);
+    close.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+    close.setGravity(Gravity.CENTER);
+    close.setIncludeFontPadding(false);
+    close.setTag(tag);
+    close.setContentDescription(t("Remove"));
+    android.util.TypedValue ripple = new android.util.TypedValue();
+    if (getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true)) {
+      close.setBackgroundResource(ripple.resourceId);
+    }
+    close.setOnClickListener(v -> action.run());
+    return close;
+  }
   void refresh() {
     if (sourceList == null)
       return;
-    folderLabel.setText(folder == null ? "Choose output folder" : "Save to: " + folderName(folder));
+    folderLabel.setText(folder == null ? t("Choose output folder") : tf("Save to: %s", folderName(folder)));
     int filesY = filesScroll.getScrollY();
     int tasksY = tasksScroll.getScrollY();
     sourceList.removeAllViews();
@@ -811,17 +867,21 @@ public class MainActivity extends Activity {
         meta.setTextSize(13);
         if (s.info != null) {
           org.json.JSONObject j = s.info;
-          String k = j.optString("assetKind");
-          String kind = k.equals("gain-map-hdr") ? "HDR gain map"
-              : k.equals("direct-hdr") ? "Direct HDR" : k;
-          String format = j.optString("format");
-          if (format.equalsIgnoreCase("Ultra HDR JPEG") && k.equals("gain-map-hdr"))
-            kind = "";
-          meta.setText(format + (kind.isEmpty() ? "" : " • " + kind)
-              + (j.optInt("width") > 0 ? " • " + j.optInt("width") + "×" + j.optInt("height") : "")
-              + (j.optInt("bitDepth") > 0 ? " • " + j.optInt("bitDepth") + "-bit" : ""));
+          org.json.JSONObject color = j.optJSONObject("color");
+          int transfer = color == null ? 0 : color.optInt("transfer");
+          StringBuilder metaText = new StringBuilder(j.optString("format"));
+          if (j.optInt("width") > 0)
+            metaText.append(" · ").append(j.optInt("width")).append("×").append(j.optInt("height"));
+          if (j.optInt("bitDepth") > 0) {
+            metaText.append(" · ").append(j.optInt("bitDepth")).append("-bit");
+            if (transfer == 16) metaText.append(" PQ");
+            else if (transfer == 18) metaText.append(" HLG");
+          }
+          if (j.optBoolean("gainMapPresent"))
+            metaText.append(" · Gain Map");
+          meta.setText(metaText.toString());
         } else {
-          meta.setText(s.inspecting ? "Inspecting…" : s.error.isEmpty() ? "Waiting" : "Inspection failed");
+          meta.setText(t(s.inspecting ? "Inspecting…" : s.error.isEmpty() ? "Waiting" : "Inspection failed"));
         }
         if (!s.error.isEmpty() && s.info == null)
           meta.setTextColor(Color.rgb(200, 55, 55));
@@ -832,11 +892,26 @@ public class MainActivity extends Activity {
         line.getChildAt(0).setTag("source_preview");
         button(line, "Inspect", () -> showInspector(s));
         line.getChildAt(1).setTag("source_inspect");
+        button(line, "Delete", () -> {
+          model.removeSource(s);
+          refresh();
+        });
+        line.getChildAt(2).setTag("source_remove");
         for (int i = 0; i < line.getChildCount(); i++) {
           Button action = (Button) line.getChildAt(i);
           action.setMinHeight(0);
+          action.setMinimumHeight(0);
+          action.setMinWidth(0);
+          action.setMinimumWidth(0);
           action.setPadding(0, 0, 0, 0);
-          action.setLayoutParams(sizedButtonLayout(32));
+          if (i == 2) {
+            action.setTextColor(Color.rgb(220, 60, 60));
+            LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(0, dp(32), 0.62f);
+            deleteParams.setMargins(dp(2), 0, dp(2), 0);
+            action.setLayoutParams(deleteParams);
+          } else {
+            action.setLayoutParams(sizedButtonLayout(32));
+          }
         }
       }
       for (AppModel.Task t : model.tasks) {
@@ -868,10 +943,18 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams card = new LinearLayout.LayoutParams(-1, -2);
         card.setMargins(0, dp(4), 0, dp(4));
         taskList.addView(box, card);
+        LinearLayout topRow = new LinearLayout(this);
+        topRow.setOrientation(LinearLayout.HORIZONTAL);
+        topRow.setGravity(Gravity.CENTER_VERTICAL);
+        box.addView(topRow, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+        textCol.setPadding(0, 0, dp(2), 0);
+        topRow.addView(textCol, new LinearLayout.LayoutParams(0, -2, 1));
         TextView first = new TextView(this);
-        String sourceFormat = t.source.info == null ? "Image" : t.source.info.optString("format", "Image");
-        if (sourceFormat.isEmpty()) sourceFormat = "Image";
-        first.setText(sourceFormat + " → " + Options.LABELS[t.options.format] + " • " + t.status);
+        String sourceFormat = t.source.info == null ? "" : t.source.info.optString("format");
+        if (sourceFormat.isEmpty()) sourceFormat = t("Image");
+        first.setText(sourceFormat + " → " + t(Options.LABELS[t.options.format]) + " • " + t(t.status));
         first.setTextSize(16);
         if (t.status.equals("Failed") || t.status.equals("Cancelled") || t.status.equals("Skipped"))
           first.setTextColor(Color.rgb(220, 60, 60));
@@ -879,29 +962,37 @@ public class MainActivity extends Activity {
           first.setTextColor(Color.rgb(45, 160, 80));
         else if (t.status.equals("Running"))
           first.setTextColor(Color.rgb(40, 130, 230));
-        box.addView(first);
+        textCol.addView(first);
         TextView second = new TextView(this);
         String destination = t.folder.getLastPathSegment();
         String outputName = t.output == null ? t.filename : outputName(t.output, t.filename);
         second.setText(t.source.name + " → " + outputName + "\n"
-            + (destination == null ? "Output folder" : destination) + " • " + t.detail);
+            + (destination == null ? t("Output folder") : destination) + " • " + t(t.detail));
         second.setTextSize(14);
-        box.addView(second);
+        textCol.addView(second);
+        topRow.addView(deleteIconButton("task_remove", () -> {
+          if (model.running) {
+            toast("Stop the queue before removing tasks");
+            return;
+          }
+          model.removeTask(t);
+          refresh();
+        }), new LinearLayout.LayoutParams(dp(26), dp(36)));
         ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         bar.setMax(100);
         bar.setProgress(t.progress);
-        box.addView(bar);
+        box.addView(bar, new LinearLayout.LayoutParams(-1, -2));
         box.setOnClickListener(v -> taskMenu(t));
       }
     }
     filesScroll.post(() -> filesScroll.scrollTo(0, filesY));
     tasksScroll.post(() -> tasksScroll.scrollTo(0, tasksY));
     if (activeSource != null && details != null) inspectView(activeSource);
-    startButton.setText(model.running ? "Stop" : "Start all");
-    tasksTab.setText(model.tasks.isEmpty() ? "TASKS" : "TASKS (" + model.tasks.size() + ")");
-    summary.setText("Ready " + ready + " • Completed " + done + " • Skipped " + skipped
-        + " • Failed " + failed + " • Cancelled " + cancelled
-        + (model.running ? " • Running" : ""));
+    text(startButton, model.running ? "Stop" : "Start all");
+    if (model.tasks.isEmpty()) text(tasksTab, "TASKS");
+    else text(tasksTab, "TASKS (%s)", model.tasks.size());
+    summary.setText(tf("Ready %s • Completed %s • Skipped %s • Failed %s • Cancelled %s",
+        ready, done, skipped, failed, cancelled) + (model.running ? " • " + t("Running") : ""));
   }
   void startQueue(AppModel.Task t) {
     if (Build.VERSION.SDK_INT >= 33 &&
@@ -925,8 +1016,8 @@ public class MainActivity extends Activity {
     }
     new AlertDialog.Builder(this)
         .setTitle(t.source.name)
-        .setItems(new String[] {"Start task", "Clear status", "Edit settings", "Edit output base name",
-                      "Move up", "Move down", "Open source", "Open output", "Details", "Remove"},
+        .setItems(UiStrings.choices(this, "Start task", "Clear status", "Edit settings", "Edit output base name",
+                      "Move up", "Move down", "Open source", "Open output", "Details", "Remove"),
             (d, i) -> {
               if (i == 0) {
                 if (model.resetTask(t)) startQueue(t);
@@ -948,10 +1039,10 @@ public class MainActivity extends Activity {
                 if (t.output == null) toast("No output yet");
                 else open(t.output);
               } else if (i == 8) {
-                new AlertDialog.Builder(this).setTitle("Task details")
-                    .setMessage(t.detail + (t.output == null ? "" : "\n\n" + t.output)
+                new AlertDialog.Builder(this).setTitle(t("Task details"))
+                    .setMessage(t(t.detail) + (t.output == null ? "" : "\n\n" + t.output)
                         + (t.hash.isEmpty() ? "" : "\n\nSHA-256: " + t.hash))
-                    .setPositiveButton("Close", null).show();
+                    .setPositiveButton(t("Close"), null).show();
               } else if (i == 9) {
                 model.removeTask(t);
               }
@@ -968,9 +1059,9 @@ public class MainActivity extends Activity {
     e.setSingleLine();
     e.setText(base);
     new AlertDialog.Builder(this)
-        .setTitle("Output base name (extension is fixed)")
+        .setTitle(t("Output base name (extension is fixed)"))
         .setView(e)
-        .setPositiveButton("Save",
+        .setPositiveButton(t("Save"),
             (d, i) -> {
               String n = e.getText().toString().trim();
               if (n.isEmpty() || !n.equals(safeName(n)) || n.equals(".") || n.equals("..")) {
@@ -985,7 +1076,7 @@ public class MainActivity extends Activity {
               t.hash = "";
               refresh();
             })
-        .setNegativeButton("Cancel", null)
+        .setNegativeButton(t("Cancel"), null)
         .show();
   }
   void preview(Uri u) {
@@ -1009,7 +1100,7 @@ public class MainActivity extends Activity {
     }
   }
   void toast(String s) {
-    Toast.makeText(this, s, Toast.LENGTH_LONG).show();
+    Toast.makeText(this, t(s), Toast.LENGTH_LONG).show();
   }
   void editOptions(Options initial, AppModel.Task task) {
     new Editor(initial, task).show();
@@ -1039,8 +1130,7 @@ public class MainActivity extends Activity {
       ScrollView scroll = new ScrollView(MainActivity.this);
       scroll.addView(outer);
       formatControl = new Spinner(MainActivity.this);
-      formatControl.setAdapter(new ArrayAdapter<>(
-          MainActivity.this, android.R.layout.simple_spinner_dropdown_item, Options.LABELS));
+      formatControl.setAdapter(new ChoiceAdapter(Options.LABELS));
       formatControl.setSelection(value.format);
       outer.addView(formatControl);
       panel = new LinearLayout(MainActivity.this);
@@ -1067,11 +1157,11 @@ public class MainActivity extends Activity {
             }
           });
       AlertDialog dialog = new AlertDialog.Builder(MainActivity.this)
-                               .setTitle(task == null ? "Output settings" : "Edit queued task")
+                               .setTitle(t(task == null ? "Output settings" : "Edit queued task"))
                                .setView(scroll)
-                               .setPositiveButton("Save", null)
-                               .setNeutralButton("Reset format", null)
-                               .setNegativeButton("Cancel", null)
+                               .setPositiveButton(t("Save"), null)
+                               .setNeutralButton(t("Reset format"), null)
+                               .setNegativeButton(t("Cancel"), null)
                                .create();
       dialog.setOnShowListener(x -> {
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
@@ -1114,25 +1204,24 @@ public class MainActivity extends Activity {
     }
     Spinner spinner(String label, String[] choices, int index) {
       TextView l = new TextView(MainActivity.this);
-      l.setText(label);
+      text(l, label);
       panel.addView(l);
       Spinner s = new Spinner(MainActivity.this);
-      s.setAdapter(new ArrayAdapter<>(
-          MainActivity.this, android.R.layout.simple_spinner_dropdown_item, choices));
+      s.setAdapter(new ChoiceAdapter(choices));
       s.setSelection(Math.max(0, Math.min(index, choices.length - 1)));
       panel.addView(s);
       return s;
     }
     CheckBox check(String label, boolean b) {
       CheckBox c = new CheckBox(MainActivity.this);
-      c.setText(label);
+      text(c, label);
       c.setChecked(b);
       panel.addView(c);
       return c;
     }
     EditText input(String label, String text, boolean number) {
       TextView l = new TextView(MainActivity.this);
-      l.setText(label);
+      text(l, label);
       panel.addView(l);
       EditText e = new EditText(MainActivity.this);
       e.setSingleLine();
@@ -1154,7 +1243,7 @@ public class MainActivity extends Activity {
       caption1Control = caption2Control = null;
       if (f == 7) {
         TextView frameInfo = new TextView(MainActivity.this);
-        frameInfo.setText("HDR input: Ultra HDR JPEG output");
+        text(frameInfo, "HDR input: Ultra HDR JPEG output");
         panel.addView(frameInfo);
         caption1Control = input("Caption 1 (empty: camera from EXIF)", value.caption1, false);
         caption2Control = input("Caption 2 (empty: exposure from EXIF)", value.caption2, false);
@@ -1204,7 +1293,7 @@ public class MainActivity extends Activity {
               spinner("Gain map channels", new String[] {"Mono", "RGB"}, value.channels);
         else {
           TextView t = new TextView(MainActivity.this);
-          t.setText("Gain map channels: RGB");
+          text(t, "Gain map channels: RGB");
           panel.addView(t);
         }
         peakControl = spinner("Target peak",
@@ -1213,7 +1302,7 @@ public class MainActivity extends Activity {
       }
       if (f == 2) {
         TextView fixedTransfer = new TextView(MainActivity.this);
-        fixedTransfer.setText("Transfer: PQ / ST2084");
+        text(fixedTransfer, "Transfer: PQ / ST2084");
         panel.addView(fixedTransfer);
         compressionControl =
             spinner("TIFF compression", new String[] {"Deflate", "None"}, value.compressed ? 0 : 1);
@@ -1255,7 +1344,7 @@ public class MainActivity extends Activity {
         losslessControl.setEnabled(false);
       } else if (f == 1 || f == 2) {
         TextView fixed = new TextView(MainActivity.this);
-        fixed.setText("Lossless");
+        text(fixed, "Lossless");
         panel.addView(fixed);
       }
       qualityControl = input(f == 1 || f == 2 ? "Compression level (1–9)"

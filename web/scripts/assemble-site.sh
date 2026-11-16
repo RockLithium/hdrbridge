@@ -26,4 +26,6 @@ node "${web_root}/scripts/generate-bundled.mjs" \
   "${web_root}/public/codecs/hdrbridge/hdrbridge-core.wasm" \
   "${dist_root}/bundled/index.html" \
   "${web_root}/public/codecs/hdrbridge/threaded/hdrbridge-core.wasm"
+node "${web_root}/scripts/stamp-version.mjs" \
+  "${web_root}/../VERSION" "${dist_root}/index.html" "${dist_root}/bundled/index.html"
 touch "${dist_root}/.nojekyll"

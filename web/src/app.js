@@ -1,9 +1,13 @@
 import { runForCurrentRequest } from "./request-guard.js";
+import { initializeAppDownloads } from "./app-downloads.js";
+
+initializeAppDownloads();
 
 const availableFormats = new Set(["uhdr", "png", "jxl", "jxr", "avif", "tiff"]);
 const translations = {
   "en-US": {
     goBack: "← Go Back", subtitle: "Convert HDR still images locally in your browser.",
+    getApp: "Get the app", windowsApp: "Windows x64", androidApp: "Android ARM64", latestRelease: "Latest release on GitHub ↗",
     selectHdr: "SELECT HDR IMAGE", dropText: "Click or drop one HDR image here...", localText: "Your image stays on this device.",
     representation: "Representation", raster: "Raster", signal: "Signal", metadata: "Metadata", outputFormat: "OUTPUT FORMAT",
     formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
@@ -26,6 +30,7 @@ const translations = {
   },
   "zh-Hans": {
     goBack: "← 返回", subtitle: "在浏览器中本地转换 HDR 静态图像。",
+    getApp: "下载应用", windowsApp: "Windows x64", androidApp: "Android ARM64", latestRelease: "GitHub 最新版本 ↗",
     selectHdr: "选择 HDR 图像", dropText: "点击或拖入一张 HDR 图像...", localText: "图像只在本设备上处理。",
     representation: "源表示", raster: "图像", signal: "信号", metadata: "元数据", outputFormat: "输出格式",
     formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
@@ -48,6 +53,7 @@ const translations = {
   },
   "fr-FR": {
     goBack: "← Retour", subtitle: "Convertissez localement des images HDR dans votre navigateur.",
+    getApp: "Télécharger l’app", windowsApp: "Windows x64", androidApp: "Android ARM64", latestRelease: "Dernière version sur GitHub ↗",
     selectHdr: "CHOISIR UNE IMAGE HDR", dropText: "Cliquez ou déposez une image HDR ici...", localText: "L’image reste sur cet appareil.",
     representation: "Représentation", raster: "Image", signal: "Signal", metadata: "Métadonnées", outputFormat: "FORMAT DE SORTIE",
     formatUhdr: "JPEG Ultra HDR", formatPng: "PNG HDR", formatAvif: "AVIF HDR", formatTiff: "TIFF HDR",
@@ -70,6 +76,7 @@ const translations = {
   },
   "ru-RU": {
     goBack: "← Назад", subtitle: "Локальное преобразование HDR-изображений в браузере.",
+    getApp: "Скачать приложение", windowsApp: "Windows x64", androidApp: "Android ARM64", latestRelease: "Последний выпуск на GitHub ↗",
     selectHdr: "ВЫБЕРИТЕ HDR-ИЗОБРАЖЕНИЕ", dropText: "Нажмите или перетащите сюда HDR-изображение...", localText: "Изображение остаётся на этом устройстве.",
     representation: "Представление", raster: "Растр", signal: "Сигнал", metadata: "Метаданные", outputFormat: "ФОРМАТ ВЫВОДА",
     formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
@@ -99,14 +106,14 @@ const state = {
   primaries: 9,
   transfer: 16,
   outputRepresentation: "direct",
-  gainResolution: 2,
-  gainChannels: "mono",
+  gainResolution: 1,
+  gainChannels: "rgb",
   peak: 0,
   lossless: true,
   copyExif: true,
   copyXmp: true,
   tiffCompression: "compressed",
-  encodingValues: { uhdr: 95, png: 4, jxl: 95, jxr: 95, avif: 95, tiff: 6 },
+  encodingValues: { uhdr: 95, png: 4, jxl: 90, jxr: 95, avif: 95, tiff: 6 },
   requestId: 0,
   outputUrl: null,
   outputName: "",
@@ -380,6 +387,7 @@ function configureParameters() {
   updateOptionButtons("primaries");
   updateOptionButtons("transfer");
   updateOptionButtons("peak");
+  updateOptionButtons("gainResolution");
   updateOptionButtons("gainChannels");
   updateOptionButtons("tiffCompression");
 }
@@ -389,7 +397,12 @@ function selectFormat(format) {
   state.outputRepresentation = "direct";
   state.transfer = 16;
   state.primaries = format === "uhdr" ? 12 : 9;
-  if (format === "uhdr") state.gainChannels = "mono";
+  if (format === "uhdr") {
+    state.gainResolution = 1;
+    state.gainChannels = "rgb";
+  } else if (format === "jxl" || format === "avif") {
+    state.gainResolution = 1;
+  }
   document.querySelectorAll("[data-format]").forEach((button) => {
     button.classList.toggle("active", button.dataset.format === format);
   });

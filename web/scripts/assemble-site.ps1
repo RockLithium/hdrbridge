@@ -26,4 +26,8 @@ Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $webRoot) "THIRD_PARTY_NOT
   (Join-Path $webRoot "index.html") $wasm `
   (Join-Path $distRoot "bundled\index.html") (Join-Path $webRoot "public\codecs\hdrbridge\threaded\hdrbridge-core.wasm")
 if ($LASTEXITCODE -ne 0) { throw "Bundled Web generation failed" }
+$repoRoot = Split-Path -Parent $webRoot
+& node (Join-Path $PSScriptRoot "stamp-version.mjs") `
+  (Join-Path $repoRoot "VERSION") (Join-Path $distRoot "index.html") (Join-Path $distRoot "bundled\index.html")
+if ($LASTEXITCODE -ne 0) { throw "Web version stamping failed" }
 New-Item -ItemType File -Force -Path (Join-Path $distRoot ".nojekyll") | Out-Null

@@ -36,15 +36,15 @@ The Inspector reports the encoded source representation, metadata, gain-map comp
 
 Download the Windows x64 installer or portable ZIP from [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases). The installer supports in-place upgrades. Both builds are unsigned; Windows may show a SmartScreen or unknown-publisher warning.
 
-The desktop checks for updates in the background; click the version beside the title to check manually. Updates are downloaded and verified before opening the installer, with confirmation before download and installation. Updates never interrupt active conversions: if a conversion queue is running, installation waits until you click the version label after the queue finishes. Updating from a portable copy runs the standard installer rather than replacing the portable folder in place.
+Click **HDR Bridge** in the header to switch the interface between English and Simplified Chinese. The desktop checks for updates in the background; click the version beside the title to check manually. Updates are downloaded and verified before opening the installer, with confirmation before download and installation. Updates never interrupt active conversions: if a conversion queue is running, installation waits until you click the version label after the queue finishes. Updating from a portable copy runs the standard installer rather than replacing the portable folder in place.
 
 ## Web application
 
-The browser version lives in [`web/`](web/) and is built independently from the desktop application. It runs the portable HDR core in a Web Worker and supports the same principal direct-HDR and gain-map input families. Browser outputs are Ultra HDR JPEG, HDR PNG, direct HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and HDR AVIF. JPEG XL and AVIF support direct PQ/HLG and ISO gain-map output. Files remain on the device.
+The browser version lives in [`web/`](web/) and is built independently from the desktop application. It runs the portable HDR core in a Web Worker, includes links to the Windows and Android releases, and supports the same principal direct-HDR and gain-map input families. Browser outputs are Ultra HDR JPEG, HDR PNG, direct HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and HDR AVIF. JPEG XL and AVIF support direct PQ/HLG and ISO gain-map output. Files remain on the device.
 
 ## Android application
 
-The native [Android application](android/README.md) brings the shared C++ core (including Photo Frame) to ARM64 devices running Android 8.0 or later, with a file library, per-task output settings and a sequential conversion queue. Signed release APKs are published on [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases); tap the version beside the title to check for verified Android updates. Native HDR preview uses the shared decoder and requires Android 14 or later, an HDR display and a compatible graphics surface. See the Android guide for usage and platform limitations.
+The native [Android application](android/README.md) brings the shared C++ core to ARM64 devices running Android 8.0 or later, with an English/Simplified Chinese interface, a file library, per-task output settings and a sequential conversion queue. Signed release APKs are published on [GitHub Releases](https://github.com/RockLithium/hdrbridge/releases); tap the version beside the title to check for verified Android updates. Native HDR preview uses the shared decoder and requires Android 14 or later, an HDR display and a compatible graphics surface. See the Android guide for usage and platform limitations.
 
 ## Build on Windows
 

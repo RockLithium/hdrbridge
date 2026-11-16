@@ -20,17 +20,23 @@ body {
 }
 
 #homeButton {
+  box-sizing: border-box;
+  height: 40px;
+  display: flex;
+  align-items: center;
   position: absolute;
   top: 20px;
   left: 20px;
   z-index: 100;
-  padding: 10px 16px;
+  padding: 0 16px;
   color: rgba(255, 255, 255, 0.85);
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 30px;
   box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
   font-size: 0.9em;
+  line-height: 20px;
+  white-space: nowrap;
   text-decoration: none;
   backdrop-filter: blur(20px) saturate(120%);
   -webkit-backdrop-filter: blur(20px) saturate(120%);
@@ -45,10 +51,79 @@ body {
   top: 20px;
   right: 20px;
   z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
+.app-download { position: relative; }
+.app-download-toggle {
+  box-sizing: border-box;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 14px;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 30px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.9em;
+  line-height: 20px;
+  white-space: nowrap;
+  letter-spacing: inherit;
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+  transition: background-color 0.2s, border-color 0.2s;
+}
+.app-download-toggle > svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.app-download-toggle > .menu-chevron { width: 12px; height: 12px; }
+.app-download-toggle:hover, .app-download-toggle[aria-expanded="true"] { background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 126, 0, 0.6); }
+.app-download-toggle:focus-visible, .app-download-menu a:focus-visible { outline: 2px solid #ff7e00; outline-offset: 3px; }
+.app-download-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  box-sizing: border-box;
+  width: 250px;
+  padding: 7px;
+  background: rgba(30, 30, 30, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  text-align: left;
+}
+.app-download-menu::before { content: ""; position: absolute; top: -10px; left: 0; right: 0; height: 10px; }
+.platform-download {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 13px 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: #e0e0e0;
+  text-decoration: none;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+.platform-download:hover { background: rgba(255, 126, 0, 0.06); border-color: rgba(255, 126, 0, 0.6); }
+.platform-logo { flex: 0 0 26px; width: 26px; height: 26px; fill: currentColor; }
+.windows-logo { color: #b9b9b9; }
+.android-logo { color: #a7bc9f; }
+.platform-download span { flex: 1; }
+.platform-download strong { display: block; font-weight: 400; font-size: 18px; line-height: 1.3; }
+.platform-download small { display: block; margin-top: 3px; color: #888; font-size: 13px; line-height: 1.3; }
+.platform-arrow { width: 14px; height: 14px; fill: none; stroke: #888; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.release-link { display: block; margin-top: 5px; padding: 10px 14px 7px; border-top: 1px solid rgba(255, 255, 255, 0.07); color: #888; font-size: 13px; text-decoration: none; }
+.release-link:hover { color: #ff9d42; }
+
 .lang-select {
-  padding: 10px 16px;
+  box-sizing: border-box;
+  height: 40px;
+  padding: 0 16px;
   color: rgba(255, 255, 255, 0.85);
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -57,6 +132,7 @@ body {
   cursor: pointer;
   font-family: "Ubuntu Condensed", "PingFang SC", sans-serif;
   font-size: 0.9em;
+  line-height: 20px;
   backdrop-filter: blur(20px) saturate(120%);
   -webkit-backdrop-filter: blur(20px) saturate(120%);
   transition: all 0.3s ease;
@@ -87,6 +163,21 @@ h1 {
   background: linear-gradient(45deg, #a52a2a 0%, #ff7e00 50%, #daa520 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
+}
+
+.app-title-text { position: relative; white-space: nowrap; }
+
+.app-version {
+  position: absolute;
+  left: calc(100% + 8px);
+  bottom: 3px;
+  color: #888;
+  -webkit-text-fill-color: #888;
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0.3px;
+  line-height: 1.3;
+  white-space: nowrap;
 }
 
 .subtitle {

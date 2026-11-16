@@ -17,6 +17,26 @@
 <body>
   <a href="../tools" id="homeButton" data-i18n="goBack">← Go Back</a>
   <div id="langSelectorContainer">
+    <div class="app-download" id="app-download">
+      <button class="app-download-toggle" id="app-download-toggle" type="button" aria-expanded="false" aria-controls="app-download-menu">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4" /></svg>
+        <span data-i18n="getApp">Get the app</span>
+        <svg class="menu-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+      </button>
+      <div class="app-download-menu" id="app-download-menu" aria-labelledby="app-download-toggle" hidden>
+        <a class="platform-download" data-platform="windows" href="https://github.com/RockLithium/hdrbridge/releases/download/v1.4.1/HDRBridge-v1.4.1-Windows-x64-Setup.exe">
+          <svg class="platform-logo windows-logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 4.5 10.5 3v8H2zm10-1.8L22 1v10H12zM2 13h8.5v8L2 19.5zm10 0h10v10l-10-1.7z" /></svg>
+          <span><strong>Windows</strong><small data-i18n="windowsApp">Windows x64</small></span>
+          <svg class="platform-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 12 12 4M5 4h7v7" /></svg>
+        </a>
+        <a class="platform-download" data-platform="android" href="https://github.com/RockLithium/hdrbridge/releases/download/v1.4.1/HDRBridge-v1.4.1-Android-arm64.apk">
+          <svg class="platform-logo android-logo" viewBox="0 0 24 24" aria-hidden="true"><path d="m7.2 5.6-1.4-2.4a.6.6 0 0 1 1-.6l1.5 2.5a10 10 0 0 1 7.4 0l1.5-2.5a.6.6 0 0 1 1 .6l-1.4 2.4A9.7 9.7 0 0 1 22 14H2a9.7 9.7 0 0 1 5.2-8.4ZM7.5 9a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm9 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z" /></svg>
+          <span><strong>Android</strong><small data-i18n="androidApp">Android ARM64</small></span>
+          <svg class="platform-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 12 12 4M5 4h7v7" /></svg>
+        </a>
+        <a class="release-link" href="https://github.com/RockLithium/hdrbridge/releases/latest" target="_blank" rel="noopener noreferrer" data-i18n="latestRelease">Latest release on GitHub ↗</a>
+      </div>
+    </div>
     <select class="lang-select" id="language-select" aria-label="Language">
       <option value="en-US">English</option>
       <option value="zh-Hans">简体中文</option>
@@ -25,7 +45,7 @@
     </select>
   </div>
   <main class="container">
-    <h1>HDR Bridge Web</h1>
+    <h1><span class="app-title-text">HDR Bridge Web<span class="app-version" data-app-version>1.4.1</span></span></h1>
     <div class="subtitle" data-i18n="subtitle">Convert HDR still images locally in your browser.</div>
 
     <section class="group" aria-labelledby="source-title">
@@ -79,16 +99,16 @@
         <span class="parameter-label" data-i18n="gainResolution">Gain Map Resolution</span>
         <div class="inline-options" data-setting="gainResolution">
           <button class="mini-option" type="button" data-value="4">1/4</button>
-          <button class="mini-option active" type="button" data-value="2">1/2</button>
-          <button class="mini-option" type="button" data-value="1">Full</button>
+          <button class="mini-option" type="button" data-value="2">1/2</button>
+          <button class="mini-option active" type="button" data-value="1">Full</button>
         </div>
       </div>
 
       <div class="parameter" id="gain-channels-row" hidden>
         <span class="parameter-label" data-i18n="gainChannels">Gain Map Channels</span>
         <div class="inline-options" data-setting="gainChannels">
-          <button class="mini-option active" type="button" data-value="mono" data-i18n="mono">Mono</button>
-          <button class="mini-option" type="button" data-value="rgb">RGB</button>
+          <button class="mini-option" type="button" data-value="mono" data-i18n="mono">Mono</button>
+          <button class="mini-option active" type="button" data-value="rgb">RGB</button>
         </div>
       </div>
 

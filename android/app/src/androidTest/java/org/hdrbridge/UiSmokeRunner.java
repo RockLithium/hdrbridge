@@ -77,6 +77,7 @@ final class UiSmokeRunner {
     snapshotModelAndPrefs();
     try {
       launchMainActivity();
+      languageDraftCheck();
       formatQualityChecks();
       String folderPref = context.getSharedPreferences("android_options_v2", 0).getString("folder", "");
       require("Persisted output folder available", !folderPref.isEmpty());
@@ -201,6 +202,7 @@ final class UiSmokeRunner {
 
   private void filesPageChecks(AppModel.Source hdr) throws Exception {
     require("FILES tab visible", tagVisible("files_tab"));
+    require("Reset settings button is present on FILES", tagVisible("reset_settings"));
     require("OUTPUT folder control visible", tagVisible("output_format"));
     require("FILES add control visible", tagVisible("add_files"));
     require("FILES queue control visible", tagVisible("add_to_queue"));
@@ -272,6 +274,7 @@ final class UiSmokeRunner {
   private void resetSettingsCheck() throws Exception {
     final android.content.SharedPreferences prefs = context.getSharedPreferences("android_options_v2", 0);
     final String folderBefore = prefs.getString("folder", "");
+    final String languageBefore = UiStrings.language(context);
     final ArrayList<AppModel.Task> tasksBefore = new ArrayList<>(smokeTasks);
     final ArrayList<String> taskOptionsBefore = new ArrayList<>();
     final ArrayList<AppModel.Source> sourcesBefore;
@@ -281,7 +284,7 @@ final class UiSmokeRunner {
       modelTasksBefore = new ArrayList<>(model.tasks);
       for (AppModel.Task task : smokeTasks) taskOptionsBefore.add(task.options.save().toString());
     }
-    require("Reset settings button is present", tagVisible("reset_settings"));
+    require("Reset settings button is hidden on TASKS", !tagVisible("reset_settings") && !tagged("reset_settings").isEnabled());
     Options custom0 = Options.defaults(0);
     custom0.quality = 61; custom0.gamut = "rec709"; custom0.scale = 4; custom0.channels = 1;
     custom0.peak = 3; custom0.exif = false; custom0.xmp = false;
@@ -302,6 +305,7 @@ final class UiSmokeRunner {
       require("Reset restores format " + format + " defaults", Options.load(prefs, format).save().toString().equals(Options.defaults(format).save().toString()));
     require("Reset preserves output folder", folderBefore.equals(prefs.getString("folder", ""))
         && (folderBefore.isEmpty() || folderBefore.equals(activity.folder.toString())));
+    require("Reset preserves explicit language choice", languageBefore.equals(UiStrings.language(context)));
     require("Reset leaves Files/Tasks and task options unchanged", activity.tasksSelected
         && sameReferences(sourcesBefore, model.sources) && sameReferences(modelTasksBefore, model.tasks)
         && sameReferences(tasksBefore, smokeTasks));
@@ -349,7 +353,7 @@ final class UiSmokeRunner {
       TextView content = activity.details;
       if (content == null || !content.isAttachedToWindow()) return;
       View dialogRoot = content.getRootView();
-      View title = findText(dialogRoot, "SOURCE INSPECTOR");
+      View title = findText(dialogRoot, UiStrings.get(context, "SOURCE INSPECTOR"));
       dialogDetailsVisible[0] = title != null && content.getText().toString().contains(hdr.name);
     });
     require("Inspector dialog exposes source details", dialogDetailsVisible[0]);
@@ -431,6 +435,7 @@ final class UiSmokeRunner {
     require("One progress indicator per task", countProgress(activity.taskList) == smokeTasks.size());
     measureTasksLayout();
     saveScreenshot("ui-smoke-tasks-ready.png");
+    languageRoundTripPreservesState("ready queue");
     clickTag("start_all");
   }
 
@@ -481,6 +486,7 @@ final class UiSmokeRunner {
     try {
       clickTag("start_all");
       require("Queue enters running state before task execution", model.running);
+      languageRoundTripPreservesState("running queue");
       clickTag("remove_all"); waitUi(150);
       require("Remove all is blocked during active queue", model.tasks.contains(probe));
       clickTag("start_all");
@@ -495,6 +501,97 @@ final class UiSmokeRunner {
     synchronized (model) { model.tasks.remove(probe); }
     checks.put(new JSONObject().put("stopRemoveGuard", "passed"));
     instrumentation.runOnMainSync(activity::refresh);
+  }
+
+  private void languageDraftCheck() throws Exception {
+    final boolean[] retained = new boolean[1];
+    instrumentation.runOnMainSync(() -> {
+      android.widget.EditText suffix = (android.widget.EditText) findTag(activity.getWindow().getDecorView(), "output_suffix");
+      View format = findTag(activity.getWindow().getDecorView(), "output_format");
+      Options options = activity.current;
+      String original = suffix.getText().toString();
+      try {
+        String draft = "_双语?unfinished";
+        suffix.setText(draft); suffix.setSelection(3);
+        String language = UiStrings.language(context);
+        String targetLanguage = "zh-CN".equals(language) ? "en" : "zh-CN";
+        View title = findTag(activity.getWindow().getDecorView(), "language_toggle");
+        title.performClick();
+        android.widget.PopupMenu menu = activity.languageMenu;
+        boolean menuCorrect = menu != null && menu.getMenu().size() == 2
+            && "English".contentEquals(menu.getMenu().getItem(0).getTitle())
+            && "简体中文".contentEquals(menu.getMenu().getItem(1).getTitle())
+            && menu.getMenu().getItem("zh-CN".equals(language) ? 1 : 0).isChecked();
+        int targetItem = "zh-CN".equals(targetLanguage) ? 2 : 1;
+        if (menu != null) menu.getMenu().performIdentifierAction(targetItem, 0);
+        retained[0] = menuCorrect && activity.current == options && draft.equals(activity.current.suffix)
+            && suffix == findTag(activity.getWindow().getDecorView(), "output_suffix")
+            && format == findTag(activity.getWindow().getDecorView(), "output_format")
+            && draft.contentEquals(suffix.getText()) && suffix.getSelectionStart() == 3
+            && targetLanguage.equals(UiStrings.language(context)) && "HDR Bridge".contentEquals(((TextView) title).getText());
+        title.performClick();
+        android.widget.PopupMenu currentMenu = activity.languageMenu;
+        if (currentMenu != null) currentMenu.getMenu().performIdentifierAction(targetItem, 0);
+        retained[0] &= targetLanguage.equals(UiStrings.language(context)) && draft.contentEquals(suffix.getText());
+        title.performClick();
+        android.widget.PopupMenu cancelMenu = activity.languageMenu;
+        if (cancelMenu != null) cancelMenu.dismiss();
+        retained[0] &= targetLanguage.equals(UiStrings.language(context));
+        activity.setLanguage(language);
+      } finally { suffix.setText(original); }
+    });
+    require("Language toggle preserves unfinished editable draft and original controls", retained[0]);
+  }
+
+  private void languageRoundTripPreservesState(String phase) throws Exception {
+    final boolean[] retained = new boolean[1];
+    instrumentation.runOnMainSync(() -> {
+      try {
+        String language = UiStrings.language(context);
+        Options current = activity.current;
+        String options = current.save().toString();
+        boolean page = activity.tasksSelected, running = model.running, cancelled = model.cancelled;
+        ArrayList<AppModel.Task> tasks = new ArrayList<>(model.tasks);
+        ArrayList<AppModel.Source> sources = new ArrayList<>(model.sources);
+        ArrayList<Object> sourceObjects = new ArrayList<>();
+        for (AppModel.Source source : sources) { sourceObjects.add(source.file); sourceObjects.add(source.info); }
+        String state = languageState();
+        View format = findTag(activity.getWindow().getDecorView(), "output_format");
+        View suffix = findTag(activity.getWindow().getDecorView(), "output_suffix");
+        View title = findTag(activity.getWindow().getDecorView(), "language_toggle");
+        title.performClick();
+        android.widget.PopupMenu menu = activity.languageMenu;
+        if (menu != null) menu.getMenu().performIdentifierAction("zh-CN".equals(language) ? 1 : 2, 0);
+        boolean translated = !language.equals(UiStrings.language(context))
+            && UiStrings.get(context, "Reset settings").contentEquals(
+                ((TextView) findTag(activity.getWindow().getDecorView(), "reset_settings")).getText());
+        title.performClick();
+        menu = activity.languageMenu;
+        if (menu != null) menu.getMenu().performIdentifierAction("zh-CN".equals(language) ? 1 : 2, 0);
+        retained[0] = translated && language.equals(UiStrings.language(context)) && current == activity.current
+            && options.equals(current.save().toString()) && page == activity.tasksSelected
+            && running == model.running && cancelled == model.cancelled && state.equals(languageState())
+            && sameReferences(tasks, model.tasks) && sameReferences(sources, model.sources)
+            && format == findTag(activity.getWindow().getDecorView(), "output_format")
+            && suffix == findTag(activity.getWindow().getDecorView(), "output_suffix") && !activity.isFinishing();
+        for (int i = 0; i < sources.size(); i++)
+          retained[0] &= sources.get(i).file == sourceObjects.get(i * 2) && sources.get(i).info == sourceObjects.get(i * 2 + 1);
+      } catch (Exception error) { retained[0] = false; }
+    });
+    require("Language toggle preserves options, source caches, task order and progress: " + phase, retained[0]);
+  }
+
+  private String languageState() throws Exception {
+    StringBuilder state = new StringBuilder();
+    synchronized (model) {
+      for (AppModel.Source source : model.sources)
+        state.append(source.selected).append('|').append(source.inspecting).append('|').append(source.error).append('\n');
+      for (AppModel.Task task : model.tasks)
+        state.append(task.status).append('|').append(task.progress).append('|').append(task.detail).append('|')
+            .append(task.options.save()).append('|').append(task.filename).append('|').append(task.folder).append('|')
+            .append(task.output).append('|').append(task.hash).append('\n');
+    }
+    return state.toString();
   }
 
   private void cleanup() {

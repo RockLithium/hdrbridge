@@ -46,17 +46,4 @@ Chrome JPEG XL results require the experimental `enable-jxl-image-format` flag.
 | **scRGB**                    |                                |                  |                                                 |                                                                        |                    |                                                      |                            |                           |              |                         |            |
 | FP16 scRGB JPEG XR           | AUTO HDR                       | REJECT           | CONFIG HDR — Microsoft JPEG XR plug-in required | CONFIG HDR — Microsoft JPEG XR plug-in plus Photoshop/Camera Raw route | REJECT             | REJECT                                               | REJECT                     | REJECT                    | REJECT       | REJECT                  | INPUT OK   |
 
-## Product conclusions based on these tests
-
-The desktop output order remains purpose-based:
-
-1. Share / Web — Ultra HDR JPEG
-2. Interchange — HDR PNG
-3. Interchange — HDR TIFF
-4. Master — JPEG XL
-5. Windows — FP16 scRGB JPEG XR
-6. Compact — AVIF
-
-Rec.2020 is the Video/NLE default. Display P3 is a normal color-space option for both PQ and HLG where implemented. FP16 scRGB JXR remains linear scRGB and Ultra HDR remains SDR base plus gain map; neither uses the PQ/HLG selector.
-
 No listed format is universal. Ultra HDR is the strongest share/web route; HDR PNG is the strongest broadly tested direct-HDR interchange route; TIFF is a strong professional edit/interchange format when encoded with compatible HDR signaling; JXL is a modern edit/master format with direct-HDR and gain-map representations; FP16 scRGB JXR remains particularly useful in Windows/Adobe workflows; AVIF provides compact HDR delivery.

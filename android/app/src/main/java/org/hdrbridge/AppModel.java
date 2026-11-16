@@ -300,6 +300,9 @@ final class AppModel {
     for (Source s : sources) s.selected = true;
     removeSelectedSources();
   }
+  synchronized void removeSource(Source s) {
+    if (sources.remove(s)) release(s);
+  }
   synchronized void removeSelectedSources() {
     Iterator<Source> it = sources.iterator();
     ArrayList<Source> removed = new ArrayList<>();

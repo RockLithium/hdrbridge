@@ -7,24 +7,35 @@ public class ConversionService extends Service {
   @Override
   public void onCreate() {
     super.onCreate();
-    NotificationManager n = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+    startForeground(1, notification(this));
+  }
+  private static Notification notification(Context context) {
+    NotificationManager n = (NotificationManager) context.getSystemService(NOTIFICATION_SERVICE);
     n.createNotificationChannel(
-        new NotificationChannel(CHANNEL, "Conversions", NotificationManager.IMPORTANCE_LOW));
-    Intent stop = new Intent(this, ConversionService.class).setAction("stop");
+        new NotificationChannel(CHANNEL, UiStrings.get(context, "Conversions"), NotificationManager.IMPORTANCE_LOW));
+    Intent stop = new Intent(context, ConversionService.class).setAction("stop");
     PendingIntent pi = PendingIntent.getService(
-        this, 0, stop, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-    PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class),
+        context, 0, stop, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    PendingIntent open = PendingIntent.getActivity(context, 0, new Intent(context, MainActivity.class),
         PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-    Notification notification =
-        new Notification.Builder(this, CHANNEL)
+    return new Notification.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("HDR Bridge conversion running")
+            .setContentTitle(UiStrings.get(context, "HDR Bridge conversion running"))
             .setContentIntent(open)
-            .setContentText("Tap Stop to cancel the current conversion")
+            .setContentText(UiStrings.get(context, "Tap Stop to cancel the current conversion"))
             .setOngoing(true)
-            .addAction(new Notification.Action.Builder(null, "Stop", pi).build())
+            .addAction(new Notification.Action.Builder(null, UiStrings.get(context, "Stop"), pi).build())
             .build();
-    startForeground(1, notification);
+  }
+  /** Refresh only an existing notification; never starts or restarts conversion work. */
+  static void refreshNotification(Context context) {
+    NotificationManager n = (NotificationManager) context.getSystemService(NOTIFICATION_SERVICE);
+    for (android.service.notification.StatusBarNotification active : n.getActiveNotifications()) {
+      if (active.getId() == 1 && CHANNEL.equals(active.getNotification().getChannelId())) {
+        n.notify(1, notification(context));
+        break;
+      }
+    }
   }
   @Override
   public int onStartCommand(Intent i, int flags, int id) {

@@ -54,7 +54,7 @@ Android option/workspace tests and lint:
 .\android\gradlew.bat -p android :app:testDebugUnitTest :app:lintPreview
 ```
 
-Web worker tests:
+Web request-cancellation and version-stamping tests:
 
 ```powershell
 node --test web/tests/*.test.mjs
@@ -62,7 +62,7 @@ node --test web/tests/*.test.mjs
 
 ## Versions and dependencies
 
-The root `VERSION` supplies the CMake project versions, desktop label and file resources, Android package version and output Software tags. Library versions are pinned through the vcpkg baseline, manifests, overlays and the Ultra HDR source revision.
+The root `VERSION` supplies the CMake project versions, desktop label and file resources, Android package version, assembled Web page version and release links, and output Software tags. Library versions are pinned through the vcpkg baseline, manifests, overlays and the Ultra HDR source revision.
 
 `cmake/PatchUltraHdr.cmake` configures the Ultra HDR dimension limit of 65,500 pixels per axis and checked buffer-size arithmetic. Available memory can impose a lower practical limit.
 

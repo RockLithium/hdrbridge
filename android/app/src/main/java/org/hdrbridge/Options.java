@@ -16,13 +16,13 @@ final class Options {
   static Options defaults(int f) {
     Options o = new Options();
     o.format = f;
-    o.quality = new int[] {95, 4, 6, 100, 100, 90, 95, 95}[f];
+    o.quality = new int[] {95, 4, 6, 90, 100, 95, 95, 95}[f];
     o.lossless = f == 1 || f == 2 || f == 3 || f == 4;
     o.compressed = true;
     o.exif = o.xmp = f != 7;
     o.useSuffix = true;
-    o.scale = f == 7 ? 1 : 2;
-    o.channels = f == 7 ? 1 : 0;
+    o.scale = 1;
+    o.channels = (f == 0 || f == 7) ? 1 : 0;
     o.gamut = (f == 0 || f == 7) ? "p3" : "rec2020";
     o.suffix = defaultSuffix(f, 0);
     return o;
