@@ -5,6 +5,6 @@
   "dependencies": [
     { "name": "libheif", "default-features": false, "features": ["aom"] },
     { "name": "libavif", "default-features": false, "features": ["aom"] },
-    "libpng", "tiff", "lcms", "libjxl", "libjpeg-turbo", "nlohmann-json", "jxrlib"
+    "libpng", "expat", "tiff", "lcms", "libjxl", "libjpeg-turbo", "nlohmann-json", "jxrlib"
   ]
 }

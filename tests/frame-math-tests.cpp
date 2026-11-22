@@ -93,4 +93,23 @@ static void exifTest(bool le) {
  auto empty=frame_exif::captions(nlohmann::json::object());require(empty.first.empty() && empty.second.empty(),"empty caption has no units");
  auto partial=frame_exif::captions(nlohmann::json{{"ISO","100"}});require(partial.second=="ISO100","missing fields have no stray units");
 }
-int main() { try { mathTests();exifTest(true);exifTest(false);std::cout<<"frame math and EXIF tests passed\n";return 0; } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;} }
+
+static void tiffMetadataTest() {
+ Tiff t(true);
+ const auto root = t.dir(4);
+ const auto exif = t.dir(1);
+ t.entry(root, 0, 0x010f, 2, 6, t.text("Canon"));
+ t.entry(root, 1, 0x8769, 4, 1, uint32_t(exif));
+ t.entry(root, 2, 0x0111, 4, 2, 0xfffffff0);
+ t.entry(root, 3, 0x83bb, 4, 40, 0xfffffff0);
+ t.entry(exif, 0, 0x829a, 5, 1, t.rationals({1, 160}));
+ const auto result = frame_exif::detail::repack([&](size_t offset, size_t count) {
+   require(offset <= t.b.size() && count <= t.b.size() - offset, "TIFF metadata accessed a raster/private payload");
+   return std::vector<uint8_t>(t.b.begin() + offset, t.b.begin() + offset + count);
+ }, 640, 480, true);
+ const auto fields = frame_exif::parse(result);
+ require(fields.value("Make", "") == "Canon" && fields.value("ExposureTime", "") == "1/160",
+         "TIFF camera fields preserved");
+}
+
+int main() { try { mathTests();exifTest(true);exifTest(false);tiffMetadataTest();std::cout<<"frame math and EXIF tests passed\n";return 0; } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;} }

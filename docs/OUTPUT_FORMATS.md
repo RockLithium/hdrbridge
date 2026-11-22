@@ -34,7 +34,7 @@ Exports the embedded gain-map image without reconstructing the HDR master. Origi
 
 Adds a blurred border, camera logo and caption to an HDR image and exports Ultra HDR JPEG. Defaults are Display P3, a full-resolution RGB gain map and JPEG quality 95. Gamut (Rec.709 or Display P3), peak, gain-map resolution, channels and quality are configurable.
 
-The caption uses source EXIF. A matching camera logo replaces the manufacturer name, and repeated brand prefixes are removed from the model; otherwise only the model is shown. Missing fields and their units are omitted. Source EXIF/XMP are not copied. Lossless, EXIF and XMP controls are fixed off; the encoder generates the new HDR gain-map metadata.
+The caption uses source EXIF and fills missing camera fields from XMP. A matching camera logo replaces the manufacturer name, and repeated brand prefixes are removed from the model; otherwise only the model is shown. Missing fields and their units are omitted. Source EXIF/XMP are not copied. Lossless, EXIF and XMP controls are fixed off; the encoder generates new HDR gain-map metadata.
 
 ## Naming and output safety
 

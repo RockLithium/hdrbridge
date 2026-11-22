@@ -18,6 +18,7 @@ find_package(libheif CONFIG REQUIRED)
 find_package(libavif CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(PNG REQUIRED)
+find_package(expat CONFIG REQUIRED)
 find_package(JPEG REQUIRED)
 find_package(TIFF REQUIRED)
 find_package(LibLZMA REQUIRED)
@@ -72,7 +73,7 @@ target_link_options(hdrbridge_jni PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,--no
 target_link_libraries(hdrbridge_jni PRIVATE heif avif "${JXL_LIBRARY}" "${JXL_CMS_LIBRARY}"
   "${JXL_THREADS_LIBRARY}" "${HIGHWAY_LIBRARY}" "${BROTLI_enc}" "${BROTLI_dec}" "${BROTLI_common}"
   ${JXR_LIBRARIES} uhdr nlohmann_json::nlohmann_json PNG::PNG JPEG::JPEG TIFF::TIFF
-  LibLZMA::LibLZMA lcms2::lcms2 log android EGL GLESv3 dl)
+  expat::expat LibLZMA::LibLZMA lcms2::lcms2 log android EGL GLESv3 dl)
 
 option(HDRBRIDGE_ANDROID_CODEC_TESTS "Include device-only codec equivalence checks" OFF)
 if(HDRBRIDGE_ANDROID_CODEC_TESTS)

@@ -45,7 +45,7 @@ foreach ($document in "COMPATIBILITY_MATRIX.md", "METADATA.md", "CONVERSION_FIDE
     Copy-Item -LiteralPath (Join-Path $repo "docs\$document") -Destination (Join-Path $Destination "docs\$document")
 }
 
-foreach ($package in "libheif", "libavif", "libyuv", "libde265", "libjxl", "libjpeg-turbo", "brotli", "highway", "lcms", "libpng", "tiff", "zlib", "liblzma", "aom", "nlohmann-json") {
+foreach ($package in "libheif", "libavif", "libyuv", "libde265", "libjxl", "libjpeg-turbo", "brotli", "highway", "lcms", "libpng", "expat", "tiff", "zlib", "liblzma", "aom", "nlohmann-json") {
     $copyright = Join-Path $repo "vcpkg_installed\x64-windows\share\$package\copyright"
     if (Test-Path -LiteralPath $copyright) {
         Copy-Item -LiteralPath $copyright -Destination (Join-Path $Destination "licenses\$package.txt")
@@ -55,9 +55,10 @@ $jsonFallback = Join-Path $repo "third_party\licenses\nlohmann-json.txt"
 if (-not (Test-Path -LiteralPath (Join-Path $Destination "licenses\nlohmann-json.txt"))) {
     Copy-Item -LiteralPath $jsonFallback -Destination (Join-Path $Destination "licenses\nlohmann-json.txt")
 }
+$buildRoot = Split-Path -Parent (Split-Path -Parent (Resolve-Path -LiteralPath $BuildDirectory).Path)
 $uhdrRoot = @(
     (Join-Path $repo ".tools\libultrahdr"),
-    (Join-Path $repo "build-vs\_deps\libultrahdr-src")
+    (Join-Path $buildRoot "_deps\libultrahdr-src")
 ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if ($uhdrRoot) {
     Get-ChildItem -LiteralPath $uhdrRoot -Filter "LICENSE*" | ForEach-Object {

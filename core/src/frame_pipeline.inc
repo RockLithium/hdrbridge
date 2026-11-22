@@ -266,7 +266,7 @@ ConversionResult convert_photo_frame(const std::filesystem::path& input,const st
   TimingDiagnostics timings;DecodedImage source=*decode_input(input,progress,cancel,timings);
   if(std::filesystem::file_size(input)!=initial_size || std::filesystem::last_write_time(input)!=initial_time || (initial_revision.valid && source_revision(std::filesystem::absolute(input))!=initial_revision)) throw std::runtime_error("source changed during frame decode");
   auto font=read_file(std::filesystem::u8path(options.frame_font_path));
-  const auto fields=frame_exif::parse(source.exif);
+  const auto fields=frame_exif::caption_fields(source.exif,source.xmp);
   auto captions=frame_exif::captions(fields);
   const auto key=frame_exif::camera_logo_key(fields.value("Make",std::string{}));
   auto logo_folder=options.frame_logo_path.empty() ? std::filesystem::u8path(options.frame_font_path).parent_path().parent_path()/"frame-logos" : std::filesystem::u8path(options.frame_logo_path);

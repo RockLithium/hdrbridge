@@ -1,8 +1,11 @@
 #include "gainmap_adapters.h"
 #include "hdrbridge_threads.h"
 
+#include "icc_rgb_primaries.h"
 #include "jpeg_probe.h"
+#include "jxl_metadata_boxes.h"
 #include "orientation.h"
+#include "tiff_input_exif.h"
 
 #include <avif/avif.h>
 #include <libheif/heif.h>
@@ -282,10 +285,22 @@ SourceInfo source_info(const std::filesystem::path& path,
   info.base_width = image->width;
   info.base_height = image->height;
   info.base_bit_depth = image->depth;
-  info.base_channels = 3;
+  info.base_channels = image->yuvFormat == AVIF_PIXEL_FORMAT_YUV400 ? 1u : 3u;
   info.base_codec = "AV1";
-  info.base_color_space = "Display P3";
-  info.base_transfer = "SDR gamma";
+  switch (image->colorPrimaries) {
+    case AVIF_COLOR_PRIMARIES_BT709: info.base_color_space = "BT.709 / sRGB primaries"; break;
+    case AVIF_COLOR_PRIMARIES_BT2020: info.base_color_space = "BT.2020"; break;
+    case AVIF_COLOR_PRIMARIES_SMPTE432: info.base_color_space = "Display P3"; break;
+    default: info.base_color_space = "Unspecified / other primaries"; break;
+  }
+  switch (image->transferCharacteristics) {
+    case AVIF_TRANSFER_CHARACTERISTICS_BT709: info.base_transfer = "BT.709"; break;
+    case AVIF_TRANSFER_CHARACTERISTICS_SRGB: info.base_transfer = "sRGB"; break;
+    case AVIF_TRANSFER_CHARACTERISTICS_LINEAR: info.base_transfer = "Linear"; break;
+    case AVIF_TRANSFER_CHARACTERISTICS_SMPTE2084: info.base_transfer = "PQ / ST 2084"; break;
+    case AVIF_TRANSFER_CHARACTERISTICS_HLG: info.base_transfer = "HLG"; break;
+    default: info.base_transfer = "Unspecified / other transfer"; break;
+  }
   info.gain_map_width = gain->image ? gain->image->width : 0;
   info.gain_map_height = gain->image ? gain->image->height : 0;
   info.gain_map_channels = gain->image &&
@@ -296,16 +311,27 @@ SourceInfo source_info(const std::filesystem::path& path,
       info.base_height / static_cast<double>(info.gain_map_height);
   info.codec = "AV1 base + AV1 gain map + tmap derived item";
   info.profile = "ISO 21496-1 gain-map HDR reconstruction";
-  info.pixel_format = "AV1 " + info.chroma;
-  info.color_signal_kind = "AVIF CICP + ICC / tmap metadata";
   info.bit_depth = image->depth;
-  info.chroma = "base " + std::to_string(image->yuvFormat) +
-                ", gain-map " + std::to_string(gain->image ? gain->image->yuvFormat : 0);
+  info.chroma = avifPixelFormatToString(image->yuvFormat);
+  info.pixel_format = info.chroma;
   info.primaries = static_cast<uint16_t>(image->colorPrimaries);
   info.transfer = static_cast<uint16_t>(image->transferCharacteristics);
   info.matrix = static_cast<uint16_t>(image->matrixCoefficients);
   info.full_range = image->yuvRange == AVIF_RANGE_FULL;
   info.range_known = true;
+  info.native_color_present = image->colorPrimaries != AVIF_COLOR_PRIMARIES_UNSPECIFIED ||
+      image->transferCharacteristics != AVIF_TRANSFER_CHARACTERISTICS_UNSPECIFIED ||
+      image->matrixCoefficients != AVIF_MATRIX_COEFFICIENTS_UNSPECIFIED;
+  info.color_signal_kind = "AVIF base color signal / tmap metadata";
+  if (info.native_color_present) {
+    info.native_color_description = "AVIF nclx / AV1 color signal";
+    info.native_primaries = info.primaries;
+    info.native_transfer = info.transfer;
+    info.native_matrix = info.matrix;
+    info.native_full_range = info.full_range;
+    info.native_range_known = true;
+    info.resolved_signaling_source = "Native";
+  }
   info.exif_present = image->exif.size > 0;
   info.xmp_present = image->xmp.size > 0;
   info.icc_present = image->icc.size > 0;
@@ -553,13 +579,16 @@ IsoGainMapMetadata parse_tiff_gain_map_metadata(const void* data, uint32_t size)
   return metadata;
 }
 
-std::string profile_description(const void* data, uint32_t size) {
-  CmsProfilePtr profile(cmsOpenProfileFromMem(data, size));
-  if (!profile) return {};
+std::string profile_description(cmsHPROFILE profile) {
   std::array<char, 256> description{};
-  cmsGetProfileInfoASCII(profile.get(), cmsInfoDescription, "en", "US",
+  cmsGetProfileInfoASCII(profile, cmsInfoDescription, "en", "US",
                          description.data(), static_cast<cmsUInt32Number>(description.size()));
   return description.data();
+}
+
+std::string profile_description(const void* data, uint32_t size) {
+  const CmsProfilePtr profile(cmsOpenProfileFromMem(data, size));
+  return profile ? profile_description(profile.get()) : std::string{};
 }
 
 uint32_t read_be32_at(const uint8_t* data) {
@@ -617,13 +646,30 @@ std::optional<double> adaptive_tmap_reference_white_nits(
   return found;
 }
 
+std::array<double, 3> rec2020_from_gainmap_base(
+    const std::array<double, 3>& rgb, uint16_t primaries) {
+  if (primaries == 12) {
+    return {0.7538330 * rgb[0] + 0.1985974 * rgb[1] + 0.0475696 * rgb[2],
+            0.0457438 * rgb[0] + 0.9417772 * rgb[1] + 0.0124789 * rgb[2],
+           -0.0012103 * rgb[0] + 0.0176017 * rgb[1] + 0.9836086 * rgb[2]};
+  }
+  if (primaries == 1) {
+    return {0.6274040 * rgb[0] + 0.3292820 * rgb[1] + 0.0433136 * rgb[2],
+            0.0690970 * rgb[0] + 0.9195400 * rgb[1] + 0.0113612 * rgb[2],
+            0.0163916 * rgb[0] + 0.0880132 * rgb[1] + 0.8955950 * rgb[2]};
+  }
+  return rgb;
+}
+
 struct TiffGainMapData {
   SourceInfo info;
   IsoGainMapMetadata metadata;
   std::vector<uint16_t> base;
   std::vector<uint16_t> map;
+  std::vector<uint8_t> exif;
   std::vector<uint8_t> xmp;
-  std::vector<uint8_t> icc;
+  CmsProfilePtr base_profile;
+  std::array<const cmsToneCurve*, 3> base_curves{};
 };
 
 TiffPtr open_tiff_gain_map(const std::filesystem::path& path) {
@@ -665,7 +711,8 @@ TiffGainMapData read_tiff_gain_map(const std::filesystem::path& path,
   TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLEFORMAT, &base_format);
   TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PHOTOMETRIC, &base_photo);
   TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PLANARCONFIG, &base_planar);
-  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_ORIENTATION, &base_orientation);
+  const bool has_orientation = TIFFGetField(tiff.get(), TIFFTAG_ORIENTATION,
+                                             &base_orientation) == 1;
   if (!info.width || !info.height || base_bits != 16 || base_samples != 3 ||
       base_format != SAMPLEFORMAT_UINT || base_photo != PHOTOMETRIC_RGB ||
       base_planar != PLANARCONFIG_CONTIG) {
@@ -676,27 +723,54 @@ TiffGainMapData read_tiff_gain_map(const std::filesystem::path& path,
   info.base_bit_depth = base_bits;
   info.base_channels = base_samples;
   info.base_codec = "TIFF RGB";
-  info.base_transfer = "SDR gamma";
-  info.primaries = 12;
-  info.transfer = 13;
   info.matrix = 0;
   info.full_range = true;
   info.range_known = true;
   info.original_orientation = static_cast<uint8_t>(std::clamp<uint16_t>(base_orientation, 1, 8));
+  info.orientation_status = has_orientation ? "present" : "absent";
   uint32_t icc_size = 0;
   void* icc_data = nullptr;
   if (TIFFGetField(tiff.get(), TIFFTAG_ICCPROFILE, &icc_size, &icc_data) != 1 || !icc_data || !icc_size) {
     throw std::runtime_error("Adobe gain-map TIFF SDR base ICC profile is missing");
   }
-  result.icc.assign(static_cast<uint8_t*>(icc_data), static_cast<uint8_t*>(icc_data) + icc_size);
-  const std::string base_profile = profile_description(icc_data, icc_size);
-  info.base_color_space = base_profile;
-  if (base_profile.find("Display P3") == std::string::npos &&
-      base_profile.find("P3") == std::string::npos) {
-    throw std::runtime_error("Adobe gain-map TIFF base ICC is not validated Display P3");
+  result.base_profile.reset(cmsOpenProfileFromMem(icc_data, icc_size));
+  if (!result.base_profile) throw std::runtime_error("cannot parse Adobe gain-map TIFF base ICC");
+  const auto profile = result.base_profile.get();
+  info.primaries = icc::identify_rgb_primaries(profile);
+  if (!info.primaries) {
+    throw std::runtime_error("unsupported gain-map TIFF base ICC RGB primaries");
   }
-  info.profile = base_profile + " base + ISO 21496-1 gain map";
+  result.base_curves = {
+      static_cast<const cmsToneCurve*>(cmsReadTag(profile, cmsSigRedTRCTag)),
+      static_cast<const cmsToneCurve*>(cmsReadTag(profile, cmsSigGreenTRCTag)),
+      static_cast<const cmsToneCurve*>(cmsReadTag(profile, cmsSigBlueTRCTag))};
+  if (!result.base_curves[0] || !result.base_curves[1] || !result.base_curves[2]) {
+    throw std::runtime_error("Adobe gain-map TIFF base ICC has no RGB transfer curves");
+  }
+  info.transfer = icc::identify_sdr_transfer(result.base_curves);
+  info.base_transfer = info.transfer == 13 ? "sRGB" :
+      info.transfer == 14 ? "BT.2020 SDR" : "ICC RGB transfer curve";
+  info.base_color_space = info.primaries == 1 ? "BT.709 / sRGB primaries" :
+      info.primaries == 12 ? "Display P3" : "BT.2020";
+  info.icc_description = profile_description(profile);
+  const auto version = cmsGetEncodedICCversion(profile);
+  info.icc_version = std::to_string(version >> 24) + "." +
+                     std::to_string((version >> 20) & 0x0f);
+  info.profile = (info.icc_description.empty() ? info.base_color_space : info.icc_description) +
+                 " base + ISO 21496-1 gain map";
+  const auto* cicp = static_cast<const cmsVideoSignalType*>(cmsReadTag(profile, cmsSigcicpTag));
+  if (cicp && (cicp->TransferCharacteristics == 16 || cicp->TransferCharacteristics == 18)) {
+    throw std::runtime_error("HDR base ICC is unsupported for TIFF gain-map reconstruction");
+  }
+  info.icc_cicp_present = cicp != nullptr;
+  info.icc_primaries = cicp ? cicp->ColourPrimaries : info.primaries;
+  info.icc_transfer = cicp ? cicp->TransferCharacteristics : info.transfer;
+  info.icc_matrix = cicp ? cicp->MatrixCoefficients : 0;
+  info.icc_full_range = cicp ? cicp->VideoFullRangeFlag != 0 : true;
+  info.icc_transfer_interpretation = info.base_transfer;
   info.icc_present = true;
+  info.icc_status = "present";
+  info.resolved_signaling_source = "ICC";
   info.color_signal_kind = "TIFF ICC + ISO gain-map metadata";
   info.pixel_format = "RGB16 integer base + RGB16 gain map";
 #ifdef TIFFTAG_XMLPACKET
@@ -706,7 +780,9 @@ TiffGainMapData read_tiff_gain_map(const std::filesystem::path& path,
     result.xmp.assign(static_cast<uint8_t*>(xmp_data), static_cast<uint8_t*>(xmp_data) + xmp_size);
     info.xmp_present = true;
   }
+  info.xmp_status = info.xmp_present ? "present" : "absent";
 #endif
+  result.exif = read_tiff_input_exif(tiff.get(), info);
   uint16_t subifd_count = 0;
   toff_t* subifd_offsets = nullptr;
   if (TIFFGetField(tiff.get(), TIFFTAG_SUBIFD, &subifd_count, &subifd_offsets) != 1 ||
@@ -1047,6 +1123,7 @@ ReconstructedHdr reconstruct_adobe_gainmap_tiff(
   TiffGainMapData tiff = read_tiff_gain_map(path, true, cancel);
   ReconstructedHdr output;
   output.info = tiff.info;
+  output.exif = std::move(tiff.exif);
   output.xmp = std::move(tiff.xmp);
   output.decode_ms = elapsed_ms(decode_start);
 
@@ -1057,16 +1134,6 @@ ReconstructedHdr reconstruct_adobe_gainmap_tiff(
   if (tiff.base.size() != static_cast<size_t>(width) * height * 3u) {
     throw std::runtime_error("Adobe gain-map TIFF base dimensions are inconsistent");
   }
-  CmsProfilePtr profile(cmsOpenProfileFromMem(tiff.icc.data(),
-                                               static_cast<cmsUInt32Number>(tiff.icc.size())));
-  if (!profile) throw std::runtime_error("cannot parse Adobe gain-map TIFF base ICC");
-  auto* red_curve = static_cast<cmsToneCurve*>(cmsReadTag(profile.get(), cmsSigRedTRCTag));
-  auto* green_curve = static_cast<cmsToneCurve*>(cmsReadTag(profile.get(), cmsSigGreenTRCTag));
-  auto* blue_curve = static_cast<cmsToneCurve*>(cmsReadTag(profile.get(), cmsSigBlueTRCTag));
-  if (!red_curve || !green_curve || !blue_curve) {
-    throw std::runtime_error("Adobe gain-map TIFF base ICC has no RGB transfer curves");
-  }
-  const std::array<cmsToneCurve*, 3> curves{red_curve, green_curve, blue_curve};
   const auto reconstruction_start = Clock::now();
   output.rec2020_pq_rgb.resize(tiff.base.size());
   const double base_headroom = tiff.metadata.base_hdr_headroom;
@@ -1084,25 +1151,22 @@ ReconstructedHdr reconstruct_adobe_gainmap_tiff(
     if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
     for (uint32_t x = 0; x < width; ++x) {
       const size_t pixel = static_cast<size_t>(y) * width + x;
-      std::array<double, 3> p3_linear{};
+      std::array<double, 3> base_linear_rgb{};
       for (size_t channel = 0; channel < 3; ++channel) {
         const float encoded_base = tiff.base[pixel * 3u + channel] / 65535.0f;
-        const double base_linear = cmsEvalToneCurveFloat(curves[channel], encoded_base);
+        const double base_linear = cmsEvalToneCurveFloat(tiff.base_curves[channel], encoded_base);
         const double encoded_map = sample_map_bilinear(
             tiff.map, output.info.gain_map_width, output.info.gain_map_height,
             width, height, x, y, channel);
         const double log_gain = tiff.metadata.minimum[channel] +
             (tiff.metadata.maximum[channel] - tiff.metadata.minimum[channel]) *
                 std::pow(encoded_map, 1.0 / tiff.metadata.gamma[channel]);
-        p3_linear[channel] =
+        base_linear_rgb[channel] =
             (base_linear + tiff.metadata.base_offset[channel]) *
                 std::exp2(log_gain * weight) -
             tiff.metadata.alternate_offset[channel];
       }
-      const std::array<double, 3> rec2020{
-          0.7538330 * p3_linear[0] + 0.1985974 * p3_linear[1] + 0.0475696 * p3_linear[2],
-          0.0457438 * p3_linear[0] + 0.9417772 * p3_linear[1] + 0.0124789 * p3_linear[2],
-         -0.0012103 * p3_linear[0] + 0.0176017 * p3_linear[1] + 0.9836086 * p3_linear[2]};
+      const auto rec2020 = rec2020_from_gainmap_base(base_linear_rgb, output.info.primaries);
       const double pixel_max = std::max({rec2020[0], rec2020[1], rec2020[2], 0.0});
       maximum_linear = std::max(maximum_linear, pixel_max);
       sum_max_linear += pixel_max;
@@ -2132,10 +2196,14 @@ struct JxlRaster {
   uint8_t orientation = 1;
   JxlColorEncoding color{};
   bool color_valid = false;
+  bool exif_present = false, xmp_present = false;
+  std::vector<uint8_t> exif;
+  std::vector<uint8_t> xmp;
   std::vector<uint16_t> pixels;
 };
 
-JxlRaster decode_jxl_raster(const uint8_t* bytes, size_t size) {
+JxlRaster decode_jxl_raster(const uint8_t* bytes, size_t size, bool decode_pixels,
+                            bool read_metadata = false) {
   auto decoder = JxlDecoderMake(nullptr);
   auto runner = JxlResizableParallelRunnerMake(nullptr);
   if (!decoder || !runner ||
@@ -2143,13 +2211,17 @@ JxlRaster decode_jxl_raster(const uint8_t* bytes, size_t size) {
     throw std::runtime_error("cannot initialize gain-map JPEG XL decoder");
   }
   JxlResizableParallelRunnerSetThreads(runner.get(), codec_background_workers());
-  if (JxlDecoderSubscribeEvents(decoder.get(), JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING |
-                                               JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS ||
+  const int events = JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING |
+                     (decode_pixels ? JXL_DEC_FULL_IMAGE : 0) |
+                     (read_metadata ? JXL_DEC_BOX : 0);
+  if ((read_metadata && JxlDecoderSetDecompressBoxes(decoder.get(), JXL_TRUE) != JXL_DEC_SUCCESS) ||
+      JxlDecoderSubscribeEvents(decoder.get(), events) != JXL_DEC_SUCCESS ||
       JxlDecoderSetInput(decoder.get(), bytes, size) != JXL_DEC_SUCCESS) {
     throw std::runtime_error("cannot initialize embedded JPEG XL decode");
   }
   JxlDecoderCloseInput(decoder.get());
   JxlRaster output;
+  JxlMetadataBoxes metadata(decoder.get(), output.exif, output.xmp);
   JxlPixelFormat format{};
   for (;;) {
     const auto status = JxlDecoderProcessInput(decoder.get());
@@ -2168,6 +2240,21 @@ JxlRaster decode_jxl_raster(const uint8_t* bytes, size_t size) {
     } else if (status == JXL_DEC_COLOR_ENCODING) {
       output.color_valid = JxlDecoderGetColorAsEncodedProfile(
           decoder.get(), JXL_COLOR_PROFILE_TARGET_ORIGINAL, &output.color) == JXL_DEC_SUCCESS;
+      if (read_metadata && decode_pixels && output.color_valid) {
+        JxlColorEncoding decoded_color{};
+        if (JxlDecoderGetColorAsEncodedProfile(decoder.get(), JXL_COLOR_PROFILE_TARGET_DATA,
+                                               &decoded_color) != JXL_DEC_SUCCESS ||
+            decoded_color.color_space != output.color.color_space ||
+            decoded_color.white_point != output.color.white_point ||
+            decoded_color.primaries != output.color.primaries ||
+            decoded_color.transfer_function != output.color.transfer_function) {
+          throw std::runtime_error("jhgm decoded RGB does not match the structured base color");
+        }
+      }
+    } else if (status == JXL_DEC_BOX) {
+      metadata.start_box();
+    } else if (status == JXL_DEC_BOX_NEED_MORE_OUTPUT) {
+      metadata.continue_box();
     } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
       size_t byte_count = 0;
       if (JxlDecoderImageOutBufferSize(decoder.get(), &format, &byte_count) != JXL_DEC_SUCCESS) {
@@ -2177,13 +2264,78 @@ JxlRaster decode_jxl_raster(const uint8_t* bytes, size_t size) {
       if (JxlDecoderSetImageOutBuffer(decoder.get(), &format, output.pixels.data(), byte_count) != JXL_DEC_SUCCESS) {
         throw std::runtime_error("cannot set embedded JPEG XL raster buffer");
       }
-    } else if (status == JXL_DEC_SUCCESS) break;
+    } else if (status == JXL_DEC_SUCCESS) {
+      metadata.finish_box();
+      break;
+    }
   }
+  output.exif_present = metadata.exif_present;
+  output.xmp_present = metadata.xmp_present;
   return output;
 }
 
-double srgb_to_linear(double value) {
+double jxl_base_to_linear(double value, uint16_t transfer) {
+  if (transfer == JXL_TRANSFER_FUNCTION_709) {
+    return value < 0.081 ? value / 4.5 : std::pow((value + 0.099) / 1.099, 1.0 / 0.45);
+  }
   return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
+}
+
+SourceInfo describe_jxl_gainmap(const std::filesystem::path& path, const IsoGainMapMetadata& metadata,
+                                const JxlRaster& base, const JxlRaster& map) {
+  if (!base.color_valid || base.channels != 3 || base.color.color_space != JXL_COLOR_SPACE_RGB ||
+      base.color.white_point != JXL_WHITE_POINT_D65 ||
+      (base.color.transfer_function != JXL_TRANSFER_FUNCTION_SRGB &&
+       base.color.transfer_function != JXL_TRANSFER_FUNCTION_709) ||
+      (base.color.primaries != JXL_PRIMARIES_P3 &&
+       base.color.primaries != JXL_PRIMARIES_SRGB &&
+       base.color.primaries != JXL_PRIMARIES_2100)) {
+    throw std::runtime_error("unsupported jhgm SDR base color encoding");
+  }
+  SourceInfo info;
+  info.path = path; info.format = "JPEG XL"; info.container_brand = "JXL / jhgm";
+  info.asset_kind = "gain-map-hdr"; info.gain_map_present = true;
+  info.gain_map_family = "iso-jxl-jhgm";
+  info.codec = "JPEG XL SDR base + JPEG XL gain map + jhgm";
+  info.profile = "ISO 21496-1 gain-map HDR reconstruction";
+  info.color_signal_kind = "JPEG XL structured base color + jhgm ISO metadata";
+  info.width = info.base_width = base.width; info.height = info.base_height = base.height;
+  info.bit_depth = info.base_bit_depth = base.bits; info.base_channels = base.channels;
+  info.base_codec = "JPEG XL";
+  info.base_color_space = base.color.primaries == JXL_PRIMARIES_SRGB ? "Rec.709" :
+                          base.color.primaries == JXL_PRIMARIES_2100 ? "Rec.2020" : "Display P3";
+  info.native_color_present = true;
+  info.native_color_description = "JPEG XL structured base color (CICP equivalent)";
+  info.native_primaries = info.primaries = base.color.primaries == JXL_PRIMARIES_P3 ?
+      12 : static_cast<uint16_t>(base.color.primaries);
+  info.native_transfer = info.transfer = static_cast<uint16_t>(base.color.transfer_function);
+  info.native_matrix = info.matrix = 0;
+  info.native_full_range = info.full_range = true;
+  info.native_range_known = info.range_known = true;
+  info.resolved_signaling_source = "Native";
+  info.base_transfer = base.color.transfer_function == JXL_TRANSFER_FUNCTION_709 ? "BT.709" : "sRGB";
+  info.gain_map_width = map.width; info.gain_map_height = map.height;
+  info.gain_map_channels = map.channels;
+  info.gain_map_scale_x = map.width ? base.width / static_cast<double>(map.width) : 0.0;
+  info.gain_map_scale_y = map.height ? base.height / static_cast<double>(map.height) : 0.0;
+  info.gain_map_uses_base_color_space = metadata.use_base_color_space;
+  info.base_hdr_headroom = metadata.base_hdr_headroom;
+  info.alternate_hdr_headroom = metadata.alternate_hdr_headroom;
+  info.hdr_capacity_min = std::exp2(metadata.base_hdr_headroom);
+  info.hdr_capacity_max = std::exp2(metadata.alternate_hdr_headroom);
+  info.gain_map_min = metadata.minimum; info.gain_map_max = metadata.maximum;
+  info.gain_map_gamma = metadata.gamma; info.base_offset = metadata.base_offset;
+  info.alternate_offset = metadata.alternate_offset;
+  info.pixel_format = "RGB" + std::to_string(base.bits) +
+      " SDR base + " + std::to_string(map.channels) + "-channel gain map";
+  info.chroma = "4:4:4 RGB";
+  info.original_orientation = base.orientation; info.orientation_status = "present";
+  info.exif_present = base.exif_present;
+  info.xmp_present = base.xmp_present;
+  info.exif_status = base.exif_present ? "present" : "absent";
+  info.xmp_status = base.xmp_present ? "present" : "absent";
+  info.icc_status = "absent";
+  return info;
 }
 
 }  // namespace
@@ -2198,43 +2350,9 @@ SourceInfo inspect_iso_gainmap_jxl(const std::filesystem::path& path) {
   const auto bundle = find_jhgm(file);
   if (!bundle.gain_map) throw std::runtime_error("JPEG XL does not contain a jhgm gain map");
   const auto metadata = parse_iso_gain_map_metadata(bundle.metadata, bundle.metadata_size);
-  const auto base = decode_jxl_raster(file.data(), file.size());
-  const auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size);
-  if (!base.color_valid || base.color.transfer_function != JXL_TRANSFER_FUNCTION_SRGB ||
-      (base.color.primaries != JXL_PRIMARIES_P3 &&
-       base.color.primaries != JXL_PRIMARIES_SRGB &&
-       base.color.primaries != JXL_PRIMARIES_2100)) {
-    throw std::runtime_error("jhgm SDR base is not validated Rec.709, Display P3, or Rec.2020/sRGB");
-  }
-  SourceInfo info;
-  info.path = path; info.format = "JPEG XL"; info.container_brand = "JXL / jhgm";
-  info.asset_kind = "gain-map-hdr"; info.gain_map_present = true;
-  info.gain_map_family = "iso-jxl-jhgm";
-  info.codec = "JPEG XL SDR base + JPEG XL gain map + jhgm";
-  info.profile = "ISO 21496-1 gain-map HDR reconstruction";
-  info.color_signal_kind = "JPEG XL structured base color + jhgm ISO metadata";
-  info.width = info.base_width = base.width; info.height = info.base_height = base.height;
-  info.bit_depth = 16; info.base_bit_depth = base.bits; info.base_channels = base.channels;
-  info.base_codec = "JPEG XL";
-  info.base_color_space = base.color.primaries == JXL_PRIMARIES_SRGB ? "Rec.709" :
-                          base.color.primaries == JXL_PRIMARIES_2100 ? "Rec.2020" : "Display P3";
-  info.base_transfer = "sRGB";
-  info.gain_map_width = map.width; info.gain_map_height = map.height;
-  info.gain_map_channels = map.channels;
-  info.gain_map_scale_x = map.width ? base.width / static_cast<double>(map.width) : 0.0;
-  info.gain_map_scale_y = map.height ? base.height / static_cast<double>(map.height) : 0.0;
-  info.gain_map_uses_base_color_space = metadata.use_base_color_space;
-  info.base_hdr_headroom = metadata.base_hdr_headroom;
-  info.alternate_hdr_headroom = metadata.alternate_hdr_headroom;
-  info.hdr_capacity_min = std::exp2(metadata.base_hdr_headroom);
-  info.hdr_capacity_max = std::exp2(metadata.alternate_hdr_headroom);
-  info.gain_map_min = metadata.minimum; info.gain_map_max = metadata.maximum;
-  info.gain_map_gamma = metadata.gamma; info.base_offset = metadata.base_offset;
-  info.alternate_offset = metadata.alternate_offset;
-  info.pixel_format = "RGB16 SDR base + " + std::to_string(map.channels) + "-channel gain map";
-  info.original_orientation = base.orientation; info.orientation_status = "present";
-  info.exif_status = "absent"; info.xmp_status = "present"; info.icc_status = "container color encoding";
-  return info;
+  const auto base = decode_jxl_raster(file.data(), file.size(), false, true);
+  const auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size, false);
+  return describe_jxl_gainmap(path, metadata, base, map);
 }
 
 ReconstructedHdr reconstruct_iso_gainmap_jxl(const std::filesystem::path& path,
@@ -2244,10 +2362,12 @@ ReconstructedHdr reconstruct_iso_gainmap_jxl(const std::filesystem::path& path,
   const auto bundle = find_jhgm(file);
   if (!bundle.gain_map) throw std::runtime_error("JPEG XL does not contain a jhgm gain map");
   const auto metadata = parse_iso_gain_map_metadata(bundle.metadata, bundle.metadata_size);
-  auto base = decode_jxl_raster(file.data(), file.size());
-  auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size);
+  auto base = decode_jxl_raster(file.data(), file.size(), true, true);
+  const auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size, true);
   ReconstructedHdr output;
-  output.info = inspect_iso_gainmap_jxl(path);
+  output.info = describe_jxl_gainmap(path, metadata, base, map);
+  output.exif = std::move(base.exif);
+  output.xmp = std::move(base.xmp);
   output.decode_ms = elapsed_ms(begin);
   if (!metadata.use_base_color_space || base.width == 0 || base.height == 0 ||
       base.pixels.size() != static_cast<size_t>(base.width) * base.height * 3u) {
@@ -2261,13 +2381,16 @@ ReconstructedHdr reconstruct_iso_gainmap_jxl(const std::filesystem::path& path,
   if (metadata.alternate_hdr_headroom < metadata.base_hdr_headroom) weight = -weight;
   double max_nits = 0.0; long double sum_nits = 0.0;
   const auto reconstruction = Clock::now();
+  const uint16_t base_transfer = output.info.native_transfer;
+  const uint16_t base_primaries = output.info.native_primaries;
   for (uint32_t y = 0; y < base.height; ++y) {
     if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
     for (uint32_t x = 0; x < base.width; ++x) {
       const size_t pixel = static_cast<size_t>(y) * base.width + x;
       std::array<double, 3> base_linear_rgb{};
       for (size_t channel = 0; channel < 3; ++channel) {
-        const double base_linear = srgb_to_linear(base.pixels[pixel * 3u + channel] / 65535.0);
+        const double base_linear = jxl_base_to_linear(base.pixels[pixel * 3u + channel] / 65535.0,
+                                                       base_transfer);
         const double encoded_map = sample_jxl_map_bilinear(
             map.pixels, map.width, map.height, map.channels,
             base.width, base.height, x, y, channel);
@@ -2277,18 +2400,7 @@ ReconstructedHdr reconstruct_iso_gainmap_jxl(const std::filesystem::path& path,
         base_linear_rgb[channel] = (base_linear + metadata.base_offset[channel]) *
                           std::exp2(log_gain * weight) - metadata.alternate_offset[channel];
       }
-      std::array<double, 3> rec2020 = base_linear_rgb;
-      if (base.color.primaries == JXL_PRIMARIES_P3) {
-        rec2020 = {
-            0.7538330 * base_linear_rgb[0] + 0.1985974 * base_linear_rgb[1] + 0.0475696 * base_linear_rgb[2],
-            0.0457438 * base_linear_rgb[0] + 0.9417772 * base_linear_rgb[1] + 0.0124789 * base_linear_rgb[2],
-           -0.0012103 * base_linear_rgb[0] + 0.0176017 * base_linear_rgb[1] + 0.9836086 * base_linear_rgb[2]};
-      } else if (base.color.primaries == JXL_PRIMARIES_SRGB) {
-        rec2020 = {
-            0.6274040 * base_linear_rgb[0] + 0.3292820 * base_linear_rgb[1] + 0.0433136 * base_linear_rgb[2],
-            0.0690970 * base_linear_rgb[0] + 0.9195400 * base_linear_rgb[1] + 0.0113612 * base_linear_rgb[2],
-            0.0163916 * base_linear_rgb[0] + 0.0880132 * base_linear_rgb[1] + 0.8955950 * base_linear_rgb[2]};
-      }
+      const auto rec2020 = rec2020_from_gainmap_base(base_linear_rgb, base_primaries);
       const double pixel_max = std::max({rec2020[0], rec2020[1], rec2020[2], 0.0}) * 203.0;
       max_nits = std::max(max_nits, pixel_max); sum_nits += pixel_max;
       for (size_t channel = 0; channel < 3; ++channel) {
@@ -2307,6 +2419,8 @@ ReconstructedHdr reconstruct_iso_gainmap_jxl(const std::filesystem::path& path,
   output.info.orientation_normalized = true; output.info.primaries = 9;
   output.info.transfer = 16; output.info.matrix = 0; output.info.full_range = true;
   output.info.range_known = true;
+  orientation::set_exif_orientation_to_one(output.exif);
+  orientation::set_xmp_orientation_to_one(output.xmp);
   return output;
 }
 
@@ -2492,8 +2606,10 @@ GainMapRaster extract_jxl_gainmap(const std::filesystem::path& path,
     result.decode_ms = elapsed_ms(begin);
     return result;
   }
-  auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size);
-  auto info = inspect_iso_gainmap_jxl(path);
+  auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size, true);
+  const auto base = decode_jxl_raster(file.data(), file.size(), false, true);
+  const auto metadata = parse_iso_gain_map_metadata(bundle.metadata, bundle.metadata_size);
+  auto info = describe_jxl_gainmap(path, metadata, base, map);
   auto result = make_raster(std::move(info), map.width, map.height, map.channels,
                             std::move(map.pixels), "JPEG XL jhgm gain-map codestream", cancel);
   result.original_bytes.assign(bundle.gain_map, bundle.gain_map + bundle.gain_map_size);

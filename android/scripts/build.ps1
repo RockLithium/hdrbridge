@@ -37,7 +37,8 @@ foreach ($required in @(
 if (-not $Gradle) { $Gradle = Join-Path $androidRoot 'gradlew.bat' }
 $version = (Get-Content -LiteralPath (Join-Path $repo 'VERSION') -First 1).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'VERSION must contain major.minor.patch.' }
-if ($RebuildDependencies -or -not (Test-Path -LiteralPath (Join-Path $androidRoot 'vcpkg_installed/arm64-android-hdr/lib/libavif.a'))) {
+if ($RebuildDependencies -or -not (Test-Path -LiteralPath (Join-Path $androidRoot 'vcpkg_installed/arm64-android-hdr/lib/libavif.a')) -or
+    -not (Test-Path -LiteralPath (Join-Path $androidRoot 'vcpkg_installed/arm64-android-hdr/lib/libexpat.a'))) {
   $vcpkg = Join-Path $repo '.tools/vcpkg/vcpkg.exe'
   if (-not (Test-Path -LiteralPath $vcpkg)) {
     & (Join-Path $repo 'scripts/bootstrap-vcpkg-local.ps1')

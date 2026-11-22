@@ -16,6 +16,7 @@ find_package(libheif CONFIG REQUIRED)
 find_package(libavif CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(PNG REQUIRED)
+find_package(expat CONFIG REQUIRED)
 find_package(JPEG REQUIRED)
 find_package(TIFF REQUIRED)
 find_package(lcms2 CONFIG REQUIRED)
@@ -71,6 +72,7 @@ target_link_libraries(hdrbridge_core PUBLIC
   uhdr-static
   nlohmann_json::nlohmann_json
   PNG::PNG
+  expat::expat
   JPEG::JPEG
   TIFF::TIFF
   lcms2::lcms2
@@ -103,7 +105,7 @@ install(TARGETS hdrbridge RUNTIME DESTINATION .)
 if(BUILD_TESTING)
   add_executable(hdrbridge-frame-caption-tests tests/frame-caption-tests.cpp)
   target_compile_options(hdrbridge-frame-caption-tests PRIVATE /W4 /permissive- /utf-8)
-  target_link_libraries(hdrbridge-frame-caption-tests PRIVATE nlohmann_json::nlohmann_json)
+  target_link_libraries(hdrbridge-frame-caption-tests PRIVATE nlohmann_json::nlohmann_json expat::expat)
   add_test(NAME photo-frame-camera-captions COMMAND hdrbridge-frame-caption-tests)
   add_executable(hdrbridge-frame-math-tests tests/frame-math-tests.cpp)
   target_include_directories(hdrbridge-frame-math-tests PRIVATE core/src)
@@ -161,7 +163,7 @@ if(BUILD_TESTING)
   target_compile_options(hdrbridge-format-roundtrip-tests PRIVATE /W4 /permissive- /utf-8)
   target_link_libraries(hdrbridge-format-roundtrip-tests PRIVATE hdrbridge_core JPEG::JPEG)
   add_test(NAME format-roundtrips COMMAND hdrbridge-format-roundtrip-tests)
-  add_executable(hdrbridge-preview-ui-smoke tests/preview_ui_smoke.cpp)
+  add_executable(hdrbridge-preview-ui-smoke EXCLUDE_FROM_ALL tests/preview_ui_smoke.cpp)
   target_compile_definitions(hdrbridge-preview-ui-smoke PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(hdrbridge-preview-ui-smoke PRIVATE /W4 /permissive- /utf-8)

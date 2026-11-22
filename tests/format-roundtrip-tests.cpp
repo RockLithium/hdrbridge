@@ -260,6 +260,22 @@ int main() {
                 result.verification.gain_map_height == (height + c.scale - 1) / c.scale &&
                 result.verification.gain_map_channels == 3, std::string(c.name) + " gain map metadata");
       }
+      if (c.gain && std::string(c.mode) == "avif-pq10") {
+        const auto info = hdrbridge::inspect(path);
+        const bool p3 = std::string(c.gamut) == "p3";
+        require(info.base_color_space == (p3 ? "Display P3" : "BT.2020") &&
+                info.base_transfer == "sRGB" && info.native_color_present &&
+                info.native_primaries == (p3 ? 12 : 9) && info.native_transfer == 13 &&
+                info.native_range_known && info.native_full_range,
+                std::string(c.name) + " native AVIF base signal");
+      }
+      if (std::string(c.mode) == "ultrahdr") {
+        const auto info = hdrbridge::inspect(path);
+        require(info.icc_present && info.icc_primaries == 12 && info.primaries == 12 &&
+                info.resolved_signaling_source == "ICC" && !info.base_color_space.empty() &&
+                info.base_color_space != "SDR / unspecified primaries",
+                std::string(c.name) + " Ultra HDR JPEG base ICC signal");
+      }
       hdrbridge::clear_input_cache();
       compare_preview(reference, hdrbridge::decode_preview(path, width), c.rmse, c.name);
     }

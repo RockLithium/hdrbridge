@@ -2201,9 +2201,11 @@ std::wstring primaries_label(uint16_t value) {
 }
 
 std::wstring transfer_label(uint16_t value) {
+  if (value == 1) return L"BT.709";
   if (value == 16) return L"PQ / ST 2084";
   if (value == 18) return L"HLG / BT.2100";
   if (value == 13) return HB_UI("sRGB transfer");
+  if (value == 14) return L"BT.2020 SDR";
   if (value == 8) return HB_UI("Linear");
   return HB_UI("Unspecified / other transfer");
 }

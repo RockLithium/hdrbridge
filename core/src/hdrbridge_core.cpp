@@ -4,12 +4,15 @@
 #include "hdrbridge_threads.h"
 #include "gainmap_adapters.h"
 #include "hdr_transfer.h"
+#include "icc_rgb_primaries.h"
 #include "jpeg_probe.h"
+#include "jxl_metadata_boxes.h"
 #include "orientation.h"
 #include "exif_output.h"
+#include "tiff_input_exif.h"
 #if defined(_WIN32) || defined(__ANDROID__)
 #include "frame_composite.h"
-#include "frame_exif.h"
+#include "frame_xmp.h"
 #include <ultrahdr/ultrahdrcommon.h>
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
@@ -33,6 +36,7 @@
 #include <cwctype>
 #include <cmath>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <fstream>
@@ -44,6 +48,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 #include <thread>
 
@@ -231,8 +236,10 @@ HdrTransfer public_transfer_kind(uint16_t cicp_transfer) {
 }
 
 const char* public_transfer_name(uint16_t cicp_transfer) {
+  if (cicp_transfer == 1) return "BT.709";
   if (cicp_transfer == 8) return "Linear";
   if (cicp_transfer == 13) return "sRGB";
+  if (cicp_transfer == 14) return "BT.2020 SDR";
   return transfer::name(transfer::from_cicp(cicp_transfer));
 }
 
@@ -246,6 +253,7 @@ struct IccSignal {
   bool cicp_present = false;
   uint16_t primaries = 0;
   uint16_t transfer = 0;
+  uint16_t sdr_transfer = 0;
   uint16_t matrix = 0;
   bool full_range = false;
   std::string description;
@@ -260,43 +268,6 @@ std::string icc_info_ascii(cmsHPROFILE profile, cmsInfoType type) {
   cmsGetProfileInfoASCII(profile, type, "en", "US", text.data(), size);
   if (!text.empty() && text.back() == '\0') text.pop_back();
   return text;
-}
-
-uint16_t identify_icc_primaries(cmsHPROFILE profile) {
-  const auto* r = static_cast<const cmsCIEXYZ*>(cmsReadTag(profile, cmsSigRedColorantTag));
-  const auto* g = static_cast<const cmsCIEXYZ*>(cmsReadTag(profile, cmsSigGreenColorantTag));
-  const auto* b = static_cast<const cmsCIEXYZ*>(cmsReadTag(profile, cmsSigBlueColorantTag));
-  if (!r || !g || !b) return 0;
-  const std::array<double, 9> actual{r->X, r->Y, r->Z, g->X, g->Y, g->Z, b->X, b->Y, b->Z};
-  struct Candidate { uint16_t cicp; cmsCIExyYTRIPLE xy; };
-  const std::array<Candidate, 3> candidates{{
-      {1, {{0.6400, 0.3300, 1.0}, {0.3000, 0.6000, 1.0}, {0.1500, 0.0600, 1.0}}},
-      {9, {{0.7080, 0.2920, 1.0}, {0.1700, 0.7970, 1.0}, {0.1310, 0.0460, 1.0}}},
-      {12, {{0.6800, 0.3200, 1.0}, {0.2650, 0.6900, 1.0}, {0.1500, 0.0600, 1.0}}},
-  }};
-  const cmsCIExyY white{0.3127, 0.3290, 1.0};
-  uint16_t best = 0; double best_error = std::numeric_limits<double>::max();
-  for (const auto& candidate : candidates) {
-    cmsToneCurve* curve = cmsBuildGamma(nullptr, 1.0);
-    cmsToneCurve* curves[3]{curve, curve, curve};
-    cmsHPROFILE reference = curve ? cmsCreateRGBProfile(&white, &candidate.xy, curves) : nullptr;
-    if (curve) cmsFreeToneCurve(curve);
-    if (!reference) continue;
-    const auto* rr = static_cast<const cmsCIEXYZ*>(cmsReadTag(reference, cmsSigRedColorantTag));
-    const auto* rg = static_cast<const cmsCIEXYZ*>(cmsReadTag(reference, cmsSigGreenColorantTag));
-    const auto* rb = static_cast<const cmsCIEXYZ*>(cmsReadTag(reference, cmsSigBlueColorantTag));
-    if (rr && rg && rb) {
-      const std::array<double, 9> expected{rr->X, rr->Y, rr->Z, rg->X, rg->Y, rg->Z,
-                                           rb->X, rb->Y, rb->Z};
-      double error = 0.0;
-      for (size_t i = 0; i < actual.size(); ++i) {
-        const double delta = actual[i] - expected[i]; error += delta * delta;
-      }
-      if (error < best_error) { best_error = error; best = candidate.cicp; }
-    }
-    cmsCloseProfile(reference);
-  }
-  return best_error < 1e-4 ? best : 0;
 }
 
 uint16_t identify_icc_transfer(cmsHPROFILE profile) {
@@ -330,13 +301,14 @@ IccSignal parse_icc_signal(const void* data, size_t size) {
   std::ostringstream version_text;
   version_text << std::fixed << std::setprecision(1) << version;
   result.version = version_text.str();
-  const uint16_t transform_primaries = identify_icc_primaries(profile);
+  const uint16_t transform_primaries = icc::identify_rgb_primaries(profile);
   const uint16_t transform_transfer = identify_icc_transfer(profile);
   const auto* cicp = static_cast<const cmsVideoSignalType*>(cmsReadTag(profile, cmsSigcicpTag));
   if (cicp) {
     result.cicp_present = true;
     result.primaries = static_cast<uint16_t>(cicp->ColourPrimaries);
     result.transfer = static_cast<uint16_t>(cicp->TransferCharacteristics);
+    result.sdr_transfer = result.transfer;
     result.matrix = static_cast<uint16_t>(cicp->MatrixCoefficients);
     result.full_range = cicp->VideoFullRangeFlag != 0;
     result.transfer_interpretation = std::string("CICP ") + public_transfer_name(result.transfer);
@@ -345,6 +317,7 @@ IccSignal parse_icc_signal(const void* data, size_t size) {
   } else {
     result.primaries = transform_primaries;
     result.transfer = transform_transfer;
+    result.sdr_transfer = icc::identify_sdr_transfer(profile);
     result.matrix = 0;
     result.full_range = transform_transfer != 0;
     result.transfer_interpretation = transform_transfer
@@ -744,7 +717,7 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
   };
 
   heif_image* raw_image = nullptr;
-  report(progress, 12, "Decoding 20-tile HEVC image at 16-bit precision");
+  report(progress, 12, "Decoding " + result.info.codec + " image to RGB16");
   require_heif(heif_decode_image(opened.handle.get(), &raw_image, heif_colorspace_RGB,
                                  heif_chroma_interleaved_RRGGBB_LE, options.get()), "decode HEIF RGB16");
   ImagePtr image(raw_image);
@@ -1223,16 +1196,7 @@ DecodedImage decode_jxl_input(const std::filesystem::path& path) {
   JxlColorEncoding color{};
   bool structured_available = false;
   std::vector<uint8_t> original_icc;
-  std::vector<uint8_t>* box_target = nullptr;
-  size_t box_chunk_offset = 0;
-  size_t box_chunk_size = 0;
-  const auto finish_box = [&] {
-    if (!box_target) return;
-    const size_t remaining = JxlDecoderReleaseBoxBuffer(decoder.get());
-    box_target->resize(box_chunk_offset + box_chunk_size - remaining);
-    box_target = nullptr;
-    box_chunk_offset = box_chunk_size = 0;
-  };
+  JxlMetadataBoxes metadata(decoder.get(), decoded.exif, decoded.xmp);
   for (;;) {
     const JxlDecoderStatus status = JxlDecoderProcessInput(decoder.get());
     if (status == JXL_DEC_ERROR || status == JXL_DEC_NEED_MORE_INPUT) throw std::runtime_error("JPEG XL input decode failed");
@@ -1259,47 +1223,23 @@ DecodedImage decode_jxl_input(const std::filesystem::path& path) {
         }
       }
     } else if (status == JXL_DEC_BOX) {
-      finish_box();
-      JxlBoxType type{};
-      if (JxlDecoderGetBoxType(decoder.get(), type, JXL_TRUE) != JXL_DEC_SUCCESS) {
-        throw std::runtime_error("cannot read JPEG XL metadata box type");
-      }
-      if (std::memcmp(type, "Exif", 4) == 0) {
-        box_target = &decoded.exif;
-        decoded.info.exif_present = true;
-        decoded.info.exif_status = "present";
-      } else if (std::memcmp(type, "xml ", 4) == 0) {
-        box_target = &decoded.xmp;
-        decoded.info.xmp_present = true;
-        decoded.info.xmp_status = "present";
-      }
-      if (box_target) {
-        box_target->assign(65536u, 0);
-        box_chunk_size = box_target->size();
-        if (JxlDecoderSetBoxBuffer(decoder.get(), box_target->data(), box_chunk_size) != JXL_DEC_SUCCESS) {
-          throw std::runtime_error("cannot read JPEG XL metadata box");
-        }
-      }
+      metadata.start_box();
     } else if (status == JXL_DEC_BOX_NEED_MORE_OUTPUT) {
-      if (!box_target) throw std::runtime_error("unexpected JPEG XL metadata buffer request");
-      const size_t remaining = JxlDecoderReleaseBoxBuffer(decoder.get());
-      box_chunk_offset += box_chunk_size - remaining;
-      box_chunk_size = 65536u;
-      box_target->resize(box_chunk_offset + box_chunk_size);
-      if (JxlDecoderSetBoxBuffer(decoder.get(), box_target->data() + box_chunk_offset,
-                                 box_chunk_size) != JXL_DEC_SUCCESS) {
-        throw std::runtime_error("cannot continue JPEG XL metadata box read");
-      }
+      metadata.continue_box();
     } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
       size_t size = 0;
       if (JxlDecoderImageOutBufferSize(decoder.get(), &format, &size) != JXL_DEC_SUCCESS) throw std::runtime_error("cannot size JPEG XL input pixels");
       decoded.rgb.resize((size + sizeof(uint16_t) - 1u) / sizeof(uint16_t));
       if (JxlDecoderSetImageOutBuffer(decoder.get(), &format, decoded.rgb.data(), size) != JXL_DEC_SUCCESS) throw std::runtime_error("cannot set JPEG XL input buffer");
     } else if (status == JXL_DEC_SUCCESS) {
-      finish_box();
+      metadata.finish_box();
       break;
     }
   }
+  decoded.info.exif_present = metadata.exif_present;
+  decoded.info.xmp_present = metadata.xmp_present;
+  decoded.info.exif_status = metadata_status(metadata.exif_present);
+  decoded.info.xmp_status = metadata_status(metadata.xmp_present);
   if (structured_available && color.color_space == JXL_COLOR_SPACE_RGB) {
     decoded.info.native_color_present = true;
     decoded.info.native_primaries = color.primaries == JXL_PRIMARIES_P3 ? 12 :
@@ -2324,11 +2264,24 @@ void convert_p3_pq_to_rec2020_pq(std::vector<uint16_t>& pixels) {
   });
 }
 
+struct PngInputWarnings {
+  bool icc_illuminant = false;
+};
+
+void png_input_warning(png_structp png, png_const_charp message) {
+  if (std::string_view(message).ends_with(": PCS illuminant is not D50")) {
+    static_cast<PngInputWarnings*>(png_get_error_ptr(png))->icc_illuminant = true;
+  } else {
+    std::fprintf(stderr, "libpng warning: %s\n", message);
+  }
+}
+
 DecodedImage decode_png_input(const std::filesystem::path& path) {
   const auto bytes = read_file(path);
   std::array<uint8_t, 4> cicp{};
   const bool has_cicp = find_png_cicp(bytes, cicp);
-  png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+  PngInputWarnings warnings;
+  png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, &warnings, nullptr, png_input_warning);
   png_infop info = png ? png_create_info_struct(png) : nullptr;
   if (!png || !info) {
     if (png) png_destroy_read_struct(&png, nullptr, nullptr);
@@ -2383,6 +2336,14 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
                                     &profile_data, &profile_size) != 0 && profile_size > 0;
   store_icc_signal(decoded.info, parse_icc_signal(has_icc ? profile_data : nullptr,
                                                   has_icc ? profile_size : 0));
+  if (warnings.icc_illuminant) {
+    // Some exported profiles round the D50 Z coordinate down by one s15Fixed16
+    // unit. Keep the original profile and report larger deviations.
+    const bool rounded_d50 = has_icc && profile_size >= 128 &&
+        be32(profile_data + 68) == 63190 && be32(profile_data + 72) == 65536 &&
+        be32(profile_data + 76) == 54060 && decoded.info.icc_status == "present";
+    if (!rounded_d50) std::fprintf(stderr, "libpng warning: iCCP: PCS illuminant is not D50\n");
+  }
   if (!decoded.info.icc_description.empty()) decoded.info.profile = decoded.info.icc_description;
   else if (has_icc && profile_name) decoded.info.profile = profile_name;
   resolve_color_signaling(decoded.info, true);
@@ -2403,8 +2364,10 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
     decoded.info.orientation_status = "absent";
   }
 #endif
-  png_textp texts = nullptr; int text_count = 0;
-  if (png_get_text(png, info, &texts, &text_count) > 0) {
+  const auto read_xmp = [&] {
+    if (!decoded.xmp.empty()) return;
+    png_textp texts = nullptr; int text_count = 0;
+    if (png_get_text(png, info, &texts, &text_count) <= 0) return;
     for (int i = 0; i < text_count; ++i) {
       if (texts[i].key && std::strcmp(texts[i].key, "XML:com.adobe.xmp") == 0 && texts[i].text) {
         const size_t size = texts[i].itxt_length ? texts[i].itxt_length : texts[i].text_length;
@@ -2414,7 +2377,8 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
         break;
       }
     }
-  }
+  };
+  read_xmp();
   if (decoded.info.asset_kind != "direct-hdr") {
     // A parsed header alone is not enough to call an SDR PNG decodable.
     // Consume the complete image stream so truncated/corrupt IDAT data is a
@@ -2439,6 +2403,7 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
       }
     }
     png_read_end(png, info);
+    read_xmp();
     png_destroy_read_struct(&png, &info, nullptr);
     return decoded;
   }
@@ -2475,6 +2440,7 @@ DecodedImage decode_png_input(const std::filesystem::path& path) {
     png_read_image(png, rows.data());
   }
   png_read_end(png, info);
+  read_xmp();
   png_destroy_read_struct(&png, &info, nullptr);
   if (decoded.info.transfer == 18) {
     const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
@@ -2674,7 +2640,8 @@ Verification decode_tiff(const std::filesystem::path& path,
   return v;
 }
 
-SourceInfo inspect_tiff_metadata(const std::filesystem::path& path) {
+SourceInfo inspect_tiff_metadata(const std::filesystem::path& path,
+                                 std::vector<uint8_t>* exif = nullptr) {
   auto tiff = open_tiff(path, "r");
   SourceInfo info;
   info.path = path; info.format = "TIFF"; info.container_brand = "TIFF"; info.codec = "TIFF";
@@ -2713,21 +2680,14 @@ SourceInfo inspect_tiff_metadata(const std::filesystem::path& path) {
 #else
   info.xmp_status = "unsupported";
 #endif
-  toff_t exif_ifd = 0;
-  const bool has_exif_ifd = TIFFGetField(tiff.get(), TIFFTAG_EXIFIFD, &exif_ifd) == 1 && exif_ifd != 0;
-  char* camera_tag = nullptr;
-  const bool has_camera_tags = TIFFGetField(tiff.get(), TIFFTAG_MAKE, &camera_tag) == 1 ||
-                               TIFFGetField(tiff.get(), TIFFTAG_MODEL, &camera_tag) == 1 ||
-                               TIFFGetField(tiff.get(), TIFFTAG_DATETIME, &camera_tag) == 1 ||
-                               TIFFGetField(tiff.get(), TIFFTAG_COPYRIGHT, &camera_tag) == 1;
-  info.exif_present = has_exif_ifd || has_camera_tags;
-  info.exif_status = metadata_status(info.exif_present);
+  auto metadata = read_tiff_input_exif(tiff.get(), info);
+  if (exif) *exif = std::move(metadata);
   return info;
 }
 
 DecodedImage decode_tiff_input(const std::filesystem::path& path) {
   DecodedImage decoded;
-  decoded.info = inspect_tiff_metadata(path);
+  decoded.info = inspect_tiff_metadata(path, &decoded.exif);
   if (decoded.info.gain_map_present) {
     throw std::runtime_error("gain-map TIFF detected; Adobe SubIFD reconstruction is not yet a validated direct-HDR input path");
   }
@@ -4071,6 +4031,18 @@ Verification decode_ultrahdr(const std::vector<uint8_t>& bytes,
   return v;
 }
 
+void apply_jpeg_icc_signal(SourceInfo& info, IccSignal icc) {
+  icc.present = icc.present || info.icc_present;
+  store_icc_signal(info, icc);
+  if (!icc.valid) return;
+  info.primaries = icc.primaries;
+  info.transfer = icc.transfer ? icc.transfer : icc.sdr_transfer;
+  info.matrix = icc.matrix;
+  if (info.primaries != 0 || info.transfer != 0 || icc.cicp_present) {
+    info.resolved_signaling_source = "ICC";
+  }
+}
+
 SourceInfo ultrahdr_source_info(const std::filesystem::path& path,
                                 const std::vector<uint8_t>& bytes,
                                 uhdr_codec_private_t* decoder) {
@@ -4094,6 +4066,7 @@ SourceInfo ultrahdr_source_info(const std::filesystem::path& path,
   info.exif_present = outer_probe.exif_present;
   info.xmp_present = outer_probe.xmp_present;
   info.icc_present = outer_probe.icc_present;
+  auto base_icc = parse_icc_signal(outer_probe.icc.data(), outer_probe.icc.size());
   if (auto* base = uhdr_dec_get_base_image(decoder);
       base && base->data && base->data_sz) {
     const auto base_probe = jpeg::inspect(base->data, base->data_sz);
@@ -4104,6 +4077,7 @@ SourceInfo ultrahdr_source_info(const std::filesystem::path& path,
     info.exif_present = info.exif_present || base_probe.exif_present;
     info.xmp_present = info.xmp_present || base_probe.xmp_present;
     info.icc_present = info.icc_present || base_probe.icc_present;
+    if (!base_icc.valid) base_icc = parse_icc_signal(base_probe.icc.data(), base_probe.icc.size());
   }
   if (!info.base_width) info.base_width = info.width;
   if (!info.base_height) info.base_height = info.height;
@@ -4146,13 +4120,22 @@ SourceInfo ultrahdr_source_info(const std::filesystem::path& path,
     }
   }
 
-  if (auto* icc = uhdr_dec_get_icc(decoder); icc && icc->data && icc->data_sz) {
-    info.icc_present = true;
-    info.base_color_space = icc_description(
-        icc->data, static_cast<uint32_t>(std::min<size_t>(
-                       icc->data_sz, std::numeric_limits<uint32_t>::max())));
+  if (!base_icc.valid) {
+    if (auto* icc = uhdr_dec_get_icc(decoder); icc && icc->data && icc->data_sz) {
+      base_icc = parse_icc_signal(icc->data, icc->data_sz);
+    }
   }
-  if (info.base_color_space.empty()) info.base_color_space = "SDR / unspecified primaries";
+  apply_jpeg_icc_signal(info, std::move(base_icc));
+  if (info.transfer == 13) info.base_transfer = "sRGB";
+  else if (info.transfer == 14) info.base_transfer = "BT.2020 SDR";
+  else if (info.transfer == 1) info.base_transfer = "BT.709";
+  info.base_color_space = info.icc_description;
+  if (info.base_color_space.empty()) {
+    info.base_color_space = info.primaries == 1 ? "BT.709 / sRGB primaries" :
+                            info.primaries == 9 ? "BT.2020" :
+                            info.primaries == 12 ? "Display P3" :
+                            "SDR / unspecified primaries";
+  }
   if (auto* exif = uhdr_dec_get_exif(decoder); exif && exif->data && exif->data_sz) {
     const auto* first = static_cast<const uint8_t*>(exif->data);
     std::vector<uint8_t> exif_bytes(first, first + exif->data_sz);
@@ -4163,7 +4146,6 @@ SourceInfo ultrahdr_source_info(const std::filesystem::path& path,
   }
   info.exif_status = metadata_status(info.exif_present);
   info.xmp_status = metadata_status(info.xmp_present);
-  info.icc_status = metadata_status(info.icc_present);
   if (info.orientation_status == "unsupported") info.orientation_status = "absent";
   info.orientation_normalized = true;
   return info;
@@ -4208,15 +4190,17 @@ SourceInfo inspect_plain_jpeg(const std::filesystem::path& path) {
                 std::to_string(probe.channels) + " components";
   info.pixel_format = "JPEG " + info.chroma;
   info.color_signal_kind = "JPEG ICC / application markers";
-  info.profile = probe.icc_present && !probe.icc.empty()
-      ? icc_description(probe.icc.data(), static_cast<uint32_t>(probe.icc.size()))
-      : "unprofiled / unspecified";
   info.exif_present = probe.exif_present;
   info.xmp_present = probe.xmp_present;
   info.icc_present = probe.icc_present;
+  apply_jpeg_icc_signal(info, parse_icc_signal(
+      probe.icc_present && !probe.icc.empty() ? probe.icc.data() : nullptr,
+      probe.icc_present && !probe.icc.empty() ? probe.icc.size() : 0));
+  info.profile = !info.icc_description.empty()
+      ? info.icc_description
+      : "unprofiled / unspecified";
   info.exif_status = metadata_status(info.exif_present);
   info.xmp_status = metadata_status(info.xmp_present);
-  info.icc_status = metadata_status(info.icc_present);
   info.original_orientation = orientation::read_exif_orientation(probe.exif);
   info.orientation_status = orientation::has_exif_orientation(probe.exif)
       ? "present" : "absent";
