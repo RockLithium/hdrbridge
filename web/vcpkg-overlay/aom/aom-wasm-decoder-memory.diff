@@ -2,7 +2,7 @@ diff --git a/aom_scale/generic/yv12config.c b/aom_scale/generic/yv12config.c
 index 1111111..2222222 100644
 --- a/aom_scale/generic/yv12config.c
 +++ b/aom_scale/generic/yv12config.c
-@@ -91,6 +91,10 @@ static int realloc_frame_buffer_aligned(
+@@ -91,7 +91,11 @@ static int realloc_frame_buffer_aligned(
      // The decoder may allocate REF_FRAMES frame buffers in the frame buffer
      // pool. Bound the total amount of allocated memory as if these REF_FRAMES
      // frame buffers were allocated in a single allocation.
@@ -13,11 +13,12 @@ index 1111111..2222222 100644
 +#endif
        return AOM_CODEC_MEM_ERROR;
  #endif
+ 
 diff --git a/av1/av1_dx_iface.c b/av1/av1_dx_iface.c
 index 1111111..2222222 100644
 --- a/av1/av1_dx_iface.c
 +++ b/av1/av1_dx_iface.c
-@@ -106,3 +106,8 @@
+@@ -106,5 +106,10 @@
      priv->num_grain_image_frame_buffers = 0;
 +#if defined(__EMSCRIPTEN__)
 +    // Avoid allocating a full-frame coefficient buffer for row parallelism.
@@ -26,3 +27,5 @@ index 1111111..2222222 100644
      // Turn row_mt on by default.
      priv->row_mt = 1;
 +#endif
+ 
+     // Turn on normal tile coding mode by default.
