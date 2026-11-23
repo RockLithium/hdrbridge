@@ -10,11 +10,11 @@ Native browser `<img>` presentation is used for JPEG, PNG, AVIF and JPEG XL prev
 
 ## Build
 
-On Windows, pass your local Emscripten and Ninja paths if they differ from the script defaults (`-EmsdkRoot`, `-NinjaPath`, and optionally `-VcpkgRoot`):
+Run these commands from the repository root in Windows PowerShell 5.1 or PowerShell 7. Pass your local Emscripten and Ninja paths if they differ from the script defaults. Use `-VcpkgRoot` to specify a different vcpkg checkout.
 
 ```powershell
-pwsh web/scripts/build-wasm.ps1 -EmsdkRoot <emsdk-dir> -NinjaPath <ninja.exe>
-pwsh web/scripts/assemble-site.ps1
+.\web\scripts\build-wasm.ps1 -EmsdkRoot <emsdk-dir> -NinjaPath <ninja.exe>
+.\web\scripts\assemble-site.ps1
 ```
 
 On Linux (as used in CI), activate Emscripten and run `web/scripts/build-wasm.sh` followed by `web/scripts/assemble-site.sh`.

@@ -74,6 +74,9 @@ tests/private/
 !web/public/*.png
 !web/public/assets/*.png
 
+# Local raw frame-logo downloads (processed *-w.svg live in assets/frame-logos/)
+assets/frame-logos-raw/
+
 # Optional local env
 .env
 .env.*

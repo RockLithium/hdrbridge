@@ -11,7 +11,7 @@ android/       native Android UI, JNI and platform adapters
 
 The desktop UI calls the C++ core directly without an intermediate 8-bit UI buffer. The developer CLI exposes the same inspection and conversion operations as JSON for regression tests.
 
-Photo Frame uses the canonical HDR raster to compose a border, camera logo and caption, then encodes Ultra HDR JPEG. Desktop and Android share the compositor, font rasterizer and SVG renderer. Fonts and logo sources are packaged as runtime assets.
+Photo Frame uses the canonical HDR raster to compose a border, camera logo and caption, then encodes Ultra HDR JPEG or 16-bit HDR PNG. Desktop and Android share the compositor, font rasterizer and SVG renderer. Fonts and logo sources are packaged as runtime assets.
 
 The Web UI calls the portable core through a C/WASM boundary:
 

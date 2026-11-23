@@ -3,14 +3,64 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 using hdrbridge::frame_exif::camera_logo_key;
 using hdrbridge::frame_exif::caption_fields;
 using hdrbridge::frame_exif::captions;
 
 namespace {
-void check(bool condition, const char* message) {
+void check(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+void camera_caption_tests() {
+    struct Case {
+        const char* make;
+        const char* model;
+        const char* logo;
+        const char* title;
+    };
+    const Case cases[] = {
+        {" NIKON CORPORATION ", "NIKON Z 8", "nikon", "Z 8"},
+        {"Canon", "Canon Canon EOS R5", "canon", "EOS R5"},
+        {"Canon", "CanonEOSR5", "canon", "CanonEOSR5"},
+        {"FUJI PHOTO FILM CO., LTD.", "FUJI PHOTO FILM FinePix S5Pro", "fujifilm", "FinePix S5Pro"},
+        {"Leica Camera AG", "Leica Camera M11", "leica", "M11"},
+        {"OLYMPUS_IMAGING_CORP.", "X450,D535Z,C370Z", "olympus", "X450,D535Z,C370Z"},
+        {"OM Digital Solutions", "OM-1", "omsystem", "OM-1"},
+        {"RICOH IMAGING COMPANY, LTD.", "PENTAX 645Z", "pentax", "645Z"},
+        {"PENTAX RICOH IMAGING", "PENTAX WG-3", "pentax", "WG-3"},
+        {"PENTAX RICOH IMAGING", "GR", "ricoh", "GR"},
+        {"Asahi Optical Co.,Ltd.", "PENTAX Optio 430", "pentax", "Optio 430"},
+        {"Samsung Techwin", "SAMSUNG-SM-C105A", "samsung", "SM-C105A"},
+        {"SAMSUNG ELEC.", "SAMSUNG/VP-D590", "samsung", "VP-D590"},
+        {"KONICA MINOLTA CAMERA, Inc.", "DiMAGE A2", "minolta", "DiMAGE A2"},
+        {"Konica Minolta Photo Imaging, Inc.", "DiMAGE G600", "minolta", "DiMAGE G600"},
+        {"JK Imaging, Ltd.", "KODAK PIXPRO AZ401", "kodak", "PIXPRO AZ401"},
+        {"JK Imaging, Ltd.", "OtherCam 100", "", "JK Imaging, Ltd. OtherCam 100"},
+        {"Victor Hasselblad AB", "", "hasselblad", ""},
+        {"PHASE ONE A/S", "Phase One IQ4 150MP", "phaseone", "IQ4 150MP"},
+        {"Panasonic", "Panasonic DC-S5M2", "lumix", "DC-S5M2"},
+        {"Panasonic", "DMC-GH4", "lumix", "DMC-GH4"},
+        {"Panasonic", "LUMIX GH6", "lumix", "GH6"},
+        {"Panasonic", "HC-X2000", "panasonic", "HC-X2000"},
+        {"vivo", "iQOO 13", "iqoo", "13"},
+        {"Xiaomi", "Xiaomi 15 Ultra", "xiaomi", "15 Ultra"},
+        {"Apple", "iPhone 16 Pro Max", "apple", "iPhone 16 Pro Max"},
+        {"Sony", "Alpha Sony Edition", "sony", "Alpha Sony Edition"},
+        {"RED", "V-RAPTOR 8K VV", "", "RED V-RAPTOR 8K VV"},
+        {"RED", "", "", "RED"},
+    };
+    for (const auto& c : cases) {
+        const std::string label = std::string(c.make) + " / " + c.model;
+        check(camera_logo_key(c.make, c.model) == c.logo, "logo: " + label);
+        check(captions({{"Make", c.make}, {"Model", c.model}}).first == c.title,
+              "title: " + label);
+    }
+    check(captions(nlohmann::json::object()) == std::pair<std::string, std::string>{},
+          "metadata-free input needs no caption");
+    check(captions({{"ISO", "100"}}).second == "ISO100", "partial exposure has no stray units");
 }
 
 std::vector<uint8_t> packet(std::string_view xml) {
@@ -24,7 +74,8 @@ void xmp_caption_tests() {
        xmlns:c="http://cipa.jp/exif/1.0/" xmlns:a="urn:other">
   <r:Description t:Make="Canon" e:FNumber="4/1" e:ExposureTime="2/320" a:Model="Wrong">
     <t:Model>Canon EOS R6 Mark III</t:Model>
-    <e:FocalLength>105/1</e:FocalLength>
+    <e:FocalLength>70/1</e:FocalLength>
+    <e:FocalLengthIn35mmFilm>105</e:FocalLengthIn35mmFilm>
     <e:ISOSpeedRatings><r:Seq><r:li>8000</r:li><r:li>1600</r:li></r:Seq></e:ISOSpeedRatings>
     <c:LensModel>RF24-105mm F4 L IS USM &amp; filter</c:LensModel>
     <a:CameraProfile><r:Description t:Model="Wrong" e:FNumber="3/1"/></a:CameraProfile>
@@ -33,9 +84,10 @@ void xmp_caption_tests() {
     auto fields = caption_fields({}, xmp);
     check(camera_logo_key(fields.value("Make", "")) == "canon", "XMP camera make");
     check(fields.value("LensModel", "") == "RF24-105mm F4 L IS USM & filter", "XMP XML entities and lens");
+    check(fields.value("FocalLength", "") == "70", "XMP rational focal length");
     const auto lines = captions(fields);
     check(lines.first == "EOS R6 Mark III", "XMP namespace and element model");
-    check(lines.second == "105mm f/4 1/160s ISO8000", "XMP rational and ISO sequence");
+    check(lines.second == "105mm f/4 1/160s ISO8000", "XMP equivalent focal length, exposure and ISO");
 
     const std::vector<uint8_t> exif = {
       'I','I',42,0,8,0,0,0,1,0,0x0f,0x01,2,0,4,0,0,0,'D','J','I',0,0,0,0,0
@@ -53,28 +105,7 @@ void xmp_caption_tests() {
 
 int main() {
     try {
-        check(camera_logo_key(" NIKON CORPORATION ") == "nikon", "Nikon logo key normalization");
-        check(camera_logo_key("Fujifilm") == "fujifilm", "Fujifilm logo key");
-        check(camera_logo_key("Xiaomi").empty(), "Xiaomi has no camera logo key");
-
-        check(captions({{"Make", "Canon"}, {"Model", "Canon Canon EOSR5"}}).first == "EOSR5", "strip repeated Canon prefixes");
-        check(captions({{"Make", "NIKON CORPORATION"}, {"Model", "NIKON Z8"}}).first == "Z8", "strip Nikon prefix");
-        check(captions({{"Make", "Nikon"}, {"Model", "NIKON Z 8"}}).first == "Z 8", "strip Nikon prefix and preserve model spaces");
-        check(captions({{"Make", "Xiaomi"}, {"Model", "Xiaomi15Ultra"}}).first == "Xiaomi15Ultra", "preserve compact Xiaomi model");
-        check(captions({{"Make", "Xiaomi"}, {"Model", "Xiaomi 15 Ultra"}}).first == "Xiaomi 15 Ultra", "preserve spaced Xiaomi model");
-        check(captions({{"Make", "vivo"}, {"Model", "vivoX200Ultra"}}).first == "vivoX200Ultra", "preserve compact vivo model");
-        check(captions({{"Make", "vivo"}, {"Model", "vivo X200 Ultra"}}).first == "vivo X200 Ultra", "preserve spaced vivo model");
-        check(captions({{"Make", "Apple"}, {"Model", "iPhone16ProMax"}}).first == "iPhone16ProMax", "preserve iPhone model");
-        check(captions({{"Make", "Sony"}, {"Model", "Alpha SONYCorporation Edition"}}).first == "Alpha SONYCorporation Edition", "do not strip an interior Sony string");
-        check(captions({{"Make", "Canon"}, {"Model", "CanonEOSR5"}}).first == "CanonEOSR5", "do not strip a partial-word Canon prefix");
-        check(captions({{"Make", "  NIKON  "}}).first.empty(), "logo make without model has empty caption");
-        check(captions({{"Make", "  Xiaomi  "}}).first == "Xiaomi", "non-logo make without model is fallback caption");
-
-        const auto lines=captions({{"Make", "Canon"}, {"Model", "Canon EOS R5"},
-                                   {"FocalLengthIn35mmFormat", "50"}, {"FNumber", "2.8"},
-                                   {"ExposureTime", "1/100"}, {"ISO", "400"}});
-        check(lines.first == "EOS R5", "camera caption model");
-        check(lines.second == "50mm f/2.8 1/100s ISO400", "metadata caption format");
+        camera_caption_tests();
         xmp_caption_tests();
     } catch (const std::exception& e) {
         std::cerr << "frame caption test failed: " << e.what() << '\n';

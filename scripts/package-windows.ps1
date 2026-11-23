@@ -15,7 +15,6 @@ if (Test-Path -LiteralPath $Destination) {
     [System.IO.Directory]::Delete([System.IO.Path]::GetFullPath($Destination), $true)
 }
 [System.IO.Directory]::CreateDirectory($Destination) | Out-Null
-[System.IO.Directory]::CreateDirectory((Join-Path $Destination "docs")) | Out-Null
 [System.IO.Directory]::CreateDirectory((Join-Path $Destination "licenses")) | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $BuildDirectory "hdrbridge.exe") -Destination $Destination
@@ -41,9 +40,6 @@ Get-ChildItem -LiteralPath $crt -Filter "*.dll" | Copy-Item -Destination $Destin
 
 Copy-Item -LiteralPath (Join-Path $repo "LICENSE") -Destination (Join-Path $Destination "LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $repo "THIRD_PARTY_NOTICES.md") -Destination $Destination
-foreach ($document in "COMPATIBILITY_MATRIX.md", "METADATA.md", "CONVERSION_FIDELITY.md") {
-    Copy-Item -LiteralPath (Join-Path $repo "docs\$document") -Destination (Join-Path $Destination "docs\$document")
-}
 
 foreach ($package in "libheif", "libavif", "libyuv", "libde265", "libjxl", "libjpeg-turbo", "brotli", "highway", "lcms", "libpng", "expat", "tiff", "zlib", "liblzma", "aom", "nlohmann-json") {
     $copyright = Join-Path $repo "vcpkg_installed\x64-windows\share\$package\copyright"
@@ -80,7 +76,7 @@ Preview uses a verified Windows FP16 scRGB HDR swap-chain presentation path.
 It is off by default and performs no preview decode until opened.
 
 Primary outputs:
-- Ultra HDR JPEG (Faithful/Auto)
+- Ultra HDR JPEG
 - RGB16 PQ/HLG PNG
 - RGB16 PQ/HLG JPEG XL
 - RGB gain-map JPEG XL
@@ -92,8 +88,7 @@ Primary outputs:
 - Photo Frame (Ultra HDR JPEG with camera logo and caption)
 
 The application is unsigned. Windows may show a SmartScreen or unknown-
-publisher warning. See docs/COMPATIBILITY_MATRIX.md for measured application
-behavior and docs/CONVERSION_FIDELITY.md for fidelity/lossless terminology.
+publisher warning.
 "@ | Set-Content -Encoding UTF8 (Join-Path $Destination "README.txt")
 
 $zip = "$Destination.zip"

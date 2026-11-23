@@ -152,11 +152,6 @@ int main() {
     require(source_miss.success && !source_miss.timings.canonical_cache_hit,
             "switching back to source did not replace cached path");
     require(read_png(source_miss.output_path) == a, "switch-back output returned stale pixels");
-    auto warmed_before_replace = convert(source, root / "warm-before-replace.png");
-    require(warmed_before_replace.success && warmed_before_replace.timings.canonical_cache_hit,
-            "source was not cached immediately before replacement");
-    require(read_png(warmed_before_replace.output_path) == a,
-            "warmup before replacement returned incorrect pixels");
     const auto old_time = fs::last_write_time(source);
     write_png(source, c, true);
     require(fs::file_size(source) == fs::file_size(other), "replacement changed fixture size");

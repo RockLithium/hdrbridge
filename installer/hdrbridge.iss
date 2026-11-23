@@ -60,6 +60,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[InstallDelete]
+Type: files; Name: "{app}\docs\COMPATIBILITY_MATRIX.md"
+Type: files; Name: "{app}\docs\METADATA.md"
+Type: files; Name: "{app}\docs\CONVERSION_FIDELITY.md"
+Type: dirifempty; Name: "{app}\docs"
+
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 

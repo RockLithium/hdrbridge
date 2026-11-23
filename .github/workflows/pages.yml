@@ -7,6 +7,7 @@ on:
       - "web/**"
       - "core/**"
       - "cmake/**"
+      - "ports-overlay/aom/**"
       - "VERSION"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
@@ -41,7 +42,7 @@ jobs:
             web/.cache/downloads
             web/.cache/vcpkg_installed
             web/.cache/build
-          key: wasm32-v2-${{ hashFiles('web/vcpkg-overlay/**', 'web/vcpkg-triplets/**') }}
+          key: wasm32-v2-${{ hashFiles('web/vcpkg-overlay/**', 'web/vcpkg-triplets/**', 'ports-overlay/aom/**') }}
       - name: Build the HDR Bridge Web module
         id: web-build
         continue-on-error: true

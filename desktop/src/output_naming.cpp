@@ -25,7 +25,9 @@ std::wstring validate_component(std::wstring value, const char* label,
 std::wstring extension_for_mode(const std::wstring& mode,
                                 const std::wstring& gainmap_export_format,
                                 const std::filesystem::path& source) {
-  if (mode == L"photo-frame") return L".jpg";
+  if (mode == L"photo-frame") {
+    return gainmap_export_format == L"png" ? L".png" : L".jpg";
+  }
   if (mode == L"ultrahdr") return L".jpg";
   if (mode == L"png-pq16") return L".png";
   if (mode == L"jxl-pq16") return L".jxl";

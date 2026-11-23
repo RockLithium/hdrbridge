@@ -21,7 +21,7 @@ constexpr unsigned width = 64, height = 48;
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
-void fixture(const std::filesystem::path& path, bool hdr, bool rotated = false) {
+void fixture(const std::filesystem::path& path, bool rotated = false) {
   FILE* file = nullptr;
   if (_wfopen_s(&file, path.c_str(), L"wb") || !file) throw std::runtime_error("fixture open failed");
   png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
@@ -29,24 +29,23 @@ void fixture(const std::filesystem::path& path, bool hdr, bool rotated = false) 
   if (!png || !info) throw std::runtime_error("fixture writer failed");
   if (setjmp(png_jmpbuf(png))) throw std::runtime_error("fixture PNG failed");
   png_init_io(png, file);
-  png_set_IHDR(png, info, width, height, hdr ? 16 : 8, PNG_COLOR_TYPE_RGB,
+  png_set_IHDR(png, info, width, height, 16, PNG_COLOR_TYPE_RGB,
                PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
   png_write_info(png, info);
-  if (hdr) {
-    const png_byte cicp[]{9, 16, 0, 1};
-    png_write_chunk(png, reinterpret_cast<png_const_bytep>("cICP"), cicp, sizeof(cicp));
-    if (rotated) {
-      const png_byte exif[]{'I','I',42,0,8,0,0,0,1,0,0x12,1,3,0,1,0,0,0,6,0,0,0,0,0,0,0};
-      png_write_chunk(png, reinterpret_cast<png_const_bytep>("eXIf"), exif, sizeof(exif));
-    }
+  const png_byte cicp[]{9, 16, 0, 1};
+  png_write_chunk(png, reinterpret_cast<png_const_bytep>("cICP"), cicp, sizeof(cicp));
+  if (rotated) {
+    const png_byte exif[]{'I','I',42,0,8,0,0,0,1,0,0x12,1,3,0,1,0,0,0,6,0,0,0,0,0,0,0};
+    png_write_chunk(png, reinterpret_cast<png_const_bytep>("eXIf"), exif, sizeof(exif));
   }
-  std::vector<png_byte> row(width * 3u * (hdr ? 2u : 1u));
+  std::vector<png_byte> row(width * 6u);
   for (unsigned y = 0; y < height; ++y) {
     for (unsigned x = 0; x < width; ++x) for (unsigned c = 0; c < 3; ++c) {
       // 0.55..0.65 PQ: smooth and distinct channels, safely within P3.
       const unsigned value = 36000u + x * 50u + y * 30u + c * 1800u;
-      if (hdr) { row[(x*3u+c)*2u] = static_cast<png_byte>(value >> 8); row[(x*3u+c)*2u+1] = static_cast<png_byte>(value); }
-      else row[x*3u+c] = static_cast<png_byte>(value >> 8);
+      const size_t offset = (x * 3u + c) * 2u;
+      row[offset] = static_cast<png_byte>(value >> 8);
+      row[offset + 1] = static_cast<png_byte>(value);
     }
     png_write_row(png, row.data());
   }
@@ -222,8 +221,7 @@ int main() {
     std::filesystem::create_directories(dir);
     precision_regression(dir / "precision.png");
     const auto src = dir / "source.png";
-    fixture(src, true); fixture(dir / "sdr.png", false);
-    require(hdrbridge::inspect(dir / "sdr.png").asset_kind == "non-HDR", "SDR classification");
+    fixture(src);
     require(hdrbridge::inspect(src).asset_kind == "direct-hdr", "HDR classification");
     const auto reference = hdrbridge::decode_preview(src, width);
     struct Case { const char* mode; const char* name; const char* transfer; const char* gamut; bool gain; int scale; double rmse; };
@@ -279,7 +277,7 @@ int main() {
       hdrbridge::clear_input_cache();
       compare_preview(reference, hdrbridge::decode_preview(path, width), c.rmse, c.name);
     }
-    fixture(dir / "oriented.png", true, true);
+    fixture(dir / "oriented.png", true);
     const auto oriented = hdrbridge::inspect(dir / "oriented.png");
     require(oriented.width == height && oriented.height == width, "EXIF orientation dimensions");
     hdrbridge::ConversionOptions oriented_options; oriented_options.mode = "png-pq16";

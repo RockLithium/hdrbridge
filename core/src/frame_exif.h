@@ -132,50 +132,320 @@ private:
 inline nlohmann::json parse(const std::vector<uint8_t>& bytes) {
     return detail::Reader(bytes).run();
 }
-// Returns the lowercase key used by the bundled camera logo assets, or an
-// empty string when the make has no logo. Handles common EXIF vendor suffixes.
-inline std::string camera_logo_key(const std::string& make) {
-    auto trim=[](std::string s) { const auto first=s.find_first_not_of(" \t\r\n");
-        return first==std::string::npos ? std::string{} : s.substr(first,s.find_last_not_of(" \t\r\n")-first+1); };
-    std::string normalized=trim(make);
-    std::transform(normalized.begin(),normalized.end(),normalized.begin(),[](unsigned char c){return char(std::tolower(c));});
-    while(!normalized.empty() && (normalized.back()=='.' || normalized.back()==',')) normalized.pop_back();
-    // Exact names plus common legal/vendor suffixes; don't match arbitrary
-    // substrings, which could turn a phone make into a camera logo.
-    static const std::array<const char*,13> brands={"canon","nikon","sony","fujifilm","hasselblad","leica","olympus","panasonic","pentax","ricoh","sigma","dji","songdian"};
-    for(const char* brand:brands) {
-        const std::string key(brand);
-        if(normalized==key) return key;
-        if(normalized.size()>key.size() && normalized.compare(0,key.size(),key)==0 &&
-           std::isspace(static_cast<unsigned char>(normalized[key.size()]))) {
-            std::string suffix=normalized.substr(key.size());
-            while(!suffix.empty() && std::isspace(static_cast<unsigned char>(suffix.front()))) suffix.erase(suffix.begin());
-            if(suffix=="corporation" || suffix=="corp." || suffix=="corp" || suffix=="co., ltd." || suffix=="co ltd" || suffix=="inc." || suffix=="inc") return key;
+namespace detail {
+
+inline bool starts_with_ci(std::string_view text, std::string_view prefix) {
+    if (text.size() < prefix.size()) return false;
+    for (size_t i = 0; i < prefix.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(text[i])) != std::tolower(static_cast<unsigned char>(prefix[i]))) return false;
+    return true;
+}
+
+inline bool contains_ci(std::string_view text, std::string_view needle) {
+    if (needle.empty() || text.size() < needle.size()) return false;
+    for (size_t i = 0; i + needle.size() <= text.size(); ++i)
+        if (starts_with_ci(text.substr(i), needle)) return true;
+    return false;
+}
+
+inline std::string normalize_words(std::string_view s) {
+    std::string out;
+    bool space = false;
+    for (unsigned char ch : s) {
+        if (std::isspace(ch) || ch == '.' || ch == ',' || ch == '_') {
+            space = !out.empty();
+            continue;
+        }
+        if (space) {
+            out.push_back(' ');
+            space = false;
+        }
+        out.push_back(char(std::tolower(ch)));
+    }
+    return out;
+}
+
+struct BrandAlias {
+    const char* prefix;
+    const char* key;
+};
+
+// Shared vendor aliases used by both logo lookup and model-prefix deduplication.
+inline constexpr BrandAlias kBrandAliases[] = {
+    {"fuji photo film", "fujifilm"},
+    {"fujifilm", "fujifilm"},
+    {"victor hasselblad", "hasselblad"},
+    {"hasselblad", "hasselblad"},
+    {"leica camera", "leica"},
+    {"leica", "leica"},
+    {"olympus imaging", "olympus"},
+    {"olympus optical", "olympus"},
+    {"olympus", "olympus"},
+    {"om digital solutions", "omsystem"},
+    {"om system", "omsystem"},
+    {"omsystem", "omsystem"},
+    {"pentax ricoh imaging", "pentax_ricoh"},
+    {"pentax ricoh", "pentax_ricoh"},
+    {"ricoh imaging", "ricoh"},
+    {"ricoh", "ricoh"},
+    {"asahi optical", "pentax"},
+    {"pentax", "pentax"},
+    {"phase one", "phaseone"},
+    {"phaseone", "phaseone"},
+    {"sz dji technology", "dji"},
+    {"dji", "dji"},
+    {"arashi vision", "insta360"},
+    {"insta360", "insta360"},
+    {"mamiya digital imaging", "mamiya"},
+    {"mamiya-op", "mamiya"},
+    {"mamiya", "mamiya"},
+    {"eastman kodak", "kodak"},
+    {"jk imaging", "jk_imaging"},
+    {"kodak", "kodak"},
+    {"carl zeiss", "zeiss"},
+    {"zeiss", "zeiss"},
+    {"konica minolta photo imaging", "minolta"},
+    {"konica minolta camera", "minolta"},
+    {"konica minolta", "minolta"},
+    {"minolta", "minolta"},
+    {"casio computer", "casio"},
+    {"casio", "casio"},
+    {"arnold & richter", "arri"},
+    {"arri", "arri"},
+    {"samsung electronics", "samsung"},
+    {"samsung techwin", "samsung"},
+    {"samsung optical", "samsung"},
+    {"samsung anycall", "samsung"},
+    {"samsung elec", "samsung"},
+    {"samsung", "samsung"},
+    {"canon", "canon"},
+    {"nikon", "nikon"},
+    {"sony", "sony"},
+    {"panasonic", "panasonic"},
+    {"lumix", "lumix"},
+    {"sigma", "sigma"},
+    {"gopro", "gopro"},
+    {"apple", "apple"},
+    {"xiaomi", "xiaomi"},
+    {"oppo", "oppo"},
+    {"vivo", "vivo"},
+    {"iqoo", "iqoo"},
+    {"honor", "honor"},
+    {"huawei", "huawei"},
+    {"oneplus", "oneplus"},
+    {"google", "google"}
+};
+
+inline constexpr const char* kLegalSuffixes[] = {
+    "a/s", "ag", "ab", "gmbh", "k k", "ltd", "corporation", "corp",
+    "company ltd", "company", "co ltd", "inc", "camera ag"
+};
+
+inline bool is_word_sep(unsigned char ch) {
+    return std::isspace(ch) || ch == '.' || ch == ',' || ch == '_';
+}
+
+inline bool is_model_sep(unsigned char ch) {
+    return std::isspace(ch) || ch == '-' || ch == '/';
+}
+
+// Matches a space-delimited lowercase alias at the beginning of `text` (treating
+// whitespace, '.', ',', '_' as separators), returning the end index in `text`
+// or npos if it does not match a full prefix token.
+inline size_t match_alias_tokens(std::string_view text, std::string_view alias) {
+    size_t ti = 0;
+    for (size_t ai = 0; ai < alias.size(); ++ai) {
+        if (alias[ai] == ' ') {
+            if (ti >= text.size() || !is_word_sep(static_cast<unsigned char>(text[ti]))) return std::string_view::npos;
+            while (ti < text.size() && is_word_sep(static_cast<unsigned char>(text[ti]))) ++ti;
+        } else {
+            if (ti >= text.size() ||
+                std::tolower(static_cast<unsigned char>(text[ti])) != static_cast<unsigned char>(alias[ai])) {
+                return std::string_view::npos;
+            }
+            ++ti;
         }
     }
-    return {};
+    return ti;
 }
+
+// Matches `alias` plus an optional trailing legal suffix at the start of `text`,
+// requiring end-of-string or a model separator (space, '-', '/') afterward.
+inline size_t match_prefix_with_boundary(std::string_view text, std::string_view alias) {
+    size_t pos = match_alias_tokens(text, alias);
+    if (pos == std::string_view::npos) return std::string_view::npos;
+
+    auto consume_legal_suffix = [&](size_t from) -> size_t {
+        size_t s = from;
+        while (s < text.size() && is_word_sep(static_cast<unsigned char>(text[s]))) ++s;
+        if (s == from) return std::string_view::npos;
+        size_t best = std::string_view::npos;
+        for (const char* suffix : kLegalSuffixes) {
+            const size_t end = match_alias_tokens(text.substr(s), suffix);
+            if (end != std::string_view::npos) {
+                const size_t abs_end = s + end;
+                if (abs_end == text.size() || is_model_sep(static_cast<unsigned char>(text[abs_end])) ||
+                    text[abs_end] == '.' || text[abs_end] == ',') {
+                    if (best == std::string_view::npos || abs_end > best) best = abs_end;
+                }
+            }
+        }
+        if (best != std::string_view::npos) {
+            while (best < text.size() && (text[best] == '.' || text[best] == ',')) ++best;
+        }
+        return best;
+    };
+
+    if (pos < text.size()) {
+        const size_t with_suffix = consume_legal_suffix(pos);
+        if (with_suffix != std::string_view::npos) pos = with_suffix;
+    }
+    if (pos == text.size()) return pos;
+    if (!is_model_sep(static_cast<unsigned char>(text[pos]))) return std::string_view::npos;
+    return pos;
+}
+
+inline std::string base_vendor_key(const std::string& make) {
+    const std::string normalized = normalize_words(make);
+    if (normalized.empty()) return {};
+    std::string best_key;
+    size_t best_len = 0;
+    for (const auto& brand : kBrandAliases) {
+        const std::string_view prefix(brand.prefix);
+        if (prefix.size() <= best_len) continue;
+        if (normalized == prefix) {
+            best_key = brand.key;
+            best_len = prefix.size();
+            continue;
+        }
+        if (normalized.size() > prefix.size() && normalized.compare(0, prefix.size(), prefix) == 0 &&
+            normalized[prefix.size()] == ' ') {
+            const std::string_view suffix = std::string_view(normalized).substr(prefix.size() + 1);
+            for (const char* allowed : kLegalSuffixes) {
+                if (suffix == allowed) {
+                    best_key = brand.key;
+                    best_len = prefix.size();
+                    break;
+                }
+            }
+        }
+    }
+    return best_key;
+}
+
+inline bool alias_belongs_to(const std::string& alias_key, const std::string& resolved_key,
+                             const std::string& base_key) {
+    if (alias_key == resolved_key || (!base_key.empty() && alias_key == base_key)) return true;
+    if (resolved_key == "lumix" && alias_key == "panasonic") return true;
+    if (resolved_key == "iqoo" && alias_key == "vivo") return true;
+    if (resolved_key == "pentax" && (alias_key == "ricoh" || alias_key == "pentax_ricoh")) return true;
+    if (resolved_key == "ricoh" && alias_key == "pentax_ricoh") return true;
+    if (resolved_key == "kodak" && alias_key == "jk_imaging") return true;
+    return false;
+}
+
+// Strips the longest leading vendor prefix matching `resolved_key` or `base_key`,
+// plus one separator (' ', '-', '/'), preserving the remainder verbatim.
+inline bool strip_one_vendor_prefix(std::string& model, const std::string& resolved_key,
+                                    const std::string& base_key) {
+    size_t best_match_end = std::string_view::npos;
+    size_t best_alias_len = 0;
+    for (const auto& brand : kBrandAliases) {
+        if (!alias_belongs_to(brand.key, resolved_key, base_key)) continue;
+        const std::string_view alias(brand.prefix);
+        if (alias.size() <= best_alias_len) continue;
+        const size_t end = match_prefix_with_boundary(model, alias);
+        if (end != std::string_view::npos) {
+            best_match_end = end;
+            best_alias_len = alias.size();
+        }
+    }
+    if (best_match_end == std::string_view::npos) return false;
+    size_t erase_end = best_match_end;
+    while (erase_end < model.size() && std::isspace(static_cast<unsigned char>(model[erase_end]))) ++erase_end;
+    if (erase_end < model.size() && (model[erase_end] == '-' || model[erase_end] == '/')) {
+        ++erase_end;
+        while (erase_end < model.size() && std::isspace(static_cast<unsigned char>(model[erase_end]))) ++erase_end;
+    }
+    model.erase(0, erase_end);
+    while (!model.empty() && std::isspace(static_cast<unsigned char>(model.back()))) model.pop_back();
+    return true;
+}
+
+}  // namespace detail
+
+// Returns the lowercase key used by the bundled camera logo assets, or an
+// empty string when the make has no logo. Handles common EXIF vendor suffixes
+// and sub-brand/model routing (Lumix, Pentax/Ricoh, iQOO, JK Imaging/Kodak).
+inline std::string camera_logo_key(const std::string& make, const std::string& model = {}) {
+    const std::string base = detail::base_vendor_key(make);
+    if (base.empty()) return {};
+
+    auto trim_ws = [](std::string s) {
+        const auto first = s.find_first_not_of(" \t\r\n");
+        return first == std::string::npos ? std::string{} : s.substr(first, s.find_last_not_of(" \t\r\n") - first + 1);
+    };
+    std::string stripped_model = trim_ws(model);
+    while (detail::strip_one_vendor_prefix(stripped_model, base, base)) {}
+    const std::string norm_model = detail::normalize_words(stripped_model);
+
+    if (base == "jk_imaging") {
+        if (norm_model == "kodak pixpro" || detail::starts_with_ci(norm_model, "kodak pixpro ")) {
+            return "kodak";
+        }
+        return {};
+    }
+    if (base == "pentax_ricoh") {
+        if (norm_model == "pentax" || detail::starts_with_ci(norm_model, "pentax ")) {
+            return "pentax";
+        }
+        return "ricoh";
+    }
+    if (base == "ricoh") {
+        if (norm_model == "pentax" || detail::starts_with_ci(norm_model, "pentax ")) {
+            return "pentax";
+        }
+        return "ricoh";
+    }
+    if (base == "panasonic" && !stripped_model.empty()) {
+        if (detail::contains_ci(norm_model, "lumix") ||
+            detail::starts_with_ci(stripped_model, "dc-") ||
+            detail::starts_with_ci(stripped_model, "dmc-")) {
+            return "lumix";
+        }
+    }
+    if (base == "vivo" && (norm_model == "iqoo" || detail::starts_with_ci(norm_model, "iqoo "))) {
+        return "iqoo";
+    }
+    return base;
+}
+
 inline std::pair<std::string,std::string> captions(const nlohmann::json& fields) {
     const auto value = [&](const char* key) -> std::string {
         if (!fields.contains(key) || fields[key].is_null()) return {};
         return fields[key].is_string() ? fields[key].get<std::string>() : fields[key].dump();
     };
-    auto make = value("Make"), model = value("Model");
-    auto trim = [](std::string s) { const auto first=s.find_first_not_of(" \t\r\n");
-        return first==std::string::npos ? std::string{} : s.substr(first,s.find_last_not_of(" \t\r\n")-first+1); };
-    make=trim(make); model=trim(model);
-    const std::string logoKey=camera_logo_key(make);
-    if(!model.empty() && !logoKey.empty()) {
-        auto stripPrefix=[&](const std::string& prefix) {
-            if(model.size()<prefix.size()) return false;
-            for(size_t i=0;i<prefix.size();++i)
-                if(std::tolower(static_cast<unsigned char>(model[i]))!=std::tolower(static_cast<unsigned char>(prefix[i]))) return false;
-            if(model.size()>prefix.size() && !std::isspace(static_cast<unsigned char>(model[prefix.size()]))) return false;
-            model.erase(0,prefix.size()); model=trim(model); return true;
-        };
-        while(stripPrefix(logoKey)) {}
+    auto trim = [](std::string s) {
+        const auto first = s.find_first_not_of(" \t\r\n");
+        return first == std::string::npos ? std::string{} : s.substr(first, s.find_last_not_of(" \t\r\n") - first + 1);
+    };
+    std::string make = trim(value("Make"));
+    std::string model = trim(value("Model"));
+    const std::string baseKey = detail::base_vendor_key(make);
+    const std::string logoKey = camera_logo_key(make, model);
+    if (!model.empty() && !logoKey.empty()) {
+        while (detail::strip_one_vendor_prefix(model, logoKey, baseKey)) {}
     }
-    std::string first=model.empty()?(logoKey.empty()?make:std::string{}):model;
+    std::string first;
+    if (model.empty()) {
+        first = logoKey.empty() ? make : std::string{};
+    } else if (logoKey.empty() && !make.empty() && !detail::starts_with_ci(model, make) &&
+               !(detail::starts_with_ci(make, "apple") &&
+                 (detail::starts_with_ci(model, "iphone") || detail::starts_with_ci(model, "ipad")))) {
+        first = make + " " + model;
+    } else {
+        first = model;
+    }
     std::vector<std::string> parts;
     auto focal=value("FocalLengthIn35mmFormat"); if(focal.empty()||focal=="0") focal=value("FocalLength");
     if(!focal.empty()&&focal!="0") parts.push_back(focal+"mm");

@@ -30,6 +30,7 @@ Direct HDR classification does not require native CICP/NCLX. The resolver may ob
 | AVIF                        | normalized Exif/XMP items plus target NCLX                                        | conflicting source ICC/color signaling is not copied                                    |
 | FP16 scRGB JPEG XR          | WIC pixel format and codec properties                                             | current WIC encoder does not clone Exif/XMP/ICC payloads                                |
 | Photo Frame UHDR JPEG | generated UHDR gain-map metadata; captions use source EXIF and fill missing camera fields from XMP | source EXIF/XMP are not copied; Lossless, EXIF and XMP are fixed off |
+| Photo Frame HDR PNG   | cICP and (for PQ) target ICC; captions use source EXIF and fill missing camera fields from XMP      | source EXIF/XMP are not copied; HLG omits ICC; EXIF/XMP are fixed off and Lossless is fixed on |
 
 Apple, gain-map-container and Ultra HDR relationship metadata is input reconstruction data. It is removed after reconstruction when it would misdescribe a new direct-HDR output. Camera Exif is retained where the destination encoder supports it.
 

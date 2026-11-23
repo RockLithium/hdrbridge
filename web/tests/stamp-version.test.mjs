@@ -19,18 +19,16 @@ try {
   const run = (...args) => spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
   let result = run(version, first, second);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(await readFile(first, "utf8"), />2\.3\.4</);
-  assert.match(await readFile(second, "utf8"), />2\.3\.4</);
-  for (const file of [first, second]) {
-    const html = await readFile(file, "utf8");
-    assert.match(html, /data-platform="windows" href="https:\/\/github\.com\/RockLithium\/hdrbridge\/releases\/download\/v2\.3\.4\/HDRBridge-v2\.3\.4-Windows-x64-Setup\.exe"/);
-    assert.match(html, /href="https:\/\/github\.com\/RockLithium\/hdrbridge\/releases\/download\/v2\.3\.4\/HDRBridge-v2\.3\.4-Android-arm64\.apk" data-platform="android"/);
-    assert.match(html, /href="https:\/\/github\.com\/RockLithium\/hdrbridge\/releases\/latest"/);
-  }
+  const html = await readFile(first, "utf8");
+  assert.equal(await readFile(second, "utf8"), html);
+  assert.match(html, />2\.3\.4</);
+  assert.match(html, /data-platform="windows" href="https:\/\/github\.com\/RockLithium\/hdrbridge\/releases\/download\/v2\.3\.4\/HDRBridge-v2\.3\.4-Windows-x64-Setup\.exe"/);
+  assert.match(html, /href="https:\/\/github\.com\/RockLithium\/hdrbridge\/releases\/download\/v2\.3\.4\/HDRBridge-v2\.3\.4-Android-arm64\.apk" data-platform="android"/);
+  assert.match(html, /href="https:\/\/github\.com\/RockLithium\/hdrbridge\/releases\/latest"/);
 
   result = run(version, first);
   assert.equal(result.status, 0, result.stderr, "already-current version should be accepted");
-  assert.match(await readFile(first, "utf8"), />2\.3\.4</);
+  assert.equal(await readFile(first, "utf8"), html);
 
   const missing = join(dir, "missing marker.html");
   await writeFile(missing, "<p>No version marker</p>");

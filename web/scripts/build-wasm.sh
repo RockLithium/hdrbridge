@@ -7,6 +7,7 @@ cache_root="${web_root}/.cache"
 vcpkg_root="${cache_root}/vcpkg"
 downloads_root="${cache_root}/downloads"
 install_root="${cache_root}/vcpkg_installed"
+aom_overlay="${repo_root}/ports-overlay/aom"
 prefix="${install_root}/wasm32-emscripten"
 build_root="${cache_root}/build/hdrbridge-full"
 output_root="${web_root}/public/codecs/hdrbridge"
@@ -25,6 +26,7 @@ fi
 git -C "${vcpkg_root}" fetch --quiet origin "${vcpkg_ref}"
 git -C "${vcpkg_root}" checkout --quiet "${vcpkg_ref}"
 "${vcpkg_root}/bootstrap-vcpkg.sh" -disableMetrics
+aom_version=$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1])); print(p["version-semver"] + "#" + str(p["port-version"]))' "${aom_overlay}/vcpkg.json")
 
 for variant in scalar threaded; do
   triplet=wasm32-emscripten
@@ -32,14 +34,22 @@ for variant in scalar threaded; do
   if [[ "$variant" == threaded ]]; then triplet=wasm32-emscripten-pthreads; threaded=ON; fi
   prefix="${install_root}/${triplet}"
   build_root="${cache_root}/build/hdrbridge-${variant}"
+# Classic vcpkg installs do not replace an already installed overlay version.
+installed_aom=$("${vcpkg_root}/vcpkg" list "aom:${triplet}" --classic "--x-install-root=${install_root}" --x-json |
+  python3 -c 'import json, sys; p = json.load(sys.stdin).get(sys.argv[1]); print(p["version"] + "#" + str(p["port_version"]) if p else "")' "aom:${triplet}")
+if [[ -n "$installed_aom" && "$installed_aom" != "$aom_version" ]]; then
+  "${vcpkg_root}/vcpkg" remove "aom:${triplet}" --classic --recurse "--x-install-root=${install_root}" \
+    "--overlay-triplets=${web_root}/vcpkg-triplets"
+fi
 for attempt in 1 2 3; do
   if VCPKG_DOWNLOADS="${downloads_root}" "${vcpkg_root}/vcpkg" install \
-    "libheif[core,aom]:${triplet}" "libavif[core,aom]:${triplet}" \
+    "aom:${triplet}" "libheif[core,aom]:${triplet}" "libavif[core,aom]:${triplet}" \
     "libpng:${triplet}" "tiff[core,jpeg,zip]:${triplet}" \
     "lcms:${triplet}" "liblzma:${triplet}" "libjxl:${triplet}" \
     "jxrlib:${triplet}" "nlohmann-json:${triplet}" \
     --classic "--x-install-root=${install_root}" \
-    "--overlay-ports=${web_root}/vcpkg-overlay" "--overlay-triplets=${web_root}/vcpkg-triplets"; then
+    "--overlay-ports=${web_root}/vcpkg-overlay" "--overlay-ports=${aom_overlay}" \
+    "--overlay-triplets=${web_root}/vcpkg-triplets"; then
     break
   fi
   if [[ "${attempt}" == 3 ]]; then

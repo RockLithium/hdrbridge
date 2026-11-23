@@ -19,10 +19,8 @@ New-Item -ItemType Directory -Force -Path $dest | Out-Null
 foreach ($entry in $files.GetEnumerator()) { Copy-Item -LiteralPath $entry.Value -Destination (Join-Path $dest $entry.Key) -Force }
 $logoDest = Join-Path $assetRoot 'frame-logos'
 if (-not (Test-Path -LiteralPath $frameLogoSource -PathType Container)) { throw "Missing frame logo assets: $frameLogoSource" }
-foreach ($required in @('LICENSE-yiyin.txt', 'SOURCE.md')) {
-  if (-not (Test-Path -LiteralPath (Join-Path $frameLogoSource $required) -PathType Leaf)) {
-    throw "Missing frame logo notice/source file: $required"
-  }
+if (-not (Test-Path -LiteralPath (Join-Path $frameLogoSource 'SOURCE.md') -PathType Leaf)) {
+  throw 'Missing frame logo notice/source file: SOURCE.md'
 }
 $logos = @(Get-ChildItem -LiteralPath $frameLogoSource -File)
 if (-not ($logos | Where-Object { $_.Extension -eq '.svg' })) { throw 'No SVG frame logos found.' }

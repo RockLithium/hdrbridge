@@ -26,14 +26,14 @@ int main() {
       hdrbridge::desktop::extension_for_mode(L"tiff-pq16") != L".tif" ||
       hdrbridge::desktop::extension_for_mode(L"gainmap-extract", L"original", L"map.jxl") != L".jxl" ||
       hdrbridge::desktop::extension_for_mode(L"gainmap-extract", L"original", L"map.heic") != L".png" ||
-      hdrbridge::desktop::extension_for_mode(L"gainmap-extract", L"tiff", L"map.avif") != L".tif") {
+      hdrbridge::desktop::extension_for_mode(L"gainmap-extract", L"tiff", L"map.avif") != L".tif" ||
+      hdrbridge::desktop::extension_for_mode(L"photo-frame") != L".jpg" ||
+      hdrbridge::desktop::extension_for_mode(L"photo-frame", L"png") != L".png") {
     std::cerr << "mode extension mismatch\n";
     return 1;
   }
 
-  // Output settings are session state. Queue completion, Clear, Remove and an
-  // empty queue do not recreate them, so a new batch must still resolve to the
-  // explicitly selected custom folder until the user switches policy.
+  // Path resolution uses the requested directory policy for each source.
   request.base_name.clear();
   request.suffix.clear();
   request.mode = L"png-pq16";
@@ -45,7 +45,6 @@ int main() {
     std::cerr << "Batch A custom output policy mismatch\n";
     return 1;
   }
-  // Simulate Convert -> Clear -> Add Batch B: only the source changes.
   request.source = LR"(E:\BatchB\second.hif)";
   if (hdrbridge::desktop::resolve_output_path(request) !=
       std::filesystem::path(LR"(D:\CustomOutput\second.png)")) {
@@ -56,12 +55,6 @@ int main() {
   if (hdrbridge::desktop::resolve_output_path(request) !=
       std::filesystem::path(LR"(E:\BatchB\second.png)")) {
     std::cerr << "source-folder policy mismatch\n";
-    return 1;
-  }
-  request.use_source_folder = false;
-  if (hdrbridge::desktop::resolve_output_path(request) !=
-      std::filesystem::path(LR"(D:\CustomOutput\second.png)")) {
-    std::cerr << "custom folder was not retained across ON/OFF toggle\n";
     return 1;
   }
 

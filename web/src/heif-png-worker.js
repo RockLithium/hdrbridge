@@ -64,10 +64,16 @@ async function getCore(embeddedWasm, embeddedThreadedWasm) {
 }
 
 function readCString(core, address) {
+  // wasm32 exports i32 pointers, which JavaScript represents as signed numbers.
+  address >>>= 0;
+  const heap = core.HEAPU8;
   let end = address;
-  while (core.HEAPU8[end] !== 0) end += 1;
+  while (end < heap.length && heap[end] !== 0) end += 1;
+  if (end === heap.length || address > heap.length) {
+    throw new Error("The conversion core returned an invalid text pointer.");
+  }
   // TextDecoder rejects views backed by SharedArrayBuffer in some browsers.
-  return new TextDecoder().decode(core.HEAPU8.slice(address, end));
+  return new TextDecoder().decode(heap.slice(address, end));
 }
 
 function extensionOf(name) {
@@ -78,7 +84,7 @@ function extensionOf(name) {
 
 function withCString(core, value, operation) {
   const size = core.lengthBytesUTF8(value) + 1;
-  const pointer = core._malloc(size);
+  const pointer = core._malloc(size) >>> 0;
   if (!pointer) throw new Error("The browser could not allocate enough memory.");
   try {
     core.stringToUTF8(value, pointer, size);
@@ -90,7 +96,7 @@ function withCString(core, value, operation) {
 
 async function withInput(core, buffer, operation) {
   const input = new Uint8Array(buffer);
-  const pointer = core._malloc(input.byteLength);
+  const pointer = core._malloc(input.byteLength) >>> 0;
   if (!pointer) throw new Error("The browser could not allocate enough memory.");
   try {
     core.HEAPU8.set(input, pointer);
@@ -134,9 +140,13 @@ self.addEventListener("message", async ({ data }) => {
           if (status !== 0) {
             throw new Error(readCString(core, core._hb_last_error()));
           }
-          const outputSize = core._hb_output_size();
-          const outputPointer = core._hb_output_data();
-          const output = core.HEAPU8.slice(outputPointer, outputPointer + outputSize);
+          const outputSize = core._hb_output_size() >>> 0;
+          const outputPointer = core._hb_output_data() >>> 0;
+          const heap = core.HEAPU8;
+          if (!outputPointer || outputPointer + outputSize > heap.length) {
+            throw new Error("The conversion core returned an invalid output buffer.");
+          }
+          const output = heap.slice(outputPointer, outputPointer + outputSize);
           const info = JSON.parse(readCString(core, core._hb_info_json()));
           core._hb_clear_result();
           return { output, info };

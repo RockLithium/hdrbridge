@@ -12,6 +12,6 @@ The script reads installed vcpkg copyright files, the pinned libultrahdr license
 
 ## Source and linking
 
-`android/vcpkg.json` records library versions through its baseline and features. Overlays are under `android/ports-overlay`; extracted package sources are in `android/build-deps/buildtrees`. `android/app/src/main/cpp/CMakeLists.txt` records the Ultra HDR revision and shared-core build configuration.
+`android/vcpkg.json` records library versions through its baseline and features. Overlays are under `android/ports-overlay` and `ports-overlay/aom`; extracted package sources are in `android/build-deps/buildtrees`. `android/app/src/main/cpp/CMakeLists.txt` records the Ultra HDR revision and shared-core build configuration.
 
 libheif and libde265 are statically linked LGPL libraries. Distribution must satisfy their source and relinking requirements, including the corresponding library sources and application code suitable for rebuilding the combined work; see [LGPL-3.0 section 4](https://www.gnu.org/licenses/lgpl-3.0.en.html#section4). License texts alone do not supply those build materials.

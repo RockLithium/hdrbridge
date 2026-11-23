@@ -7,7 +7,7 @@ vcpkg_from_git(
     PATCHES
         aom-rename-static.diff
         aom-uninitialized-pointer.diff
-        aom-wasm-decoder-memory.diff
+        aom-frame-memory.diff
 )
 
 vcpkg_find_acquire_program(PERL)

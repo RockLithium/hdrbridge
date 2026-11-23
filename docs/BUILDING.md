@@ -20,7 +20,7 @@ To create a portable package:
 .\scripts\package-windows.ps1
 ```
 
-The archive contains the GUI, runtime DLLs, resources, public documentation and license texts.
+The archive contains the GUI, runtime DLLs, resources and license texts.
 
 ## Android
 

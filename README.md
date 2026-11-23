@@ -28,7 +28,7 @@ Available outputs:
 - 10-bit 4:4:4 HDR AVIF in PQ or HLG;
 - RGB gain-map AVIF;
 - embedded gain-map extraction to the original payload where possible, or PNG, TIFF and JPEG images;
-- Photo Frame: Ultra HDR JPEG with a blurred border, camera logo and caption.
+- Photo Frame: Ultra HDR JPEG or 16-bit PQ/HLG HDR PNG with a blurred border, camera logo and caption.
 
 See [output formats](docs/OUTPUT_FORMATS.md) for controls and defaults, and the [compatibility matrix](docs/COMPATIBILITY_MATRIX.md) for application support.
 

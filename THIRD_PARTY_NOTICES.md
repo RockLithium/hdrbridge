@@ -19,7 +19,7 @@ Primary dependencies:
 | nlohmann/json | CLI, Android JNI, Web and EXIF-caption JSON handling | MIT; header-only |
 | Windows Imaging Component (WIC) | Windows JPEG XR encode/decode | operating-system API on Windows |
 | jxrlib | Android and Web JPEG XR encode/decode | BSD-style permissive license; statically linked in Android and Web builds |
-| Yiyin camera-logo SVG artwork | Photo Frame visual assets | GPL-3.0; original SVG sources and license/source notices are packaged with the assets |
+| Wikimedia Commons camera/brand logo SVGs | Photo Frame visual assets | Public domain (`PD-textlogo` / simple geometric shapes) on Wikimedia Commons; manufacturer trademarks retained by respective owners (see `assets/frame-logos/SOURCE.md`) |
 | Roboto | Photo Frame typography | Apache-2.0; license text retained with bundled assets |
 | stb | Photo Frame font rasterization | MIT; license text retained with bundled assets |
 | NanoSVG | Photo Frame SVG support | zlib; license text retained with bundled assets |

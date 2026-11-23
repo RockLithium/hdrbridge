@@ -1,6 +1,6 @@
 # Android native dependencies
 
-The dependency manifest is `android/vcpkg.json`; it pins the vcpkg baseline. `android/ports-overlay/libjxl` supplies the JPEG XL port and `android/triplets/arm64-android-hdr.cmake` defines the target.
+The dependency manifest is `android/vcpkg.json`; it pins the vcpkg baseline. `android/ports-overlay/libjxl` supplies the JPEG XL port, `ports-overlay/aom` supplies the shared libaom overlay, and `android/triplets/arm64-android-hdr.cmake` defines the target.
 
 The triplet builds static, position-independent libraries for Android API 26 and arm64-v8a using the NDK shared C++ runtime. The dependency build scripts target a Windows host.
 

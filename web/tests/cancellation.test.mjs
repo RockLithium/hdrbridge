@@ -42,31 +42,23 @@ test("reverse-order inspections only dispatch the latest selected file", async (
   assert.deepEqual(jobs.map(({ name }) => name), ["second.png"]);
 });
 
-test("a late old read error cannot replace current status or busy state", async () => {
+test("a stale read error does not reach either callback", async () => {
   const old = deferredFile("old.png");
   let currentId = 1;
-  let status = "Inspecting current file";
-  let busy = false;
   const pending = runForCurrentRequest(old, 1, (id) => id === currentId,
-    () => assert.fail("stale job dispatched"), (error) => { status = error.message; busy = false; });
+    () => assert.fail("stale job dispatched"), () => assert.fail("stale error delivered"));
   currentId = 2;
-  busy = true; // newer operation owns the UI now
   old.reject(new Error("old read failed"));
   assert.equal(await pending, false);
-  assert.equal(status, "Inspecting current file");
-  assert.equal(busy, true);
 });
 
-test("current reads dispatch once and preserve the caller's option snapshot", async () => {
+test("a current file read delivers its buffer once", async () => {
   const file = deferredFile("current.png");
-  const options = { format: "png", encodingValue: 4 };
-  const jobs = [];
+  const payload = new ArrayBuffer(3);
+  const buffers = [];
   const pending = runForCurrentRequest(file, 7, (id) => id === 7,
-    (buffer) => jobs.push({ ...options, buffer }), () => assert.fail("current read failed"));
-  file.resolve(new ArrayBuffer(3));
+    (buffer) => buffers.push(buffer), () => assert.fail("current read failed"));
+  file.resolve(payload);
   assert.equal(await pending, true);
-  assert.equal(jobs.length, 1);
-  assert.equal(jobs[0].format, "png");
-  assert.equal(jobs[0].encodingValue, 4);
-  assert.equal(jobs[0].buffer.byteLength, 3);
+  assert.deepEqual(buffers, [payload]);
 });

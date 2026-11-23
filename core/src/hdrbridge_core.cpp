@@ -711,6 +711,14 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
   options->output_image_nclx_profile_passthrough = 1;
   // Tile workers share the budget; avoid starting another full pool per tile.
   options->num_codec_threads = result.info.is_grid ? 1 : default_worker_count();
+#if defined(__EMSCRIPTEN_PTHREADS__)
+  // Large AV1 frames leave less room for per-thread codec buffers in WASM.
+  const uint64_t frame_pixels = static_cast<uint64_t>(result.info.width) * result.info.height;
+  if (result.info.codec == "AV1" && frame_pixels > 141'000'000) {
+    const int thread_limit = frame_pixels > 152'000'000 ? 4 : 8;
+    options->num_codec_threads = std::min(options->num_codec_threads, thread_limit);
+  }
+#endif
   options->progress_user_data = cancel;
   options->cancel_decoding = [](void* user) -> int {
     return user && static_cast<std::atomic_bool*>(user)->load() ? 1 : 0;
@@ -2790,6 +2798,8 @@ void encode_avif(const std::filesystem::path& path, const DecodedImage& decoded,
   require_heif(heif_encoder_set_parameter_integer(encoder.get(), "speed",
       std::clamp(options.avif_speed, 0, 9)), "set direct AVIF encoder speed");
   require_heif(heif_encoder_set_parameter_string(encoder.get(), "chroma", "444"), "force direct PQ AVIF 4:4:4");
+  require_heif(heif_encoder_set_parameter_string(encoder.get(), "aom:enable-global-motion", "0"),
+               "disable AVIF global motion search");
   for (auto parameter = heif_encoder_list_parameters(encoder.get()); *parameter; ++parameter) {
     if (std::strcmp(heif_encoder_parameter_get_name(*parameter), "threads") != 0) continue;
     int has_min = 0, has_max = 0, minimum = 1, maximum = std::numeric_limits<int>::max();
@@ -2961,6 +2971,9 @@ void encode_gainmap_avif(const std::filesystem::path& path,
   }
   AvifEncoderPtr encoder(avifEncoderCreate());
   if (!encoder) throw std::bad_alloc();
+  encoder->codecChoice = AVIF_CODEC_CHOICE_AOM;
+  require_avif_result(avifEncoderSetCodecSpecificOption(encoder.get(), "enable-global-motion", "0"),
+                      encoder->diag, "disable gain-map AVIF global motion search");
   encoder->speed = std::clamp(options.avif_speed, 0, 9);
   encoder->maxThreads = static_cast<int>(default_worker_count());
   encoder->quality = std::clamp(static_cast<int>(std::lround(options.image_quality * 100.0f)), 1, 100);

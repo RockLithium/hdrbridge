@@ -38,7 +38,8 @@ final class UiStrings {
     add("Stop", "停止"); add("Start all", "全部开始");
     add("Format", "格式"); add("Extract Gain Map", "提取 Gain Map"); add("Photo Frame", "照片边框");
     add("Color gamut", "色域"); add("Gamut", "色域");
-    add("HDR representation", "HDR 模式"); add("Gain Map", "Gain Map"); add("Gain map", "Gain Map");
+    add("HDR representation", "HDR 模式"); add("HDR Presentation", "HDR 模式");
+    add("Gain Map", "Gain Map"); add("Gain map", "Gain Map");
     add("Transfer / representation", "传递函数 / HDR 模式");
     add("TIFF compression", "TIFF 压缩"); add("Compressed", "压缩");
     add("Uncompressed", "不压缩"); add("None", "无");

@@ -89,9 +89,6 @@ static void exifTest(bool le) {
  require(!findEntry(out,sub,0x927c,le),"invalid maker note removed");
  auto x=findEntry(out,sub,0xa002,le),y=findEntry(out,sub,0xa003,le);
  require(x && y && read32(out,x+8,le)==640 && read32(out,y+8,le)==480,"EXIF dimensions");
- auto captions=frame_exif::captions(j);require(captions.first=="EOS R5" && captions.second=="f/2.8 1/125s ISO400","captions");
- auto empty=frame_exif::captions(nlohmann::json::object());require(empty.first.empty() && empty.second.empty(),"empty caption has no units");
- auto partial=frame_exif::captions(nlohmann::json{{"ISO","100"}});require(partial.second=="ISO100","missing fields have no stray units");
 }
 
 static void tiffMetadataTest() {
