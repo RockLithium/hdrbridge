@@ -110,6 +110,25 @@ int main(int argc, char** argv) {
   require(!verify_installer(temp, hello_sha, 5, &error), "detect staged-file corruption");
   std::error_code ec; std::filesystem::remove(temp, ec);
 
+  require(should_check_updates(1'000'000, 0, 0, false), "first launch checks immediately");
+  require(!should_check_updates(1'030'000, 0, 1'000'000, true), "manual check enforces 1-minute cooldown");
+  require(should_check_updates(1'060'000, 0, 1'000'000, true), "manual check allowed after 1 minute");
+  require(!should_check_updates(1'200'000, 1'000'000, 1'000'000, false), "successful auto check waits 1 hour");
+  require(should_check_updates(1'000'000 + kAutoCheckIntervalMs, 1'000'000, 1'000'000, false), "auto check runs after 1 hour");
+  require(!should_check_updates(1'200'000, 500'000, 1'000'000, false), "failed auto check waits 5 minutes");
+  require(should_check_updates(1'000'000 + kFailureRetryIntervalMs, 500'000, 1'000'000, false), "failed auto check retries after 5 minutes");
+  require(delay_until_automatic_check_ms(1'100'000, 1'000'000, 1'000'000) == kAutoCheckIntervalMs - 100'000, "remaining auto check delay");
+  const auto roundtrip = parse_cached_release(serialize_release(*release));
+  require(roundtrip && roundtrip->version == release->version &&
+          roundtrip->installer.sha256 == release->installer.sha256, "cached release round-trip");
+  const VerifiedInstaller api_installer{temp, hash, 1234};
+  require(installer_matches_release(api_installer, *release), "match installer against API release");
+  require(!installer_matches_release({temp, hash, 9999}, *release), "reject size mismatch against API release");
+  require(installer_matches_release(api_installer, *checksum_release),
+          "match installer against SHA256SUMS release without size");
+  require(!installer_matches_release({temp, std::string(64, '0'), 1234}, *checksum_release),
+          "reject digest mismatch against SHA256SUMS release");
+
   std::cout << "updater metadata and integrity tests passed\n";
  } catch (const std::exception& e) {
    std::cerr << "updater tests failed: " << e.what() << '\n';

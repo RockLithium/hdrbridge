@@ -87,6 +87,7 @@ inline constexpr Translation translations[] = {
   {L". Click the version to download.", L"。点击版本号即可下载。"},
   {L"Version ", L"新版本 "}, {L" is available. Download the installer?", L" 已发布，是否下载安装程序？"},
   {L"Update available", L"有可用更新"},
+  {L"Please wait ", L"请等待 "}, {L" seconds before checking again.", L" 秒后再检查。"},
   {L"Update installer ready. Click the version after conversion to install.", L"更新安装程序已就绪。转换完成后点击版本号安装。"},
   {L"HDR Bridge — Preview", L"HDR Bridge — 预览"},
   {L"HDR Bridge — Preview — ", L"HDR Bridge — 预览 — "},

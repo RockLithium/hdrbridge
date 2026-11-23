@@ -23,6 +23,7 @@
 #include <atomic>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cwctype>
 #include <cmath>
 #include <cstring>
@@ -58,7 +59,9 @@ constexpr UINT WM_APP_TASK_OUTPUT = WM_APP + 9;
 constexpr UINT WM_APP_TASK_REORDER = WM_APP + 20;
 constexpr UINT WM_APP_PREVIEW_READY = WM_APP + 21;
 constexpr UINT WM_APP_PREVIEW_ERROR = WM_APP + 22;
+constexpr UINT WM_APP_QUEUE_SELECT_ALL = WM_APP + 23;
 constexpr UINT_PTR kProgressResetTimer = 1;
+constexpr UINT_PTR kUpdateCheckTimer = 2;
 constexpr wchar_t kLayoutRegistryPath[] = L"Software\\HDR Bridge\\Desktop";
 constexpr UINT ID_CONTEXT_OPEN = 4001;
 constexpr UINT ID_CONTEXT_FOLDER = 4002;
@@ -198,6 +201,7 @@ struct UpdateCheckPayload {
   std::optional<hdrbridge::app_update::Release> release;
   std::string error;
   bool manual = false;
+  bool from_network = false;
 };
 struct UpdateDownloadPayload {
   std::optional<hdrbridge::app_update::VerifiedInstaller> path;
@@ -251,8 +255,10 @@ struct AppState {
   HWND version = nullptr;
   bool update_busy = false;
   bool update_manual_requested = false;
+  bool update_prompt_open = false;
   std::optional<hdrbridge::app_update::VerifiedInstaller> ready_installer;
   std::optional<hdrbridge::app_update::Release> pending_release;
+  std::string offered_update_version;
   HWND reset_layout = nullptr;
   HWND reset_settings = nullptr;
   HWND preview_toggle = nullptr;
@@ -307,6 +313,7 @@ struct AppState {
   std::shared_ptr<std::atomic_bool> preview_cancel;
   uint64_t preview_generation = 0;
   bool preview_enabled = false;
+  std::filesystem::path preview_source;
 };
 
 std::wstring widen(const std::string& input);
@@ -1658,6 +1665,66 @@ void write_layout_value(HKEY key, const wchar_t* name, DWORD value) {
                  reinterpret_cast<const BYTE*>(&value), sizeof(value));
 }
 
+std::int64_t now_epoch_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+std::int64_t read_layout_qword(const wchar_t* name) {
+  std::uint64_t value = 0;
+  DWORD size = sizeof(value);
+  if (RegGetValueW(HKEY_CURRENT_USER, kLayoutRegistryPath, name,
+                   RRF_RT_REG_QWORD, nullptr, &value, &size) != ERROR_SUCCESS) {
+    return 0;
+  }
+  return static_cast<std::int64_t>(value);
+}
+
+void write_layout_qword(const wchar_t* name, std::int64_t value) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kLayoutRegistryPath, 0, nullptr, 0,
+                      KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+    return;
+  }
+  const auto raw = static_cast<std::uint64_t>(value);
+  RegSetValueExW(key, name, 0, REG_QWORD,
+                 reinterpret_cast<const BYTE*>(&raw), sizeof(raw));
+  RegCloseKey(key);
+}
+
+std::string read_layout_utf8(const wchar_t* name) {
+  DWORD size = 0;
+  if (RegGetValueW(HKEY_CURRENT_USER, kLayoutRegistryPath, name,
+                   RRF_RT_REG_SZ, nullptr, nullptr, &size) != ERROR_SUCCESS ||
+      size < sizeof(wchar_t)) {
+    return {};
+  }
+  std::wstring value(size / sizeof(wchar_t), L'\0');
+  if (RegGetValueW(HKEY_CURRENT_USER, kLayoutRegistryPath, name,
+                   RRF_RT_REG_SZ, nullptr, value.data(), &size) != ERROR_SUCCESS) {
+    return {};
+  }
+  while (!value.empty() && value.back() == L'\0') value.pop_back();
+  return narrow(value);
+}
+
+void write_layout_utf8(const wchar_t* name, const std::string& utf8) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kLayoutRegistryPath, 0, nullptr, 0,
+                      KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+    return;
+  }
+  if (utf8.empty()) {
+    RegDeleteValueW(key, name);
+  } else {
+    const std::wstring wide = widen(utf8);
+    RegSetValueExW(key, name, 0, REG_SZ,
+                   reinterpret_cast<const BYTE*>(wide.c_str()),
+                   static_cast<DWORD>((wide.size() + 1) * sizeof(wchar_t)));
+  }
+  RegCloseKey(key);
+}
+
 void load_split_layout(AppState* state) {
   if (const auto value = read_layout_value(L"RightPanelWidth")) {
     state->right_panel_width = static_cast<int>(*value);
@@ -1859,12 +1926,16 @@ LRESULT CALLBACK queue_subclass(HWND control, UINT message, WPARAM wparam,
        (GetKeyState(VK_CONTROL) & 0x8000) != 0) ||
       (message == WM_CHAR && wparam == 1);
   if (select_all) {
-    const int count = static_cast<int>(SendMessageW(control, LB_GETCOUNT, 0, 0));
-    for (int index = 0; index < count; ++index) {
-      SendMessageW(control, LB_SETSEL, TRUE, index);
+    if (subclass_id != 1) return 0;
+    if (message == WM_KEYDOWN) {
+      const int count = static_cast<int>(SendMessageW(control, LB_GETCOUNT, 0, 0));
+      for (int index = 0; index < count; ++index) {
+        SendMessageW(control, LB_SETSEL, TRUE, index);
+      }
+      if (count > 0) SendMessageW(control, LB_SETCARETINDEX, 0, FALSE);
+      InvalidateRect(control, nullptr, TRUE);
+      PostMessageW(GetParent(control), WM_APP_QUEUE_SELECT_ALL, 0, 0);
     }
-    if (count > 0) SendMessageW(control, LB_SETCARETINDEX, 0, FALSE);
-    InvalidateRect(control, nullptr, TRUE);
     return 0;
   }
   if (message == WM_KEYDOWN && wparam == VK_DELETE) {
@@ -2415,15 +2486,31 @@ std::wstring control_text(HWND control) {
   return value;
 }
 
+void request_preview(AppState* state, const std::filesystem::path& path);
+
+void clear_preview(AppState* state) {
+  if (state->preview_cancel) state->preview_cancel->store(true);
+  ++state->preview_generation;
+  state->preview_source.clear();
+  if (state->preview_renderer) state->preview_renderer->clear();
+}
+
 void update_output_preview(AppState* state) {
-  if (state->input.empty()) return;
+  const bool editing_task = state->editing_task >= 0 &&
+      static_cast<size_t>(state->editing_task) < state->conversion_tasks.size();
+  const auto& preview_source = editing_task
+      ? state->conversion_tasks[static_cast<size_t>(state->editing_task)].source
+      : state->input;
+  if (preview_source.empty()) return;
   try {
     hdrbridge::desktop::NamingRequest request;
-    request.source = state->input;
+    request.source = preview_source;
     request.selected_folder = state->selected_folder;
     request.use_source_folder = state->use_source_folder;
-    request.base_name = state->inputs.size() > 1u
-        ? state->input.stem().wstring() : control_text(state->base_name);
+    const auto entered_base = control_text(state->base_name);
+    request.base_name = (!editing_task && state->inputs.size() > 1u)
+        ? preview_source.stem().wstring()
+        : (entered_base.empty() ? preview_source.stem().wstring() : entered_base);
     request.suffix = SendMessageW(state->use_suffix, BM_GETCHECK, 0, 0) == BST_CHECKED
         ? control_text(state->name_suffix) : L"";
     request.mode = mode_for_index(static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0)));
@@ -2489,9 +2576,12 @@ TaskOptions capture_task_options(AppState* state) {
     options.frame_font_path = narrow((std::filesystem::path(executable).parent_path() / L"assets" / L"fonts" / L"Roboto-Bold.ttf").wstring());
     options.frame_logo_path = narrow((std::filesystem::path(executable).parent_path() / L"assets" / L"frame-logos").wstring());
   }
+  const bool editing_task = state->editing_task >= 0 &&
+      static_cast<size_t>(state->editing_task) < state->conversion_tasks.size();
   captured.use_source_folder = state->use_source_folder;
   captured.selected_folder = state->selected_folder;
-  captured.base_name = state->inputs.size() > 1u ? L"" : control_text(state->base_name);
+  captured.base_name = (!editing_task && state->inputs.size() > 1u)
+      ? L"" : control_text(state->base_name);
   captured.suffix = control_text(state->name_suffix);
   captured.use_suffix = SendMessageW(state->use_suffix, BM_GETCHECK, 0, 0) == BST_CHECKED;
   captured.collision = options.overwrite ? hdrbridge::desktop::CollisionPolicy::overwrite
@@ -2513,20 +2603,114 @@ std::filesystem::path task_output_path(const std::filesystem::path& source,
   return hdrbridge::desktop::resolve_output_path(request);
 }
 
+size_t selected_source_index(const AppState* state) {
+  if (state->inputs.empty()) return 0;
+  const int caret = static_cast<int>(SendMessageW(state->queue, LB_GETCARETINDEX, 0, 0));
+  if (caret != LB_ERR && static_cast<size_t>(caret) < state->inputs.size() &&
+      SendMessageW(state->queue, LB_GETSEL, caret, 0) > 0) {
+    return static_cast<size_t>(caret);
+  }
+  const int selected_count = static_cast<int>(SendMessageW(state->queue, LB_GETSELCOUNT, 0, 0));
+  if (selected_count > 0) {
+    int first_selected = LB_ERR;
+    if (SendMessageW(state->queue, LB_GETSELITEMS, 1, reinterpret_cast<LPARAM>(&first_selected)) == 1 &&
+        first_selected >= 0 && static_cast<size_t>(first_selected) < state->inputs.size()) {
+      return static_cast<size_t>(first_selected);
+    }
+  }
+  if (caret != LB_ERR && static_cast<size_t>(caret) < state->inputs.size()) {
+    return static_cast<size_t>(caret);
+  }
+  return 0;
+}
+
+bool is_editing_task(const AppState* state) {
+  return state->editing_task >= 0 &&
+      static_cast<size_t>(state->editing_task) < state->conversion_tasks.size();
+}
+
+bool can_queue_or_update(const AppState* state) {
+  if (state->running) return false;
+  if (is_editing_task(state)) return true;
+  if (state->inputs.empty()) return false;
+  const int selected_count = static_cast<int>(SendMessageW(state->queue, LB_GETSELCOUNT, 0, 0));
+  if (selected_count > 0) {
+    std::vector<int> selected(static_cast<size_t>(selected_count));
+    if (SendMessageW(state->queue, LB_GETSELITEMS, selected_count,
+                     reinterpret_cast<LPARAM>(selected.data())) != LB_ERR) {
+      for (const int index : selected) {
+        if (index < 0 || static_cast<size_t>(index) >= state->inputs.size()) continue;
+        if (static_cast<size_t>(index) >= state->input_statuses.size() ||
+            state->input_statuses[static_cast<size_t>(index)].status != QueueStatus::failed) {
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+  return !state->input.empty();
+}
+
+void refresh_convert_button(AppState* state) {
+  EnableWindow(state->convert, can_queue_or_update(state) ? TRUE : FALSE);
+}
+
+void restore_queue_add_ui(AppState* state) {
+  ui::set_text(state->convert, HB_UI("Add to queue"));
+  if (state->inputs.empty()) {
+    state->input.clear();
+    state->output.clear();
+    clear_preview(state);
+    ui::set_text(state->source_path, HB_UI("Drop or add supported HDR still images"));
+    set_inspector_text(state, HB_UI("SOURCE INSPECTOR\r\n\r\nNo image selected"), true);
+    ui::set_text(state->output_path, HB_UI("No output yet"));
+    set_rich_editable_text(state, state->base_name, L"");
+    set_base_name_cue(state, HB_UI("Base name"));
+    refresh_convert_button(state);
+    return;
+  }
+  const auto& selected_source = state->inputs[selected_source_index(state)];
+  state->input = selected_source;
+  const std::wstring source_text = selected_source.wstring();
+  ui::send(state->source_path, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(source_text.c_str()));
+  set_rich_editable_text(state, state->base_name,
+                         state->inputs.size() > 1u ? std::wstring() : selected_source.stem().wstring());
+  set_base_name_cue(state, state->inputs.size() > 1u ? HB_UI("Per-source base names")
+                                                     : HB_UI("Base name"));
+  if (state->use_source_folder) {
+    ui::set_text(state->folder_path, selected_source.parent_path().c_str());
+  } else if (!state->selected_folder.empty()) {
+    ui::set_text(state->folder_path, state->selected_folder.c_str());
+  }
+  refresh_convert_button(state);
+  update_output_preview(state);
+  if (state->preview_enabled && state->preview_source != selected_source) {
+    request_preview(state, selected_source);
+  }
+}
+
+void cancel_task_edit(AppState* state) {
+  if (state->editing_task >= 0) {
+    state->editing_task = -1;
+    restore_queue_add_ui(state);
+  }
+}
+
 void add_or_update_task(AppState* state) {
-  if (state->running || state->input.empty()) return;
+  const bool editing = is_editing_task(state);
+  if (!can_queue_or_update(state)) return;
   try {
     auto options = capture_task_options(state);
-    if (state->editing_task >= 0 &&
-        static_cast<size_t>(state->editing_task) < state->conversion_tasks.size()) {
+    if (editing) {
+      auto& existing = state->conversion_tasks[static_cast<size_t>(state->editing_task)];
       ConversionTask task;
-      task.source = state->input;
+      task.source = existing.source;
       task.options = options;
       task.output = task_output_path(task.source, task.options);
       task.status = QueueStatus::pending;
-      state->conversion_tasks[static_cast<size_t>(state->editing_task)] = std::move(task);
+      existing = std::move(task);
       state->editing_task = -1;
-      ui::set_text(state->convert, HB_UI("Add to queue"));
+      restore_queue_add_ui(state);
     } else {
       const int selected_count = static_cast<int>(SendMessageW(state->queue, LB_GETSELCOUNT, 0, 0));
       std::vector<int> selected(static_cast<size_t>(std::max(selected_count, 0)));
@@ -2543,7 +2727,7 @@ void add_or_update_task(AppState* state) {
         ConversionTask task;
         task.source = state->inputs[static_cast<size_t>(source_index)];
         task.options = options;
-        task.options.base_name.clear();
+        if (selected.size() > 1u || state->inputs.size() > 1u) task.options.base_name.clear();
         task.output = task_output_path(task.source, task.options);
         state->conversion_tasks.push_back(std::move(task));
       }
@@ -2899,6 +3083,7 @@ void request_preview(AppState* state, const std::filesystem::path& path) {
   if (!state->preview_enabled || !state->preview_renderer || path.empty()) return;
   if (state->preview_cancel) state->preview_cancel->store(true);
   const uint64_t generation = ++state->preview_generation;
+  state->preview_source = path;
   const auto cancel = std::make_shared<std::atomic_bool>(false);
   state->preview_cancel = cancel;
   state->preview_renderer->show(true);
@@ -2921,6 +3106,8 @@ void request_preview(AppState* state, const std::filesystem::path& path) {
 }
 
 void load_source(AppState* state, const std::filesystem::path& path) {
+  state->editing_task = -1;
+  ui::set_text(state->convert, HB_UI("Add to queue"));
   try {
     if (!supported_source(path)) {
       throw std::runtime_error("Select a supported HDR HIF/HEIF, UHDR, PNG, TIFF, AVIF, JXL, or JXR asset.");
@@ -2941,6 +3128,11 @@ void load_source(AppState* state, const std::filesystem::path& path) {
       }
     }
     state->input = path;
+    if (cached_index < state->input_statuses.size() &&
+        state->input_statuses[cached_index].status == QueueStatus::failed) {
+      state->input_statuses[cached_index].status = QueueStatus::pending;
+      InvalidateRect(state->queue, nullptr, FALSE);
+    }
     const std::wstring path_text = path.wstring();
     const std::wstring inspector_text = source_summary(info);
     ui::send(state->source_path, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(path_text.c_str()));
@@ -2957,11 +3149,31 @@ void load_source(AppState* state, const std::filesystem::path& path) {
     }
     update_mode_ui(state);
     request_preview(state, path);
-    EnableWindow(state->convert, TRUE);
+    refresh_convert_button(state);
     append_log(state, HB_UI("Source inspected: ") + std::to_wstring(info.width) + L"×" + std::to_wstring(info.height) +
                       L", " + widen(info.chroma) + L", " + std::to_wstring(info.bit_depth) + L"-bit, CICP " +
                       std::to_wstring(info.primaries) + L"/" + std::to_wstring(info.transfer) + L"/" + std::to_wstring(info.matrix));
   } catch (const std::exception& e) {
+    state->input.clear();
+    state->output.clear();
+    clear_preview(state);
+    const auto found = std::find(state->inputs.begin(), state->inputs.end(), path);
+    if (found != state->inputs.end()) {
+      const size_t failed_index = static_cast<size_t>(found - state->inputs.begin());
+      if (failed_index < state->input_statuses.size()) {
+        state->input_statuses[failed_index].status = QueueStatus::failed;
+        InvalidateRect(state->queue, nullptr, FALSE);
+      }
+    }
+    const std::wstring path_text = path.wstring();
+    ui::send(state->source_path, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(path_text.c_str()));
+    ui::set_text(state->output_path, HB_UI("No output yet"));
+    set_base_name_cue(state, state->inputs.size() > 1u ? HB_UI("Per-source base names")
+                                                       : HB_UI("Base name"));
+    if (state->inputs.size() > 1u) {
+      set_rich_editable_text(state, state->base_name, L"");
+    }
+    refresh_convert_button(state);
     ui::set_text(state->status, HB_UI("Inspection failed"));
     ui::message_box(state->window, widen(e.what()).c_str(), L"HDR Bridge", MB_OK | MB_ICONERROR);
   }
@@ -3137,13 +3349,17 @@ void remove_selected_source(AppState* state) {
     ui::send(state->queue, LB_DELETESTRING, index, 0);
   }
   if (state->inputs.empty()) {
+    state->editing_task = -1;
     state->input.clear();
     state->output.clear();
+    clear_preview(state);
     ui::set_text(state->source_path, HB_UI("Drop or add supported HDR still images"));
     set_inspector_text(state, HB_UI("SOURCE INSPECTOR\r\n\r\nNo image selected"), true);
     ui::set_text(state->output_path, HB_UI("No output yet"));
     ui::set_text(state->status, HB_UI("Ready"));
-    EnableWindow(state->convert, FALSE);
+    ui::set_text(state->convert, HB_UI("Add to queue"));
+    set_base_name_cue(state, HB_UI("Base name"));
+    refresh_convert_button(state);
     EnableWindow(state->remove, FALSE);
     EnableWindow(state->clear, FALSE);
     return;
@@ -3152,23 +3368,25 @@ void remove_selected_source(AppState* state) {
   SendMessageW(state->queue, LB_SETSEL, TRUE, next);
   SendMessageW(state->queue, LB_SETCARETINDEX, next, FALSE);
   load_source(state, state->inputs[static_cast<size_t>(next)]);
-  ui::set_text(state->convert, HB_UI("Add to queue"));
 }
 
 void clear_sources(AppState* state) {
   if (state->running) return;
+  state->editing_task = -1;
   state->inputs.clear();
   state->input_infos.clear();
   state->input_statuses.clear();
   state->input.clear();
   state->output.clear();
+  clear_preview(state);
   ui::send(state->queue, LB_RESETCONTENT, 0, 0);
   ui::set_text(state->source_path, HB_UI("Drop or add supported HDR still images"));
   set_inspector_text(state, HB_UI("SOURCE INSPECTOR\r\n\r\nNo image selected"), true);
   ui::set_text(state->output_path, HB_UI("No output yet"));
   ui::set_text(state->status, HB_UI("Ready"));
   ui::set_text(state->convert, HB_UI("Add to queue"));
-  EnableWindow(state->convert, FALSE);
+  set_base_name_cue(state, HB_UI("Base name"));
+  refresh_convert_button(state);
   EnableWindow(state->remove, FALSE);
   EnableWindow(state->clear, FALSE);
 }
@@ -3195,7 +3413,7 @@ void set_running(AppState* state, bool running) {
   EnableWindow(state->queue, TRUE);
   EnableWindow(state->remove, !running && !state->inputs.empty());
   EnableWindow(state->clear, !running && !state->inputs.empty());
-  EnableWindow(state->convert, !running && !state->inputs.empty());
+  refresh_convert_button(state);
   EnableWindow(state->cancel_button, running || !state->conversion_tasks.empty());
   EnableWindow(state->remove_all_tasks, !running && !state->conversion_tasks.empty());
   ui::set_text(state->cancel_button, running ? HB_UI("Stop") : HB_UI("Start all"));
@@ -3310,36 +3528,100 @@ HWND add_control(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD sty
   return control;
 }
 
+void schedule_update_check_timer(AppState* state) {
+  if (!state || !state->window) return;
+  KillTimer(state->window, kUpdateCheckTimer);
+  const auto now_ms = now_epoch_ms();
+  const auto checked_ok = read_layout_qword(L"UpdateCheckedOkMs");
+  const auto attempted = read_layout_qword(L"UpdateAttemptedMs");
+  const auto delay_ms = std::max<std::int64_t>(
+      hdrbridge::app_update::kManualCheckIntervalMs,
+      hdrbridge::app_update::delay_until_automatic_check_ms(now_ms, checked_ok, attempted));
+  const UINT clamped_ms = static_cast<UINT>(
+      std::min<std::int64_t>(delay_ms, 24LL * 60LL * 60LL * 1000LL));
+  SetTimer(state->window, kUpdateCheckTimer, clamped_ms, nullptr);
+}
+
+void set_update_available_indicator(AppState* state, bool available) {
+  const auto label = available
+      ? std::wstring(HDRBRIDGE_VERSION_WIDE) + HB_UI(" • update available")
+      : std::wstring(HDRBRIDGE_VERSION_WIDE);
+  ui::set_text(state->version, label.c_str());
+  RECT client{};
+  GetClientRect(state->window, &client);
+  layout(state, client.right, client.bottom);
+}
+
 void start_update_check(AppState* state, bool manual) {
-  if (state->update_busy) {
+  if (state->update_busy || state->update_prompt_open) {
     if (manual) {
       state->update_manual_requested = true;
       append_log(state, HB_UI("An update check or download is already in progress."));
+    } else {
+      schedule_update_check_timer(state);
     }
     return;
   }
   if (manual && state->ready_installer) {
-    if (state->running) {
-      ui::message_box(state->window, HB_UI("Finish the current conversion before installing."), HB_UI("Update ready"), MB_OK | MB_ICONINFORMATION);
-    } else if (ui::message_box(state->window, HB_UI("The installer was verified. Launch it now?"), HB_UI("Update ready"), MB_YESNO | MB_ICONQUESTION) == IDYES) {
-      std::string error;
-      if (!hdrbridge::app_update::launch_installer(*state->ready_installer, &error)) ui::message_box(state->window, widen(error).c_str(), HB_UI("Update failed"), MB_OK | MB_ICONERROR);
-      else PostMessageW(state->window, WM_CLOSE, 0, 0);
+    std::error_code ec;
+    const bool matches_pending = !state->pending_release ||
+        hdrbridge::app_update::installer_matches_release(
+            *state->ready_installer, *state->pending_release);
+    if (!matches_pending || !std::filesystem::exists(state->ready_installer->path, ec)) {
+      state->ready_installer.reset();
+    } else {
+      if (state->running) {
+        ui::message_box(state->window, HB_UI("Finish the current conversion before installing."), HB_UI("Update ready"), MB_OK | MB_ICONINFORMATION);
+      } else {
+        const auto installer = *state->ready_installer;
+        state->update_prompt_open = true;
+        const int choice = ui::message_box(
+            state->window, HB_UI("The installer was verified. Launch it now?"),
+            HB_UI("Update ready"), MB_YESNO | MB_ICONQUESTION);
+        state->update_prompt_open = false;
+        if (choice == IDYES) {
+          std::string error;
+          if (!hdrbridge::app_update::launch_installer(installer, &error)) {
+            state->ready_installer.reset();
+            ui::message_box(state->window, widen(error).c_str(), HB_UI("Update failed"), MB_OK | MB_ICONERROR);
+          } else {
+            PostMessageW(state->window, WM_CLOSE, 0, 0);
+          }
+        }
+      }
+      return;
     }
-    return;
   }
-  if (manual && state->pending_release) {
+  const auto now_ms = now_epoch_ms();
+  const auto checked_ok = read_layout_qword(L"UpdateCheckedOkMs");
+  const auto attempted = read_layout_qword(L"UpdateAttemptedMs");
+  if (manual && state->pending_release &&
+      !hdrbridge::app_update::should_check_updates(now_ms, checked_ok, attempted, true)) {
     auto result = std::make_unique<UpdateCheckPayload>();
     result->manual = true;
     result->release = state->pending_release;
     if (PostMessageW(state->window, WM_APP_UPDATE_CHECK, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
     return;
   }
+  if (!hdrbridge::app_update::should_check_updates(now_ms, checked_ok, attempted, manual)) {
+    if (manual) {
+      const auto seconds = std::max<std::int64_t>(
+          1, (attempted + hdrbridge::app_update::kManualCheckIntervalMs - now_ms + 999) / 1000);
+      const auto wait_text = HB_UI("Please wait ") + std::to_wstring(seconds) +
+          HB_UI(" seconds before checking again.");
+      append_log(state, wait_text);
+      ui::message_box(state->window, wait_text.c_str(), HB_UI("Update check"), MB_OK | MB_ICONINFORMATION);
+    }
+    schedule_update_check_timer(state);
+    return;
+  }
+  write_layout_qword(L"UpdateAttemptedMs", now_ms);
   state->update_busy = true;
   const HWND window = state->window;
   std::thread([window, manual] {
     auto result = std::make_unique<UpdateCheckPayload>();
     result->manual = manual;
+    result->from_network = true;
     result->release = hdrbridge::app_update::check_latest(&result->error);
     if (PostMessageW(window, WM_APP_UPDATE_CHECK, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
   }).detach();
@@ -3535,6 +3817,27 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     refresh_inspector(state);
     refresh_activity(state);
     update_mode_ui(state);
+    if (const auto cached = hdrbridge::app_update::parse_cached_release(
+            read_layout_utf8(L"UpdateCachedRelease"))) {
+      const auto comparison = hdrbridge::app_update::compare_versions(
+          cached->version, HDRBRIDGE_VERSION_STRING);
+      if (comparison && *comparison > 0) {
+        state->pending_release = *cached;
+        set_update_available_indicator(state, true);
+        if (!hdrbridge::app_update::should_check_updates(
+                now_epoch_ms(), read_layout_qword(L"UpdateCheckedOkMs"),
+                read_layout_qword(L"UpdateAttemptedMs"), false)) {
+          auto cached_offer = std::make_unique<UpdateCheckPayload>();
+          cached_offer->release = state->pending_release;
+          if (PostMessageW(window, WM_APP_UPDATE_CHECK, 0,
+                           reinterpret_cast<LPARAM>(cached_offer.get()))) {
+            cached_offer.release();
+          }
+        }
+      } else {
+        write_layout_utf8(L"UpdateCachedRelease", "");
+      }
+    }
     start_update_check(state, false);
     return 0;
   }
@@ -3635,28 +3938,59 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       result->manual = result->manual || state->update_manual_requested;
       state->update_manual_requested = false;
       if (!result->release) {
+        schedule_update_check_timer(state);
         if (result->manual) ui::message_box(window, widen(result->error).c_str(), HB_UI("Update check"), MB_OK | MB_ICONINFORMATION);
         return 0;
       }
       const auto comparison = hdrbridge::app_update::compare_versions(result->release->version, HDRBRIDGE_VERSION_STRING);
       if (!comparison) {
+        schedule_update_check_timer(state);
         if (result->manual) ui::message_box(window, HB_UI("The release version could not be compared."), HB_UI("Update check"), MB_OK | MB_ICONINFORMATION);
         return 0;
       }
+      if (result->from_network) {
+        write_layout_qword(L"UpdateCheckedOkMs", now_epoch_ms());
+      }
       if (*comparison <= 0) {
+        state->pending_release.reset();
+        state->ready_installer.reset();
+        state->offered_update_version.clear();
+        write_layout_utf8(L"UpdateCachedRelease", "");
+        set_update_available_indicator(state, false);
+        schedule_update_check_timer(state);
         if (result->manual) ui::message_box(window, HB_UI("You have the latest version."), HB_UI("Update check"), MB_OK | MB_ICONINFORMATION);
         return 0;
       }
-      state->pending_release = *result->release;
-      if (!result->manual && state->running) {
-        const auto label = std::wstring(HDRBRIDGE_VERSION_WIDE) + HB_UI(" • update available");
-        ui::set_text(state->version, label.c_str());
-        append_log(state, HB_UI("Update available: ") + widen(result->release->version) + HB_UI(". Click the version to download."));
-        RECT client{}; GetClientRect(window, &client); layout(state, client.right, client.bottom);
-        return 0;
+      if (state->ready_installer &&
+          !hdrbridge::app_update::installer_matches_release(
+              *state->ready_installer, *result->release)) {
+        state->ready_installer.reset();
+        state->offered_update_version.clear();
       }
+      state->pending_release = *result->release;
+      if (result->from_network) {
+        write_layout_utf8(L"UpdateCachedRelease",
+                          hdrbridge::app_update::serialize_release(*result->release));
+      }
+      set_update_available_indicator(state, true);
+      schedule_update_check_timer(state);
+      if (!result->manual) {
+        if (state->offered_update_version == result->release->version) return 0;
+        state->offered_update_version = result->release->version;
+        if (state->running) {
+          append_log(state, HB_UI("Update available: ") + widen(result->release->version) + HB_UI(". Click the version to download."));
+          return 0;
+        }
+      } else {
+        state->offered_update_version = result->release->version;
+      }
+      if (state->update_prompt_open) return 0;
       const auto prompt = HB_UI("Version ") + widen(result->release->version) + HB_UI(" is available. Download the installer?");
-      if (ui::message_box(window, prompt.c_str(), HB_UI("Update available"), MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+      state->update_prompt_open = true;
+      const int download_choice = ui::message_box(window, prompt.c_str(), HB_UI("Update available"), MB_YESNO | MB_ICONQUESTION);
+      state->update_prompt_open = false;
+      if (download_choice != IDYES) return 0;
+      state->ready_installer.reset();
       state->update_busy = true;
       auto release = std::move(*result->release);
       std::thread([window, release = std::move(release)] {
@@ -3671,18 +4005,30 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       state->update_busy = false;
       state->update_manual_requested = false;
       if (!result->path) {
+        write_layout_qword(L"UpdateCheckedOkMs", 0);
+        write_layout_qword(L"UpdateAttemptedMs", now_epoch_ms());
+        schedule_update_check_timer(state);
         ui::message_box(window, widen(result->error).c_str(), HB_UI("Update download failed"), MB_OK | MB_ICONERROR);
         return 0;
       }
-      state->ready_installer = std::move(result->path);
+      schedule_update_check_timer(state);
+      const auto installer = *result->path;
+      state->ready_installer = installer;
       if (state->running) {
         append_log(state, HB_UI("Update installer ready. Click the version after conversion to install."));
         return 0;
       }
-      if (ui::message_box(window, HB_UI("The installer was verified. Launch it now?"), HB_UI("Update ready"), MB_YESNO | MB_ICONQUESTION) == IDYES) {
+      state->update_prompt_open = true;
+      const int launch_choice = ui::message_box(window, HB_UI("The installer was verified. Launch it now?"), HB_UI("Update ready"), MB_YESNO | MB_ICONQUESTION);
+      state->update_prompt_open = false;
+      if (launch_choice == IDYES) {
         std::string error;
-        if (!hdrbridge::app_update::launch_installer(*state->ready_installer, &error)) ui::message_box(window, widen(error).c_str(), HB_UI("Update failed"), MB_OK | MB_ICONERROR);
-        else PostMessageW(window, WM_CLOSE, 0, 0);
+        if (!hdrbridge::app_update::launch_installer(installer, &error)) {
+          state->ready_installer.reset();
+          ui::message_box(window, widen(error).c_str(), HB_UI("Update failed"), MB_OK | MB_ICONERROR);
+        } else {
+          PostMessageW(window, WM_CLOSE, 0, 0);
+        }
       }
       return 0;
     }
@@ -3694,6 +4040,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         auto task = std::move(state->conversion_tasks[from]);
         state->conversion_tasks.erase(state->conversion_tasks.begin() + from);
         state->conversion_tasks.insert(state->conversion_tasks.begin() + to, std::move(task));
+        if (state->editing_task >= 0) {
+          const auto editing = static_cast<size_t>(state->editing_task);
+          if (editing == from) state->editing_task = static_cast<int>(to);
+          else if (from < editing && editing <= to) --state->editing_task;
+          else if (to <= editing && editing < from) ++state->editing_task;
+        }
         rebuild_task_list(state);
         SendMessageW(state->tasks, LB_SETCURSEL, to, 0);
       }
@@ -3768,10 +4120,22 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                                               point.x, point.y, 0, window, nullptr);
           DestroyMenu(menu);
           if (command == ID_TASK_REMOVE_COMPLETED) {
+            if (state->editing_task >= 0 &&
+                static_cast<size_t>(state->editing_task) < state->conversion_tasks.size()) {
+              const auto editing = static_cast<size_t>(state->editing_task);
+              if (state->conversion_tasks[editing].status == QueueStatus::success) {
+                cancel_task_edit(state);
+              } else {
+                const auto removed_before = static_cast<int>(std::count_if(
+                    state->conversion_tasks.begin(),
+                    state->conversion_tasks.begin() + static_cast<std::ptrdiff_t>(editing),
+                    [](const ConversionTask& task) { return task.status == QueueStatus::success; }));
+                state->editing_task -= removed_before;
+              }
+            }
             std::erase_if(state->conversion_tasks, [](const ConversionTask& task) {
               return task.status == QueueStatus::success;
             });
-            state->editing_task = -1;
             rebuild_task_list(state);
             EnableWindow(state->cancel_button, !state->conversion_tasks.empty());
             EnableWindow(state->remove_all_tasks, !state->conversion_tasks.empty());
@@ -4072,6 +4436,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           const int selected = static_cast<int>(SendMessageW(state->tasks, LB_GETCURSEL, 0, 0));
           if (selected != LB_ERR && static_cast<size_t>(selected) < state->conversion_tasks.size()) {
             state->conversion_tasks.erase(state->conversion_tasks.begin() + selected);
+            if (selected == state->editing_task) cancel_task_edit(state);
+            else if (selected < state->editing_task) --state->editing_task;
             rebuild_task_list(state);
             EnableWindow(state->cancel_button, !state->conversion_tasks.empty());
             EnableWindow(state->remove_all_tasks, !state->conversion_tasks.empty());
@@ -4085,6 +4451,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             const auto& task = state->conversion_tasks[static_cast<size_t>(selected)];
             state->editing_task = selected;
             state->input = task.source;
+            const std::wstring task_source_text = task.source.wstring();
+            ui::send(state->source_path, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(task_source_text.c_str()));
             const int format_index = index_for_mode(task.options.mode);
             SendMessageW(state->format, CB_SETCURSEL, format_index, 0);
             SendMessageW(state->lossless, BM_SETCHECK,
@@ -4149,8 +4517,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
               }
             }
             set_rich_editable_text(state, state->base_name, task.options.base_name);
+            set_base_name_cue(state, HB_UI("Base name"));
             set_rich_editable_text(state, state->name_suffix, task.options.suffix);
             SendMessageW(state->use_suffix, BM_SETCHECK, task.options.use_suffix ? BST_CHECKED : BST_UNCHECKED, 0);
+            EnableWindow(state->convert, TRUE);
             update_output_preview(state);
           }
           break;
@@ -4204,16 +4574,21 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             update_mode_ui(state);
           }
           break;
-        case IDC_SOURCE_FOLDER:
+        case IDC_SOURCE_FOLDER: {
           state->use_source_folder =
               SendMessageW(state->source_folder, BM_GETCHECK, 0, 0) == BST_CHECKED;
-          if (state->use_source_folder && !state->input.empty()) {
-            ui::set_text(state->folder_path, state->input.parent_path().c_str());
+          const auto& folder_source = (state->editing_task >= 0 &&
+              static_cast<size_t>(state->editing_task) < state->conversion_tasks.size())
+              ? state->conversion_tasks[static_cast<size_t>(state->editing_task)].source
+              : state->input;
+          if (state->use_source_folder && !folder_source.empty()) {
+            ui::set_text(state->folder_path, folder_source.parent_path().c_str());
           } else if (!state->use_source_folder && !state->selected_folder.empty()) {
             ui::set_text(state->folder_path, state->selected_folder.c_str());
           }
           update_output_preview(state);
           break;
+        }
         case IDC_CHOOSE_FOLDER: choose_output_folder(state); break;
         case IDC_BASE_NAME:
         case IDC_NAME_SUFFIX:
@@ -4237,7 +4612,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         case IDC_REMOVE_ALL_TASKS:
           if (!state->running) {
             state->conversion_tasks.clear();
-            state->editing_task = -1;
+            cancel_task_edit(state);
             rebuild_task_list(state);
             EnableWindow(state->cancel_button, FALSE);
             EnableWindow(state->remove_all_tasks, FALSE);
@@ -4269,6 +4644,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           reinterpret_cast<PreviewErrorPayload*>(lparam));
       if (payload->generation == state->preview_generation &&
           state->preview_renderer && state->preview_enabled) {
+        state->preview_source.clear();
         state->preview_renderer->clear();
         append_log(state, HB_UI("PREVIEW  ") + ui::mark_known(payload->error));
       }
@@ -4415,6 +4791,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         ShowWindow(state->progress, SW_HIDE);
         return 0;
       }
+      if (wparam == kUpdateCheckTimer) {
+        KillTimer(window, kUpdateCheckTimer);
+        start_update_check(state, false);
+        return 0;
+      }
       break;
     case WM_SETTINGCHANGE:
       apply_theme(state);
@@ -4439,6 +4820,27 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     case WM_APP_OPEN_SOURCE: {
       std::unique_ptr<std::filesystem::path> path(reinterpret_cast<std::filesystem::path*>(lparam));
       add_sources(state, {*path});
+      return 0;
+    }
+    case WM_APP_QUEUE_SELECT_ALL: {
+      refresh_convert_button(state);
+      if (state->input.empty() && !state->inputs.empty()) {
+        std::optional<size_t> candidate;
+        for (size_t index = 0; index < state->inputs.size(); ++index) {
+          const bool failed = index < state->input_statuses.size() &&
+              state->input_statuses[index].status == QueueStatus::failed;
+          if (failed) continue;
+          if (index < state->input_infos.size() && state->input_infos[index]) {
+            candidate = index;
+            break;
+          }
+          if (!candidate) candidate = index;
+        }
+        if (candidate) {
+          SendMessageW(state->queue, LB_SETCARETINDEX, *candidate, FALSE);
+          load_source(state, state->inputs[*candidate]);
+        }
+      }
       return 0;
     }
     case WM_CLOSE:

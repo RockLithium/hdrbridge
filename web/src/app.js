@@ -114,6 +114,7 @@ const state = {
   tiffCompression: "compressed",
   encodingValues: { uhdr: 95, png: 4, jxl: 90, jxr: 95, avif: 95, tiff: 6 },
   requestId: 0,
+  pendingConversion: null,
   outputUrl: null,
   outputName: "",
   worker: null,
@@ -475,6 +476,21 @@ function showInspector(info) {
   elements.inspectMetadata.textContent = metadata.length ? metadata.join(" · ") : tr("noneReported");
 }
 
+function outputFileName({ fileName, format, transfer, outputRepresentation }) {
+  const stem = fileName.replace(/\.[^.]+$/, "");
+  const suffixes = {
+    uhdr: "_ultrahdr.jpg",
+    png: transfer === 18 ? "_hdr-hlg.png" : "_hdr-pq16.png",
+    jxl: outputRepresentation === "gainmap" ? "_gainmap.jxl" :
+      transfer === 18 ? "_hlg16.jxl" : "_pq16.jxl",
+    jxr: "_scrgb-fp16.jxr",
+    avif: outputRepresentation === "gainmap" ? "_gainmap.avif" :
+      transfer === 18 ? "_direct-hlg10.avif" : "_direct-pq10.avif",
+    tiff: "_hdr-pq16.tiff",
+  };
+  return `${stem}${suffixes[format]}`;
+}
+
 function handleWorkerMessage({ data }) {
   if (data.requestId !== state.requestId) return;
   if (data.type === "core-ready") {
@@ -483,6 +499,7 @@ function handleWorkerMessage({ data }) {
     return;
   }
   if (data.type === "error") {
+    state.pendingConversion = null;
     setBusy(false);
     setStatus(data.message, "error");
     if (data.stage === "core") offerCompatibilityMode();
@@ -497,6 +514,8 @@ function handleWorkerMessage({ data }) {
     return;
   }
   if (data.type === "converted") {
+    const pending = state.pendingConversion;
+    state.pendingConversion = null;
     setBusy(false);
     const blob = new Blob([data.buffer], { type: data.mime });
     state.outputUrl = URL.createObjectURL(blob);
@@ -516,21 +535,17 @@ function handleWorkerMessage({ data }) {
       state.previewState = "unavailable";
       renderPreviewPlaceholder();
     }
-    const stem = state.file.name.replace(/\.[^.]+$/, "");
-    const suffixes = {
-      uhdr: "_ultrahdr.jpg",
-      png: state.transfer === 18 ? "_hdr-hlg.png" : "_hdr-pq16.png",
-      jxl: state.outputRepresentation === "gainmap" ? "_gainmap.jxl" :
-        state.transfer === 18 ? "_hlg16.jxl" : "_pq16.jxl",
-      jxr: "_scrgb-fp16.jxr",
-      avif: state.outputRepresentation === "gainmap" ? "_gainmap.avif" :
-        state.transfer === 18 ? "_direct-hlg10.avif" : "_direct-pq10.avif",
-      tiff: "_hdr-pq16.tiff",
-    };
-    state.outputName = `${stem}${suffixes[data.format]}`;
+    state.outputName = pending?.requestId === data.requestId
+      ? pending.outputName
+      : outputFileName({
+          fileName: state.file.name,
+          format: data.format,
+          transfer: state.transfer,
+          outputRepresentation: state.outputRepresentation,
+        });
     elements.download.disabled = false;
     const peak = data.info.verification?.hdrDiagnostics?.maxChannelNits;
-    const conversionSummary = `${data.info.verification?.pixelFormat || state.format.toUpperCase()} · ${humanBytes(blob.size)}${Number.isFinite(peak) ? ` · ${tr("peakNits").replace("{value}", peak.toFixed(1))}` : ""}`;
+    const conversionSummary = `${data.info.verification?.pixelFormat || data.format.toUpperCase()} · ${humanBytes(blob.size)}${Number.isFinite(peak) ? ` · ${tr("peakNits").replace("{value}", peak.toFixed(1))}` : ""}`;
     setTranslatedStatus("converted", "success", { value: conversionSummary });
     elements.convert.textContent = tr("complete");
     elements.convert.className = "main-btn process-button is-complete";
@@ -541,6 +556,7 @@ function handleWorkerMessage({ data }) {
 async function convert() {
   if (state.busy) {
     state.requestId += 1;
+    state.pendingConversion = null;
     if (state.worker) state.worker.terminate();
     state.worker = null;
     state.coreReady = false;
@@ -568,6 +584,8 @@ async function convert() {
     gainResolution: state.gainResolution,
     gainChannels: state.gainChannels,
   };
+  const pendingOutputName = outputFileName(options);
+  state.pendingConversion = { requestId, outputName: pendingOutputName };
   await runForCurrentRequest(file, requestId, (id) => id === state.requestId, (buffer) => {
     postCodecMessage({
       type: "convert",
@@ -576,6 +594,7 @@ async function convert() {
       ...options,
     }, [buffer]);
   }, (error) => {
+    if (state.pendingConversion?.requestId === requestId) state.pendingConversion = null;
     setBusy(false);
     setStatus(error.message, "error");
   });

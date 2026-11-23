@@ -342,6 +342,56 @@ std::optional<Release> parse_latest_release(std::string_view text, std::string* 
   }
 }
 
+std::string serialize_release(const Release& release) {
+  return json{
+      {"tag_name", release.tag_name},
+      {"version", release.version},
+      {"html_url", release.html_url},
+      {"assets", json::array({json{
+          {"name", release.installer.name},
+          {"browser_download_url", release.installer.url},
+          {"size", release.installer.size},
+          {"digest", "sha256:" + release.installer.sha256},
+      }})},
+  }.dump();
+}
+
+std::optional<Release> parse_cached_release(std::string_view text) {
+  try {
+    const auto data = json::parse(text);
+    if (!data.is_object()) return std::nullopt;
+    const auto tag = data.at("tag_name").get<std::string>();
+    if (!compare_versions(tag, tag)) return std::nullopt;
+    std::string version = tag;
+    if (!version.empty() && (version.front() == 'v' || version.front() == 'V')) version.erase(version.begin());
+    const auto html = data.at("html_url").get<std::string>();
+    if (html != "https://github.com/RockLithium/hdrbridge/releases/tag/" + tag) return std::nullopt;
+    const auto expected = expected_installer_name(version);
+    if (!expected) return std::nullopt;
+    const auto& assets = data.at("assets");
+    if (!assets.is_array() || assets.size() != 1u) return std::nullopt;
+    const auto& item = assets.at(0);
+    if (!item.is_object() || item.value("name", std::string{}) != *expected) return std::nullopt;
+    Asset asset;
+    asset.name = *expected;
+    asset.url = item.at("browser_download_url").get<std::string>();
+    asset.size = item.value("size", std::uint64_t{0});
+    const std::string prefix = "https://github.com/RockLithium/hdrbridge/releases/download/" + tag + "/";
+    if (!asset.url.starts_with(prefix) || asset.url.substr(prefix.size()) != asset.name ||
+        asset.size > kMaxInstallerBytes) {
+      return std::nullopt;
+    }
+    const std::string digest = item.at("digest").get<std::string>();
+    if (!digest.starts_with("sha256:") || !is_hex_sha256(std::string_view(digest).substr(7))) {
+      return std::nullopt;
+    }
+    asset.sha256 = lowercase(digest.substr(7));
+    return Release{tag, version, html, std::move(asset)};
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 std::optional<Release> check_latest(std::string* error) {
   std::string api_error;
   const auto response = get_https(kApiHost, kRepoPath, kMaxManifestBytes, &api_error);
@@ -497,6 +547,37 @@ bool relaunch_from_explorer_if_elevated() {
   const HRESULT result = shell->ShellExecute(executable, empty, empty, empty, show);
   SysFreeString(executable);
   return SUCCEEDED(result);
+}
+
+bool should_check_updates(std::int64_t now_ms, std::int64_t last_success_ms,
+                          std::int64_t last_attempt_ms, bool manual) {
+  if (last_attempt_ms > 0 && now_ms < last_attempt_ms) return true;
+  if (last_attempt_ms > 0 && now_ms - last_attempt_ms < kManualCheckIntervalMs) return false;
+  if (manual) return true;
+  if (last_attempt_ms > last_success_ms) {
+    return now_ms >= last_attempt_ms && now_ms - last_attempt_ms >= kFailureRetryIntervalMs;
+  }
+  if (last_success_ms == 0) return true;
+  return now_ms >= last_success_ms && now_ms - last_success_ms >= kAutoCheckIntervalMs;
+}
+
+std::int64_t delay_until_automatic_check_ms(std::int64_t now_ms, std::int64_t last_success_ms,
+                                            std::int64_t last_attempt_ms) {
+  if (last_attempt_ms > 0 && now_ms < last_attempt_ms) return 0;
+  if (last_attempt_ms > 0 && now_ms - last_attempt_ms < kManualCheckIntervalMs) {
+    return kManualCheckIntervalMs - (now_ms - last_attempt_ms);
+  }
+  const std::int64_t base = last_attempt_ms > last_success_ms ? last_attempt_ms : last_success_ms;
+  const std::int64_t interval =
+      last_attempt_ms > last_success_ms ? kFailureRetryIntervalMs : kAutoCheckIntervalMs;
+  if (base == 0) return 0;
+  const std::int64_t elapsed = now_ms - base;
+  return elapsed >= interval ? 0 : interval - elapsed;
+}
+
+bool installer_matches_release(const VerifiedInstaller& installer, const Release& release) {
+  return installer.sha256 == release.installer.sha256 &&
+      (release.installer.size == 0 || installer.size == release.installer.size);
 }
 
 }  // namespace hdrbridge::app_update

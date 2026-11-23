@@ -34,6 +34,8 @@ using ProgressCallback = std::function<void(std::uint64_t received, std::uint64_
 // These synchronous operations should be called from a worker thread. They never install or launch.
 std::optional<Release> parse_latest_release(std::string_view json, std::string* error = nullptr);
 std::optional<Release> parse_release_checksums(std::string_view checksums, std::string* error = nullptr);
+std::string serialize_release(const Release& release);
+std::optional<Release> parse_cached_release(std::string_view json);
 std::optional<Release> check_latest(std::string* error = nullptr);
 std::optional<VerifiedInstaller> download_installer(
     const Release& release, ProgressCallback progress = {}, std::string* error = nullptr);
@@ -47,5 +49,15 @@ bool relaunch_from_explorer_if_elevated();
 // Stable numeric versions only. Returns -1, 0, or 1; invalid input returns nullopt.
 std::optional<int> compare_versions(std::string_view lhs, std::string_view rhs);
 std::optional<std::string> parse_sha256_sums(std::string_view contents, std::string_view asset_name);
+
+inline constexpr std::int64_t kAutoCheckIntervalMs = 60LL * 60LL * 1000LL;
+inline constexpr std::int64_t kFailureRetryIntervalMs = 5LL * 60LL * 1000LL;
+inline constexpr std::int64_t kManualCheckIntervalMs = 60LL * 1000LL;
+
+bool should_check_updates(std::int64_t now_ms, std::int64_t last_success_ms,
+                          std::int64_t last_attempt_ms, bool manual);
+std::int64_t delay_until_automatic_check_ms(std::int64_t now_ms, std::int64_t last_success_ms,
+                                            std::int64_t last_attempt_ms);
+bool installer_matches_release(const VerifiedInstaller& installer, const Release& release);
 
 }  // namespace hdrbridge::app_update
