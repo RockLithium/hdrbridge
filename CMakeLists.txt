@@ -93,7 +93,7 @@ target_include_directories(hdrbridge PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/genera
 target_compile_definitions(hdrbridge PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(hdrbridge PRIVATE /W4 /permissive- /utf-8)
 target_link_options(hdrbridge PRIVATE /MANIFEST:NO)
-target_link_libraries(hdrbridge PRIVATE hdrbridge_core comctl32 comdlg32 shell32 dwmapi uxtheme d3d11 dxgi d3dcompiler winhttp bcrypt)
+target_link_libraries(hdrbridge PRIVATE hdrbridge_core comctl32 comdlg32 shell32 dwmapi uxtheme d3d11 dxgi d3dcompiler winhttp bcrypt oleaut32)
 add_custom_command(TARGET hdrbridge POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts" "$<TARGET_FILE_DIR:hdrbridge>/assets/fonts"
@@ -145,7 +145,7 @@ if(BUILD_TESTING)
   add_executable(hdrbridge-update-tests tests/update-tests.cpp desktop/src/app_update.cpp)
   target_compile_definitions(hdrbridge-update-tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
   target_compile_options(hdrbridge-update-tests PRIVATE /W4 /permissive- /utf-8)
-  target_link_libraries(hdrbridge-update-tests PRIVATE nlohmann_json::nlohmann_json winhttp bcrypt shell32)
+  target_link_libraries(hdrbridge-update-tests PRIVATE nlohmann_json::nlohmann_json winhttp bcrypt shell32 ole32 oleaut32)
   add_test(NAME update-metadata-and-integrity COMMAND hdrbridge-update-tests)
   add_executable(hdrbridge-uhdr-limits-tests tests/uhdr-limits-tests.cpp)
   target_include_directories(hdrbridge-uhdr-limits-tests PRIVATE

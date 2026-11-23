@@ -1,6 +1,7 @@
 #include "hdrbridge_core.h"
 
 #include <atomic>
+#include <charconv>
 #include <exception>
 #include <iostream>
 #include <string>
@@ -10,7 +11,8 @@ void usage() {
   std::cerr << "HDR Bridge CLI\n"
             << "  hdrbridge-cli inspect <HDR input>\n"
             << "  hdrbridge-cli convert <HDR input> <output> [--mode=jxl-pq16|jxr-scrgb-fp16|ultrahdr|png-pq16|tiff-pq16|avif-pq10|gainmap-extract]\n"
-            << "      [--gamut=rec2020|p3] [--transfer=pq|hlg] [--target-peak=auto|203..10000] [--quality=1..100]\n"
+            << "      [--gamut=rec2020|p3] [--transfer=pq|hlg] [--quality=1..100]\n"
+            << "      [--representation=direct|gainmap] [--effort=1..10 (JPEG XL)] [--avif-speed=0..9]\n"
             << "      [--base-quality=0..100] [--gainmap-quality=0..100] [--gainmap-scale=1|2|4]\n"
             << "      [--single-channel-gainmap|--rgb-gainmap] [--no-icc] [--png-icc-name=<description>] [--png-compression=1..9]\n"
             << "      [--tiff-compression=1..9|--tiff-uncompressed] [--diagnostic-icc-only] [--lossy] [--overwrite]\n"
@@ -48,6 +50,7 @@ int main(int argc, char** argv) {
     }
     if (command == "convert" && argc >= 4) {
       hdrbridge::ConversionOptions options;
+      bool gamut_explicit = false;
       for (int i = 4; i < argc; ++i) {
         const std::string flag = argv[i];
         if (flag == "--lossy") options.lossless = false;
@@ -61,14 +64,32 @@ int main(int argc, char** argv) {
         else if (flag.rfind("--frame-caption1=", 0) == 0) options.frame_caption1 = flag.substr(17);
         else if (flag.rfind("--frame-caption2=", 0) == 0) options.frame_caption2 = flag.substr(17);
         else if (flag.rfind("--gainmap-format=", 0) == 0) options.gainmap_export_format = flag.substr(17);
-        else if (flag.rfind("--gamut=", 0) == 0) options.output_gamut = flag.substr(8);
+        else if (flag.rfind("--gamut=", 0) == 0) {
+          options.output_gamut = flag.substr(8);
+          gamut_explicit = true;
+          if (options.output_gamut != "rec2020" && options.output_gamut != "p3") {
+            throw std::runtime_error("--gamut expects rec2020 or p3");
+          }
+        }
         else if (flag.rfind("--transfer=", 0) == 0) options.output_transfer = flag.substr(11);
         else if (flag.rfind("--representation=", 0) == 0) options.output_representation = flag.substr(17);
-        else if (flag.rfind("--target-peak=", 0) == 0) {
-          const auto value = flag.substr(14);
-          options.target_peak_nits = value == "auto" ? 0.0f : std::stof(value);
-        }
         else if (flag.rfind("--quality=", 0) == 0) options.image_quality = std::stoi(flag.substr(10)) / 100.0f;
+        else if (flag.rfind("--effort=", 0) == 0) {
+          const char* end = flag.data() + flag.size();
+          const auto parsed = std::from_chars(flag.data() + 9, end, options.effort);
+          if (parsed.ec != std::errc{} || parsed.ptr != end ||
+              options.effort < 1 || options.effort > 10) {
+            throw std::runtime_error("--effort expects an integer from 1 to 10");
+          }
+        }
+        else if (flag.rfind("--avif-speed=", 0) == 0) {
+          const char* end = flag.data() + flag.size();
+          const auto parsed = std::from_chars(flag.data() + 13, end, options.avif_speed);
+          if (parsed.ec != std::errc{} || parsed.ptr != end ||
+              options.avif_speed < 0 || options.avif_speed > 9) {
+            throw std::runtime_error("--avif-speed expects an integer from 0 to 9");
+          }
+        }
         else if (flag.rfind("--base-quality=", 0) == 0) options.base_quality = std::stoi(flag.substr(15));
         else if (flag.rfind("--gainmap-quality=", 0) == 0) options.gainmap_quality = std::stoi(flag.substr(18));
         else if (flag.rfind("--gainmap-scale=", 0) == 0) options.gainmap_scale = std::stoi(flag.substr(16));
@@ -84,6 +105,12 @@ int main(int argc, char** argv) {
         else if (flag == "--diagnostic-windows-compatible-icc")
           options.diagnostic_windows_compatible_icc = true;
         else throw std::runtime_error("unknown option: " + flag);
+      }
+      const bool p3_default = options.mode == "ultrahdr" ||
+          (options.mode == "photo-frame" && options.frame_format == "jpeg") ||
+          options.output_representation == "gainmap";
+      if (!gamut_explicit) {
+        options.output_gamut = p3_default ? "p3" : "rec2020";
       }
       std::atomic_bool cancel{false};
       const auto result = hdrbridge::convert(argv[2], argv[3], options,

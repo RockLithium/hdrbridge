@@ -12,7 +12,7 @@ Non-HDR files are skipped. A decode or conversion error affects only that task. 
 
 ## Output
 
-Output representations and controls are listed in [Output formats](../docs/OUTPUT_FORMATS.md); supported inputs are shared with the core library. Output controls include gamut, PQ/HLG or gain-map representation, peak, gain-map size/channels, quality/compression, EXIF/XMP and filename suffix where applicable.
+Output representations and controls are listed in [Output formats](../docs/OUTPUT_FORMATS.md); supported inputs are shared with the core library. Output controls include gamut, PQ/HLG or gain-map representation, gain-map size/channels, quality/compression, EXIF/XMP and filename suffix where applicable.
 
 Photo Frame adds a blurred border, camera logo and caption to an HDR image and exports Ultra HDR JPEG. Captions use source EXIF and fill missing camera fields from XMP, without copying source EXIF or XMP to the output. Its Lossless, EXIF and XMP controls are fixed off.
 

@@ -19,7 +19,7 @@ All platforms share the C++ core and support these principal HDR input families:
 
 Available outputs:
 
-- Ultra HDR JPEG (Faithful/Auto);
+- Ultra HDR JPEG;
 - 16-bit HDR PNG in PQ or HLG;
 - 16-bit PQ HDR TIFF with optional lossless Deflate compression;
 - 16-bit JPEG XL in PQ or HLG;

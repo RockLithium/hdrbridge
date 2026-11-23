@@ -40,9 +40,6 @@ final class UiStrings {
     add("Color gamut", "色域"); add("Gamut", "色域");
     add("HDR representation", "HDR 模式"); add("Gain Map", "Gain Map"); add("Gain map", "Gain Map");
     add("Transfer / representation", "传递函数 / HDR 模式");
-    add("Target peak", "目标峰值亮度"); add("Faithful / Auto", "忠实还原 / 自动");
-    add("1000 nits", "1000 nits"); add("2000 nits", "2000 nits");
-    add("4000 nits", "4000 nits"); add("10000 nits", "10000 nits");
     add("TIFF compression", "TIFF 压缩"); add("Compressed", "压缩");
     add("Uncompressed", "不压缩"); add("None", "无");
     add("Gain map size", "Gain Map 尺寸"); add("Gain map resolution", "Gain Map 分辨率");
@@ -109,7 +106,8 @@ final class UiStrings {
     add("App updates", "应用更新"); add("Download", "下载"); add("Install", "安装");
     add("Retry", "重试"); add("Cancel installation", "取消安装");
     add("Check for updates", "检查更新"); add("update available", "有可用更新");
-    add("check for updates", "检查更新"); add("Version %s is available.", "发现新版本 %s。");
+    add("check for updates", "检查更新"); add("Later", "稍后");
+    add("Version %s is available. Download the update?", "发现新版本 %s。要下载更新吗？");
     add("Downloading update: %s%%", "正在下载更新：%s%%");
     add("Wait for conversion to finish before installing.", "请等待转换完成后再安装。");
     add("Wait for inspection to finish before installing.", "请等待检查完成后再安装。");

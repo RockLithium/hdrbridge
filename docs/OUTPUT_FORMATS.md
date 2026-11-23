@@ -4,11 +4,11 @@ Compression controls affect encoding size and quality. Gamut and transfer settin
 
 ## Ultra HDR JPEG
 
-An SDR JPEG base plus ISO gain map for sharing, Web and mobile use. Faithful/Auto measures the reconstructed source peak. Gain-map resolution is 1/4, 1/2 or full (default); channels are mono or true per-channel RGB (default). The quality slider controls both JPEG encoders and defaults to 95. Ordinary JPEG readers display the SDR base. Ultra HDR is not a lossless HDR master format.
+An SDR JPEG base plus ISO gain map for sharing, Web and mobile use. The target peak is estimated automatically from the reconstructed source. Gain-map resolution is 1/4, 1/2 or full (default); channels are mono or true per-channel RGB (default). The quality slider controls both JPEG encoders and defaults to 95. Ordinary JPEG readers display the SDR base. Ultra HDR is not a lossless HDR master format.
 
 ## HDR PNG
 
-RGB16 with Rec.2020/PQ by default, optional Display P3/PQ, Rec.2020/HLG or Display P3/HLG. PQ PNG writes cICP `9/16/0/1` and the production `Rec.2100 PQ` ICC; Display P3/PQ uses the corresponding primaries. HLG writes cICP `9/18/0/1` or `12/18/0/1` without a PQ ICC. PNG Deflate is lossless for the target RGB16 buffer.
+RGB16 (or RGBA16 with alpha) with Rec.2020/PQ by default, optional Display P3/PQ, Rec.2020/HLG or Display P3/HLG. PQ PNG writes cICP `9/16/0/1` and the production `Rec.2100 PQ` ICC; Display P3/PQ uses the corresponding primaries. HLG writes cICP `9/18/0/1` or `12/18/0/1` without a PQ ICC. PNG Deflate is lossless for the target RGB16/RGBA16 buffer.
 
 ## Direct HDR TIFF
 
@@ -16,15 +16,15 @@ RGB16 PQ with Rec.2020 or Display P3, Deflate compression and normalized metadat
 
 ## JPEG XL
 
-RGB16 PQ or HLG for edit/master use. Both transfers support Rec.2020 and Display P3. Native structured color encoding is used. Lossless mode is verified against the RGB16 encoder input, while quality modes permit lossy JXL compression. ISO gain-map output is also available with Rec.709, Display P3 or Rec.2020 SDR bases. Gain-map JPEG XL uses a true RGB map only and defaults to full resolution; mono output is intentionally unavailable.
+RGB16 PQ or HLG for edit/master use. Both transfers support Rec.2020 and Display P3. Native structured color encoding is used. Lossless mode is verified against the RGB16 encoder input, while quality modes permit lossy JXL compression. ISO gain-map output is also available with Display P3 (default) or Rec.2020 SDR bases. Gain-map JPEG XL uses a true RGB map only and defaults to full resolution; mono output is intentionally unavailable.
 
 ## FP16 scRGB JPEG XR
 
-Linear scRGB FP16, encoded through Windows WIC, with 1.0 representing 80 nits. It is a Windows-oriented option and does not expose PQ/HLG or gamut selectors. Lossless mode is verified against the FP16 encoder representation.
+Linear scRGB FP16, encoded through Windows WIC on Windows (or jxrlib on Web and Android), with 1.0 representing 80 nits. It is a Windows-oriented option and does not expose PQ/HLG or gamut selectors. On Windows, lossless mode is verified against the FP16 encoder representation.
 
 ## HDR AVIF
 
-10-bit 4:4:4 PQ or HLG using AV1, with Rec.2020 by default and optional Display P3. PQ is the default. This is a compact lossy HDR output. ISO gain-map AVIF is an alternate representation with Rec.709, Display P3 or Rec.2020 SDR bases. It uses a true RGB gain map only and defaults to full resolution.
+10-bit 4:4:4 PQ or HLG using AV1, with Rec.2020 by default and optional Display P3. PQ is the default. This is a compact lossy HDR output. ISO gain-map AVIF is an alternate representation with Display P3 (default) or Rec.2020 SDR bases. It uses a true RGB gain map only and defaults to full resolution.
 
 ## Gain Map extraction
 
@@ -32,7 +32,7 @@ Exports the embedded gain-map image without reconstructing the HDR master. Origi
 
 ## Photo Frame
 
-Adds a blurred border, camera logo and caption to an HDR image and exports Ultra HDR JPEG. Defaults are Display P3, a full-resolution RGB gain map and JPEG quality 95. Gamut (Rec.709 or Display P3), peak, gain-map resolution, channels and quality are configurable.
+Adds a blurred border, camera logo and caption to an HDR image and exports Ultra HDR JPEG. Defaults are Display P3, a full-resolution RGB gain map and JPEG quality 95. Gamut, gain-map resolution, channels and quality are configurable.
 
 The caption uses source EXIF and fills missing camera fields from XMP. A matching camera logo replaces the manufacturer name, and repeated brand prefixes are removed from the model; otherwise only the model is shown. Missing fields and their units are omitted. Source EXIF/XMP are not copied. Lossless, EXIF and XMP controls are fixed off; the encoder generates new HDR gain-map metadata.
 

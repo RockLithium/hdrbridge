@@ -162,7 +162,7 @@ EMSCRIPTEN_KEEPALIVE int hb_convert_asset(
     int format, int primaries, int transfer, int output_representation,
     int encoding_value,
     int lossless, int copy_exif, int copy_xmp, int gain_scale,
-    int gain_channels, float target_peak_nits, int tiff_compressed) {
+    int gain_channels, int tiff_compressed) {
   output_bytes.clear();
   info_json = "{}";
   last_error.clear();
@@ -173,7 +173,7 @@ EMSCRIPTEN_KEEPALIVE int hb_convert_asset(
 
     hdrbridge::ConversionOptions options;
     options.mode = mode_for_format(format);
-    options.output_gamut = primaries == 1 ? "rec709" : primaries == 12 ? "p3" : "rec2020";
+    options.output_gamut = options.mode == "ultrahdr" || primaries == 12 ? "p3" : "rec2020";
     options.output_transfer = transfer == 18 ? "hlg" : "pq";
     options.output_representation = output_representation ? "gainmap" : "direct";
     options.lossless = lossless != 0;
@@ -182,7 +182,6 @@ EMSCRIPTEN_KEEPALIVE int hb_convert_asset(
     options.gainmap_quality = options.base_quality;
     options.gainmap_scale = gain_scale;
     options.multi_channel_gainmap = gain_channels != 0;
-    options.target_peak_nits = target_peak_nits;
     options.png_compression_level = std::clamp(encoding_value, 1, 9);
     options.tiff_compression_level = std::clamp(encoding_value, 1, 9);
     options.tiff_compressed = tiff_compressed != 0;

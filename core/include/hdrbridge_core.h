@@ -117,13 +117,11 @@ struct ConversionOptions {
   bool lossless = true;
   float image_quality = 1.0f;
   int effort = 7;
+  int avif_speed = 6;
   int base_quality = 95;
   int gainmap_quality = 90;
   int gainmap_scale = 2;
   bool multi_channel_gainmap = false;
-  // Zero selects the documented Faithful/Auto estimator. Explicit values must
-  // be in libultrahdr's supported 203..10000 nit interval.
-  float target_peak_nits = 0.0f;
   // Direct video/NLE outputs default to Rec.2020/PQ. "p3" is optional.
   std::string output_gamut = "rec2020";
   // JPEG XL and AVIF can additionally carry an ISO gain-map representation.

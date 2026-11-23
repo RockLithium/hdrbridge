@@ -9,7 +9,7 @@ final class Options {
       "avif-pq10", "gainmap-extract", "photo-frame"};
   static final String[] LABELS = {"Ultra HDR JPEG", "HDR PNG", "HDR TIFF", "JPEG XL",
       "JPEG XR FP16", "HDR AVIF", "Extract Gain Map", "Photo Frame"};
-  int format, quality, transfer, scale, channels, peak, extraction;
+  int format, quality, transfer, scale, channels, extraction;
   boolean lossless, compressed, exif, xmp, useSuffix;
   String gamut, suffix;
   String caption1 = "", caption2 = "";
@@ -50,6 +50,11 @@ final class Options {
   boolean gainmap() {
     return format == 0 || format == 7 || ((format == 3 || format == 5) && transfer == 2);
   }
+  private String effectiveGamut() {
+    if (format == 0 || format == 7 || "p3".equals(gamut)) return "p3";
+    if ("rec2020".equals(gamut)) return "rec2020";
+    return gainmap() ? "p3" : "rec2020";
+  }
   JSONObject json() throws JSONException {
     JSONObject j = new JSONObject();
     j.put("mode", MODES[format]);
@@ -65,8 +70,7 @@ final class Options {
     j.put("tiff_compressed", compressed);
     j.put("gainmap_scale", scale);
     j.put("multi_channel_gainmap", (format == 0 || format == 7) ? channels == 1 : gainmap());
-    j.put("target_peak_nits", new int[] {0, 1000, 2000, 4000, 10000}[peak]);
-    j.put("output_gamut", gamut);
+    j.put("output_gamut", effectiveGamut());
     j.put("output_transfer", transfer == 1 ? "hlg" : "pq");
     j.put("output_representation", transfer == 2 ? "gainmap" : "direct");
     j.put("gainmap_export_format", new String[] {"original", "png", "tiff", "jpeg"}[extraction]);
@@ -81,7 +85,6 @@ final class Options {
     j.put("transferIndex", transfer);
     j.put("scaleIndex", scale);
     j.put("channelsIndex", channels);
-    j.put("peakIndex", peak);
     j.put("extractionIndex", extraction);
     j.put("useSuffix", useSuffix);
     j.put("suffix", suffix);
@@ -96,7 +99,6 @@ final class Options {
     o.transfer = j.optInt("transferIndex", 0);
     o.scale = j.optInt("scaleIndex", o.scale);
     o.channels = j.optInt("channelsIndex", o.channels);
-    o.peak = j.optInt("peakIndex", 0);
     o.extraction = j.optInt("extractionIndex", 0);
     o.lossless = j.optBoolean("lossless", o.lossless);
     o.compressed = j.optBoolean("tiff_compressed", true);
@@ -104,7 +106,7 @@ final class Options {
     o.xmp = j.optBoolean("copy_xmp", true);
     if (f == 7) o.lossless = o.exif = o.xmp = false;
     o.gamut = j.optString("output_gamut", o.gamut);
-    if (f == 7 && !o.gamut.equals("p3") && !o.gamut.equals("rec709")) o.gamut = "p3";
+    o.gamut = o.effectiveGamut();
     o.useSuffix = j.optBoolean("useSuffix", true);
     o.suffix = j.optString("suffix", o.suffix);
     return o;

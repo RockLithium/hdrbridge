@@ -18,7 +18,7 @@ if (!Buffer.from(encoded, "base64").equals(wasm)) {
   throw new Error("embedded WASM verification failed");
 }
 
-const marker = '<script type="module" src="./src/app.js?v=9"></script>';
+const marker = '<script type="module" src="./src/app.js?v=10"></script>';
 if (!source.includes(marker)) throw new Error("application script marker not found");
 
 const bundled = source
@@ -30,7 +30,7 @@ const bundled = source
   .replace(marker,
     `<script id="hdrbridge-embedded-core" type="application/octet-stream">${encoded}</script>\n` +
     `<script id="hdrbridge-embedded-threaded-core" type="application/octet-stream">${threaded}</script>\n` +
-    '  <script type="module" src="../src/app.js?v=9"></script>');
+    '  <script type="module" src="../src/app.js?v=10"></script>');
 
 await mkdir(dirname(outputPath), { recursive: true });
 await writeFile(outputPath, bundled);

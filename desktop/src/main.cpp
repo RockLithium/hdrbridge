@@ -99,7 +99,6 @@ enum ControlId {
   ,IDC_REPRESENTATION
   ,IDC_GAINMAP_RESOLUTION
   ,IDC_GAINMAP_CHANNELS
-  ,IDC_PEAK
   ,IDC_SOURCE_FOLDER
   ,IDC_CHOOSE_FOLDER
   ,IDC_FOLDER_PATH
@@ -233,7 +232,6 @@ struct AppState {
   HWND representation = nullptr;
   HWND gainmap_resolution = nullptr;
   HWND gainmap_channels = nullptr;
-  HWND peak = nullptr;
   HWND tiff_compression = nullptr;
   HWND gainmap_export_format = nullptr;
   HWND source_folder = nullptr;
@@ -300,7 +298,7 @@ struct AppState {
   int last_representation_index = -1;
   int last_encoding_format_index = -1;
   int uhdr_gainmap_channels = 1;
-  int normal_gainmap_resolution = 2, frame_gainmap_resolution = 2, frame_gainmap_channels = 1, frame_gamut = 12;
+  int normal_gainmap_resolution = 2, frame_gainmap_resolution = 2, frame_gainmap_channels = 1;
   bool normal_copy_exif = true, normal_copy_xmp = true;
   bool lossless_setting = true;
   bool tiff_compressed = true;
@@ -1697,12 +1695,9 @@ void load_conversion_settings(AppState* state) {
                saved_index(L"GainMapChannels", 1, 1), 0);
   state->uhdr_gainmap_channels = static_cast<int>(
       SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0));
-  SendMessageW(state->peak, CB_SETCURSEL,
-               saved_index(L"TargetPeak", 0, 4), 0);
   state->normal_gainmap_resolution = saved_index(L"GainMapResolution", 2, 2);
   state->frame_gainmap_resolution = saved_index(L"FrameGainMapResolution", 2, 2);
   state->frame_gainmap_channels = saved_index(L"FrameGainMapChannels", 1, 1);
-  state->frame_gamut = saved_index(L"FrameGamut", 12, 12) == 1 ? 1 : 12;
   state->normal_copy_exif = saved_index(L"CopyExif", 1, 1) != 0;
   state->normal_copy_xmp = saved_index(L"CopyXmp", 1, 1) != 0;
   state->lossless_setting = saved_index(L"Lossless", 1, 1) != 0;
@@ -1744,9 +1739,8 @@ void reset_conversion_settings(AppState* state) {
   SendMessageW(state->gainmap_channels, CB_SETCURSEL, 1, 0);
   state->uhdr_gainmap_channels = 1;
   state->normal_gainmap_resolution = 2; state->frame_gainmap_resolution = 2;
-  state->frame_gainmap_channels = 1; state->frame_gamut = 12;
+  state->frame_gainmap_channels = 1;
   state->normal_copy_exif = true; state->normal_copy_xmp = true;
-  SendMessageW(state->peak, CB_SETCURSEL, 0, 0);
   SendMessageW(state->lossless, BM_SETCHECK, BST_CHECKED, 0);
   SendMessageW(state->copy_exif, BM_SETCHECK, BST_CHECKED, 0);
   SendMessageW(state->copy_xmp, BM_SETCHECK, BST_CHECKED, 0);
@@ -1787,7 +1781,6 @@ void save_layout(AppState* state) {
   if (format_index == 7) {
     state->frame_gainmap_resolution = static_cast<int>(SendMessageW(state->gainmap_resolution, CB_GETCURSEL, 0, 0));
     state->frame_gainmap_channels = static_cast<int>(SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0));
-    state->frame_gamut = static_cast<int>(gamut_cicp);
   } else {
     state->normal_gainmap_resolution = static_cast<int>(SendMessageW(state->gainmap_resolution, CB_GETCURSEL, 0, 0));
     state->normal_copy_exif = SendMessageW(state->copy_exif, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -1796,10 +1789,8 @@ void save_layout(AppState* state) {
   write_layout_value(key, L"GainMapResolution", static_cast<DWORD>(state->normal_gainmap_resolution));
   write_layout_value(key, L"FrameGainMapResolution", static_cast<DWORD>(state->frame_gainmap_resolution));
   write_layout_value(key, L"FrameGainMapChannels", static_cast<DWORD>(state->frame_gainmap_channels));
-  write_layout_value(key, L"FrameGamut", static_cast<DWORD>(state->frame_gamut));
   write_layout_value(key, L"GainMapChannels",
                      static_cast<DWORD>(state->uhdr_gainmap_channels));
-  write_layout_value(key, L"TargetPeak", static_cast<DWORD>(SendMessageW(state->peak, CB_GETCURSEL, 0, 0)));
   write_layout_value(key, L"Lossless", state->lossless_setting);
   write_layout_value(key, L"TiffCompressed", state->tiff_compressed);
   write_layout_value(key, L"GainMapExportFormat", static_cast<DWORD>(
@@ -2480,13 +2471,11 @@ TaskOptions capture_task_options(AppState* state) {
   const int gamut_index = static_cast<int>(SendMessageW(state->gamut, CB_GETCURSEL, 0, 0));
   const int gamut = gamut_index == CB_ERR ? 9 : static_cast<int>(
       SendMessageW(state->gamut, CB_GETITEMDATA, gamut_index, 0));
-  options.output_gamut = gamut == 1 ? "rec709" : gamut == 12 ? "p3" : "rec2020";
+  options.output_gamut = (index == 0 || index == 7 || gamut == 12) ? "p3" : "rec2020";
   options.output_representation = (index == 3 || index == 5) && transfer == 2
       ? "gainmap" : "direct";
-  options.output_transfer = transfer == 1 ? "hlg" : "pq";
-  constexpr float peaks[] = {0.0f, 1000.0f, 2000.0f, 4000.0f, 10000.0f};
-  options.target_peak_nits = peaks[std::clamp(static_cast<int>(
-      SendMessageW(state->peak, CB_GETCURSEL, 0, 0)), 0, 4)];
+  options.output_transfer =
+      (index == 1 || index == 3 || index == 5) && transfer == 1 ? "hlg" : "pq";
   options.overwrite = SendMessageW(state->collision, CB_GETCURSEL, 0, 0) == 1;
   const int gainmap_format = static_cast<int>(SendMessageW(
       state->gainmap_export_format, CB_GETCURSEL, 0, 0));
@@ -2619,13 +2608,12 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
   ShowWindow(state->lossless, SW_SHOW);
   ShowWindow(state->quality, SW_SHOW);
   ShowWindow(state->quality_value, SW_SHOW);
-  ShowWindow(state->peak, gainmap_output ? SW_SHOW : SW_HIDE);
   ShowWindow(state->gainmap_resolution, gainmap_output ? SW_SHOW : SW_HIDE);
   ShowWindow(state->gainmap_channels, gainmap_output ? SW_SHOW : SW_HIDE);
   ShowWindow(state->tiff_compression, index == 2 ? SW_SHOW : SW_HIDE);
   ShowWindow(state->gainmap_export_format, index == 6 ? SW_SHOW : SW_HIDE);
-  ShowWindow(state->gamut, (ultrahdr_output || index == 1 || index == 2 ||
-                            index == 3 || index == 5) ? SW_SHOW : SW_HIDE);
+  const bool selectable_gamut = index == 1 || index == 2 || representation_output;
+  ShowWindow(state->gamut, (ultrahdr_output || selectable_gamut) ? SW_SHOW : SW_HIDE);
   ui::send(state->gamut, CB_RESETCONTENT, 0, 0);
   const auto add_gamut = [&](const wchar_t* label, int cicp) {
     const int item = static_cast<int>(ui::send(
@@ -2633,10 +2621,8 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
     SendMessageW(state->gamut, CB_SETITEMDATA, item, cicp);
   };
   if (ultrahdr_output) {
-    add_gamut(L"Rec.709", 1);
-    add_gamut(HB_UI("Display P3 — default"), 12);
+    add_gamut(L"Display P3", 12);
   } else if (gainmap_output) {
-    add_gamut(L"Rec.709", 1);
     add_gamut(HB_UI("Display P3 — default"), 12);
     add_gamut(L"Rec.2020", 9);
   } else {
@@ -2650,9 +2636,10 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
     }
   }
   const bool representation_changed = state->last_representation_index != representation_index;
-  const int desired_gamut = index == 7 ? state->frame_gamut : saved_gamut > 0 ? saved_gamut :
+  const int default_gamut = gainmap_output ? 12 : 9;
+  const int desired_gamut = saved_gamut > 0 ? saved_gamut :
       (state->last_format_index != index || representation_changed || previous_gamut < 0)
-      ? (gainmap_output ? 12 : 9) : previous_gamut;
+      ? default_gamut : previous_gamut;
   int selected_gamut = 0;
   const int gamut_count = static_cast<int>(SendMessageW(state->gamut, CB_GETCOUNT, 0, 0));
   for (int item = 0; item < gamut_count; ++item) {
@@ -2661,7 +2648,7 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
     }
   }
   SendMessageW(state->gamut, CB_SETCURSEL, selected_gamut, 0);
-  EnableWindow(state->gamut, ultrahdr_output || index == 1 || index == 2 || index == 3 || index == 5);
+  EnableWindow(state->gamut, ultrahdr_output || selectable_gamut);
   EnableWindow(state->transfer, transfer_output || representation_output);
   EnableWindow(state->gainmap_resolution, gainmap_output);
   if (gainmap_output && !ultrahdr_output) {
@@ -2797,19 +2784,13 @@ void layout(AppState* s, int width, int height) {
 
   MoveWindow(s->output_label, right_x, content_top + 3, right_width, 26, TRUE);
   MoveWindow(s->format, right_x, content_top + 36, right_width, 220, TRUE);
-  const int peak_row_gap = 8;
-  const int peak_row_width = (right_width - peak_row_gap) / 2;
   MoveWindow(s->representation, right_x, content_top + 72, right_width, 150, TRUE);
   const int format_index = static_cast<int>(SendMessageW(s->format, CB_GETCURSEL, 0, 0));
-  const bool jpeg_gainmap = format_index == 0 || format_index == 7;
   const bool non_jpeg_gainmap = (format_index == 3 || format_index == 5) &&
       SendMessageW(s->transfer, CB_GETCURSEL, 0, 0) == 2;
   const int representation_offset = non_jpeg_gainmap ? 34 : 0;
   const int color_row_y = content_top + 72;
-  MoveWindow(s->gamut, right_x, color_row_y,
-             (jpeg_gainmap || non_jpeg_gainmap) ? peak_row_width : right_width, 150, TRUE);
-  MoveWindow(s->peak, right_x + peak_row_width + peak_row_gap, color_row_y,
-             peak_row_width, 170, TRUE);
+  MoveWindow(s->gamut, right_x, color_row_y, right_width, 150, TRUE);
   const int transfer_row_y = non_jpeg_gainmap ? content_top + 140 : content_top + 106;
   const int parameter_row_y = content_top + 106;
   MoveWindow(s->transfer, right_x, transfer_row_y, right_width, 170, TRUE);
@@ -3202,7 +3183,6 @@ void set_running(AppState* state, bool running) {
   EnableWindow(state->gainmap_resolution, !running);
   EnableWindow(state->gainmap_channels, !running);
   EnableWindow(state->gainmap_export_format, !running);
-  EnableWindow(state->peak, !running);
   EnableWindow(state->source_folder, !running);
   EnableWindow(state->choose_folder, !running);
   EnableWindow(state->base_name, !running);
@@ -3449,12 +3429,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     ui::send(owned->gainmap_channels, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("Channels: Mono")));
     ui::send(owned->gainmap_channels, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("Channels: RGB — default")));
     SendMessageW(owned->gainmap_channels, CB_SETCURSEL, 1, 0);
-    owned->peak = add_control(window, WC_COMBOBOXW, L"", kComboStyle, IDC_PEAK);
-    for (const wchar_t* item : {HB_UI("Peak: Faithful / Auto"), HB_UI("Peak: 1000 nits"),
-                                HB_UI("Peak: 2000 nits"), HB_UI("Peak: 4000 nits"), HB_UI("Peak: 10000 nits")}) {
-      ui::send(owned->peak, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
-    }
-    SendMessageW(owned->peak, CB_SETCURSEL, 0, 0);
     owned->tiff_compression = add_control(window, WC_COMBOBOXW, L"",
                                           kComboStyle,
                                           IDC_TIFF_COMPRESSION);
@@ -3540,7 +3514,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     }
     for (HWND combo : {owned->format, owned->gamut, owned->transfer,
                        owned->representation, owned->gainmap_resolution,
-                       owned->gainmap_channels, owned->peak,
+                       owned->gainmap_channels,
                        owned->tiff_compression, owned->gainmap_export_format,
                        owned->collision}) {
       SetWindowSubclass(combo, combo_mixed_subclass, 1, static_data);
@@ -4131,9 +4105,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             else if (format_index != 7) state->lossless_setting = task.options.conversion.lossless;
             state->encoding_values[static_cast<size_t>(format_index)] = quality;
             state->last_encoding_format_index = -1;
-            SendMessageW(state->transfer, CB_SETCURSEL,
-                         task.options.conversion.output_representation == "gainmap" ? 2 :
-                         task.options.conversion.output_transfer == "hlg" ? 1 : 0, 0);
+            const int desired_transfer =
+                task.options.conversion.output_representation == "gainmap" ? 2 :
+                task.options.conversion.output_transfer == "hlg" ? 1 : 0;
             const int scale_index = task.options.conversion.gainmap_scale == 1 ? 2 :
                                     task.options.conversion.gainmap_scale == 4 ? 0 : 1;
             SendMessageW(state->gainmap_resolution, CB_SETCURSEL, scale_index, 0);
@@ -4143,12 +4117,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             SendMessageW(state->gainmap_export_format, CB_SETCURSEL,
                          gm_format == "png" ? 1 : gm_format == "tiff" ? 2 :
                          gm_format == "jpeg" ? 3 : 0, 0);
-            constexpr float peaks[] = {0.0f, 1000.0f, 2000.0f, 4000.0f, 10000.0f};
-            int peak_index = 0;
-            for (int i = 1; i < 5; ++i) {
-              if (std::abs(task.options.conversion.target_peak_nits - peaks[i]) < 1.0f) peak_index = i;
-            }
-            SendMessageW(state->peak, CB_SETCURSEL, peak_index, 0);
             state->use_source_folder = task.options.use_source_folder;
             state->selected_folder = task.options.selected_folder;
             SendMessageW(state->source_folder, BM_SETCHECK,
@@ -4156,14 +4124,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             ui::set_text(state->folder_path,
                            (state->use_source_folder ? task.source.parent_path()
                                                      : state->selected_folder).c_str());
-            set_rich_editable_text(state, state->base_name, task.options.base_name);
-            set_rich_editable_text(state, state->name_suffix, task.options.suffix);
-            SendMessageW(state->use_suffix, BM_SETCHECK, task.options.use_suffix ? BST_CHECKED : BST_UNCHECKED, 0);
             ui::set_text(state->convert, HB_UI("Update task"));
             if (format_index == 7) {
               state->frame_gainmap_resolution = scale_index;
               state->frame_gainmap_channels = task.options.conversion.multi_channel_gainmap ? 1 : 0;
-              state->frame_gamut = task.options.conversion.output_gamut == "rec709" ? 1 : 12;
             } else {
               state->normal_gainmap_resolution = scale_index;
               state->uhdr_gainmap_channels = task.options.conversion.multi_channel_gainmap ? 1 : 0;
@@ -4172,9 +4136,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             }
             state->last_format_index = -1;
             state->last_representation_index = -1;
-            update_mode_ui(state);
-            const int desired_cicp = task.options.conversion.output_gamut == "rec709" ? 1 :
-                                     task.options.conversion.output_gamut == "p3" ? 12 : 9;
+            update_mode_ui(state, false);
+            SendMessageW(state->transfer, CB_SETCURSEL, desired_transfer, 0);
+            update_mode_ui(state, false);
+            const auto& gamut = task.options.conversion.output_gamut;
+            const int desired_cicp = gamut == "p3" ? 12 : gamut == "rec2020" ? 9 : -1;
             const int gamut_count = static_cast<int>(SendMessageW(state->gamut, CB_GETCOUNT, 0, 0));
             for (int item = 0; item < gamut_count; ++item) {
               if (static_cast<int>(SendMessageW(state->gamut, CB_GETITEMDATA, item, 0)) == desired_cicp) {
@@ -4182,6 +4148,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                 break;
               }
             }
+            set_rich_editable_text(state, state->base_name, task.options.base_name);
+            set_rich_editable_text(state, state->name_suffix, task.options.suffix);
+            SendMessageW(state->use_suffix, BM_SETCHECK, task.options.use_suffix ? BST_CHECKED : BST_UNCHECKED, 0);
             update_output_preview(state);
           }
           break;
@@ -4206,10 +4175,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         case IDC_FORMAT: if (HIWORD(wparam) == CBN_SELCHANGE) update_mode_ui(state); break;
         case IDC_TRANSFER:
         case IDC_GAMUT:
-          if (HIWORD(wparam) == CBN_SELCHANGE && SendMessageW(state->format, CB_GETCURSEL, 0, 0) == 7) {
-            const int sel = static_cast<int>(SendMessageW(state->gamut, CB_GETCURSEL, 0, 0));
-            if (sel != CB_ERR) state->frame_gamut = static_cast<int>(SendMessageW(state->gamut, CB_GETITEMDATA, sel, 0));
-          }
           if (HIWORD(wparam) == CBN_SELCHANGE) update_mode_ui(state);
           break;
         case IDC_REPRESENTATION:
@@ -4224,8 +4189,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             if (SendMessageW(state->format, CB_GETCURSEL, 0, 0) == 7) state->frame_gainmap_channels = selected_channels;
             else state->uhdr_gainmap_channels = selected_channels;
           }
-          break;
-        case IDC_PEAK:
           break;
         case IDC_LOSSLESS: update_mode_ui(state); break;
         case IDC_TIFF_COMPRESSION:
@@ -4503,7 +4466,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       }
       for (HWND combo : {state->format, state->gamut, state->transfer,
                          state->representation, state->gainmap_resolution,
-                         state->gainmap_channels, state->peak,
+                         state->gainmap_channels,
                          state->tiff_compression, state->gainmap_export_format,
                          state->collision}) {
         RemoveWindowSubclass(combo, combo_mixed_subclass, 1);
@@ -4562,10 +4525,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
 
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show) {
   const HRESULT com_result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED |
                                                       COINIT_DISABLE_OLE1DDE);
   if (FAILED(com_result)) return 1;
+  const bool launched_by_setup = std::wstring_view(command_line) == L"--post-install";
+  if (launched_by_setup && hdrbridge::app_update::relaunch_from_explorer_if_elevated()) {
+    CoUninitialize();
+    return 0;
+  }
   INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_BAR_CLASSES};
   InitCommonControlsEx(&controls);
   WNDCLASSEXW cls{sizeof(cls)};
@@ -4596,7 +4564,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   UpdateWindow(window);
   int argument_count = 0;
   LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
-  if (arguments && argument_count > 1) {
+  if (!launched_by_setup && arguments && argument_count > 1) {
     PostMessageW(window, WM_APP_OPEN_SOURCE, 0,
                  reinterpret_cast<LPARAM>(new std::filesystem::path(arguments[1])));
   }

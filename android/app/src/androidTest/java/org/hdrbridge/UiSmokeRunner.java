@@ -250,9 +250,12 @@ final class UiSmokeRunner {
         boolean expectQualityEnabled = selected == 0 || selected == 1 || selected == 5;
         require("Format " + selected + " quality fully visible in OUTPUT", q.visible);
         require("Format " + selected + " quality enabled state", q.enabled == expectQualityEnabled);
-        if (selected != 4) {
-          String secondTag = selected == 0 ? "output_peak" : selected == 2 ? "output_compression" : "output_transfer";
+        if (selected == 1 || selected == 2 || selected == 3 || selected == 5) {
+          String secondTag = selected == 2 ? "output_compression" : "output_transfer";
           require("Format " + selected + " keeps paired options in two columns", hasTwoColumnPair("output_gamut", secondTag));
+        } else if (selected == 0) {
+          require("Format 0 keeps paired gain map options in two columns",
+              hasTwoColumnPair("output_scale", "output_channels"));
         }
         if (selected == 1 || selected == 2) {
           require("Format " + selected + " lossless forced and locked", !q.losslessEnabled && q.losslessChecked);
@@ -286,8 +289,8 @@ final class UiSmokeRunner {
     }
     require("Reset settings button is hidden on TASKS", !tagVisible("reset_settings") && !tagged("reset_settings").isEnabled());
     Options custom0 = Options.defaults(0);
-    custom0.quality = 61; custom0.gamut = "rec709"; custom0.scale = 4; custom0.channels = 1;
-    custom0.peak = 3; custom0.exif = false; custom0.xmp = false;
+    custom0.quality = 61; custom0.scale = 4; custom0.channels = 1;
+    custom0.exif = false; custom0.xmp = false;
     Options custom5 = Options.defaults(5);
     custom5.quality = 47; custom5.gamut = "p3"; custom5.transfer = 1; custom5.exif = false; custom5.xmp = false;
     prefs.edit().putInt("format", 0).putString("options_0", custom0.save().toString())
@@ -297,9 +300,9 @@ final class UiSmokeRunner {
     instrumentation.runOnMainSync(activity::resetOutputSettings);
     instrumentation.waitForIdleSync();
     Options defaults0 = Options.defaults(0);
-    require("Reset restores Ultra HDR default quality/gamut/peak/scale/channels/EXIF/XMP",
+    require("Reset restores Ultra HDR default quality/gamut/scale/channels/EXIF/XMP",
         activity.current.quality == defaults0.quality && activity.current.gamut.equals(defaults0.gamut)
-            && activity.current.peak == defaults0.peak && activity.current.scale == defaults0.scale
+            && activity.current.scale == defaults0.scale
             && activity.current.channels == defaults0.channels && activity.current.exif && activity.current.xmp);
     for (int format = 0; format < Options.LABELS.length; format++)
       require("Reset restores format " + format + " defaults", Options.load(prefs, format).save().toString().equals(Options.defaults(format).save().toString()));

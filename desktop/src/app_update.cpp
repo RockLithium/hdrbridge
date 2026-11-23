@@ -3,7 +3,10 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <shellapi.h>
+#include <shldisp.h>
+#include <shlobj.h>
 #include <bcrypt.h>
+#include <wrl/client.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -439,10 +442,61 @@ bool verify_installer(const std::filesystem::path& path, std::string_view expect
 bool launch_installer(const VerifiedInstaller& installer, std::string* error) {
   if (!verify_installer(installer.path, installer.sha256, installer.size, error)) return false;
   SHELLEXECUTEINFOW info{}; info.cbSize = sizeof(info); info.fMask = SEE_MASK_NOCLOSEPROCESS;
-  info.lpVerb = L"runas"; info.lpFile = installer.path.c_str(); info.nShow = SW_SHOWNORMAL;
+  // Inno Setup needs to start before UAC to retain the original user's launch context.
+  info.lpVerb = L"open"; info.lpFile = installer.path.c_str(); info.nShow = SW_SHOWNORMAL;
   if (!ShellExecuteExW(&info)) { set_error(error, "Could not launch the installer."); return false; }
   if (info.hProcess) CloseHandle(info.hProcess);
   return true;
+}
+
+bool relaunch_from_explorer_if_elevated() {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+  TOKEN_ELEVATION elevation{};
+  DWORD size = 0;
+  const bool elevated = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size)
+      && elevation.TokenIsElevated;
+  CloseHandle(token);
+  if (!elevated) return false;
+
+  // Older updaters start Setup elevated. Ask the existing desktop shell to start the GUI.
+  using Microsoft::WRL::ComPtr;
+  ComPtr<IShellWindows> windows;
+  if (FAILED(CoCreateInstance(__uuidof(ShellWindows), nullptr, CLSCTX_LOCAL_SERVER,
+                              IID_PPV_ARGS(&windows)))) return false;
+  VARIANT desktop{}, empty{};
+  desktop.vt = VT_I4;
+  desktop.lVal = CSIDL_DESKTOP;
+  long desktop_window = 0;
+  ComPtr<IDispatch> desktop_dispatch;
+  if (windows->FindWindowSW(&desktop, &empty, SWC_DESKTOP, &desktop_window, SWFO_NEEDDISPATCH,
+                            &desktop_dispatch) != S_OK || !desktop_dispatch) return false;
+  ComPtr<IServiceProvider> services;
+  ComPtr<IShellBrowser> browser;
+  ComPtr<IShellView> view;
+  ComPtr<IDispatch> view_dispatch;
+  ComPtr<IShellFolderViewDual> folder;
+  ComPtr<IDispatch> application;
+  ComPtr<IShellDispatch2> shell;
+  if (FAILED(desktop_dispatch.As(&services)) ||
+      FAILED(services->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&browser))) ||
+      FAILED(browser->QueryActiveShellView(&view)) ||
+      FAILED(view->GetItemObject(SVGIO_BACKGROUND, IID_PPV_ARGS(&view_dispatch))) ||
+      FAILED(view_dispatch.As(&folder)) ||
+      FAILED(folder->get_Application(&application)) ||
+      FAILED(application.As(&shell))) return false;
+
+  std::wstring path(32768, L'\0');
+  const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+  if (length == 0 || length == path.size()) return false;
+  BSTR executable = SysAllocStringLen(path.data(), length);
+  if (!executable) return false;
+  VARIANT show{};
+  show.vt = VT_I4;
+  show.lVal = SW_SHOWNORMAL;
+  const HRESULT result = shell->ShellExecute(executable, empty, empty, empty, show);
+  SysFreeString(executable);
+  return SUCCEEDED(result);
 }
 
 }  // namespace hdrbridge::app_update

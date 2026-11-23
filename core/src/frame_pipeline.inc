@@ -194,28 +194,32 @@ FramePair frame_compose_hdr(const DecodedImage& source,
   return result;
 }
 
-std::vector<uint8_t> frame_output_icc(bool p3) {
-  cmsCIExyY wp{.3127,.329,1}; cmsCIExyYTRIPLE prim{{.68,.32,1},{.265,.69,1},{.15,.06,1}};
+std::vector<uint8_t> frame_output_icc(const std::string& gamut) {
+  cmsCIExyY wp{.3127,.329,1};
+  cmsCIExyYTRIPLE prim = gamut == "p3"
+      ? cmsCIExyYTRIPLE{{.68,.32,1},{.265,.69,1},{.15,.06,1}}
+      : cmsCIExyYTRIPLE{{.708,.292,1},{.17,.797,1},{.131,.046,1}};
   cmsFloat64Number params[7]{2.4,1/1.055,.055/1.055,1/12.92,.04045,0,0};
   cmsToneCurve* trc=cmsBuildParametricToneCurve(nullptr,4,params);
-  cmsToneCurve* curves[3]{trc,trc,trc}; auto profile=p3 ? cmsCreateRGBProfile(&wp,&prim,curves) : cmsCreate_sRGBProfile();
-  if(trc) cmsFreeToneCurve(trc); if(!profile) throw std::runtime_error("cannot create P3 profile");
+  cmsToneCurve* curves[3]{trc,trc,trc}; auto profile=cmsCreateRGBProfile(&wp,&prim,curves);
+  if(trc) cmsFreeToneCurve(trc); if(!profile) throw std::runtime_error("cannot create frame RGB profile");
   cmsUInt32Number n=0;cmsSaveProfileToMem(profile,nullptr,&n);std::vector<uint8_t> bytes(n);
-  if(!cmsSaveProfileToMem(profile,bytes.data(),&n)) {cmsCloseProfile(profile);throw std::runtime_error("cannot serialize P3 profile");}
+  if(!cmsSaveProfileToMem(profile,bytes.data(),&n)) {cmsCloseProfile(profile);throw std::runtime_error("cannot serialize frame RGB profile");}
   cmsCloseProfile(profile);bytes.resize(n);return bytes;
 }
-std::vector<uint16_t> frame_output_pixels(const FramePair& pair,bool p3) {
+std::vector<uint16_t> frame_output_pixels(const FramePair& pair,const std::string& gamut) {
   std::vector<uint16_t> pixels(pair.sdr.size()*3);
   auto enc=[](double v){v=std::clamp(v,0.,1.);v=v<=.0031308?12.92*v:1.055*std::pow(v,1/2.4)-.055;return uint16_t(std::lround(v*65535));};
+  const bool p3 = gamut == "p3";
   for(size_t i=0;i<pair.sdr.size();++i) {auto p=pair.sdr[i];
     if(p3) {
       pixels[i*3]=enc(1.3435783*p.r-.2821797*p.g-.0613986*p.b);
       pixels[i*3+1]=enc(-.0652975*p.r+1.0757879*p.g-.0104904*p.b);
       pixels[i*3+2]=enc(.0028218*p.r-.0195985*p.g+1.0167767*p.b);
     } else {
-      pixels[i*3]=enc(1.660491*p.r-.587641*p.g-.072850*p.b);
-      pixels[i*3+1]=enc(-.124550*p.r+1.132900*p.g-.008349*p.b);
-      pixels[i*3+2]=enc(-.018151*p.r-.100579*p.g+1.118730*p.b);
+      pixels[i*3]=enc(p.r);
+      pixels[i*3+1]=enc(p.g);
+      pixels[i*3+2]=enc(p.b);
     }
   } return pixels;
 }
@@ -227,7 +231,7 @@ std::vector<uint8_t> frame_encode_jpeg(const DecodedImage& d,const std::vector<u
   j.image_width=d.info.width;j.image_height=d.info.height;j.input_components=3;j.in_color_space=JCS_RGB;jpeg_set_defaults(&j);
   for(int i=0;i<3;++i){j.comp_info[i].h_samp_factor=1;j.comp_info[i].v_samp_factor=1;}
   jpeg_set_quality(&j,std::clamp(options.base_quality,1,100),TRUE);j.optimize_coding=FALSE;jpeg_start_compress(&j,TRUE);
-  auto icc=frame_output_icc(options.output_gamut=="p3");std::vector<uint8_t> marker={'I','C','C','_','P','R','O','F','I','L','E',0,1,1};marker.insert(marker.end(),icc.begin(),icc.end());
+  auto icc=frame_output_icc(options.output_gamut);std::vector<uint8_t> marker={'I','C','C','_','P','R','O','F','I','L','E',0,1,1};marker.insert(marker.end(),icc.begin(),icc.end());
   if(marker.size()>65533)throw std::runtime_error("frame ICC too large");jpeg_write_marker(&j,JPEG_APP0+2,marker.data(),static_cast<unsigned>(marker.size()));
   std::vector<uint8_t> row(size_t(d.info.width)*3);
   while(j.next_scanline<j.image_height){size_t off=size_t(j.next_scanline)*row.size();for(size_t i=0;i<row.size();++i)row[i]=uint8_t((pixels[off+i]+128)/257);JSAMPROW p=row.data();jpeg_write_scanlines(&j,&p,1);}
@@ -236,16 +240,16 @@ std::vector<uint8_t> frame_encode_jpeg(const DecodedImage& d,const std::vector<u
   throw std::runtime_error("frame JPEG encoder unavailable");
 #endif
 }
-std::vector<uint8_t> frame_encode_uhdr(const FramePair& pair,const std::vector<uint16_t>& p3,const std::vector<uint8_t>& jpeg,const HdrStats& stats,const ConversionOptions& options) {
-  DecodedImage p3hdr;p3hdr.info=pair.hdr.info;p3hdr.rgb=options.output_gamut=="p3" ? convert_rec2020_pq_to_p3_pq(pair.hdr) : convert_rec2020_pq_to_rec709_pq(pair.hdr);auto packed=pq16_to_rgba1010102(p3hdr);
-  std::vector<uint32_t> sdr(p3.size()/3);auto* out=reinterpret_cast<uint8_t*>(sdr.data());for(size_t i=0;i<sdr.size();++i){for(int c=0;c<3;++c)out[4*i+c]=uint8_t((p3[3*i+c]+128)/257);out[4*i+3]=255;}
-  uhdr_raw_image_t h{},s{};h.fmt=UHDR_IMG_FMT_32bppRGBA1010102;h.cg=options.output_gamut=="p3" ? UHDR_CG_DISPLAY_P3 : UHDR_CG_BT_709;h.ct=UHDR_CT_PQ;h.range=UHDR_CR_FULL_RANGE;h.w=pair.hdr.info.width;h.h=pair.hdr.info.height;h.planes[UHDR_PLANE_PACKED]=packed.data();h.stride[UHDR_PLANE_PACKED]=h.w;
+std::vector<uint8_t> frame_encode_uhdr(const FramePair& pair,const std::vector<uint16_t>& sdr_pixels,const std::vector<uint8_t>& jpeg,const HdrStats& stats,const ConversionOptions& options) {
+  DecodedImage hdr_target;hdr_target.info=pair.hdr.info;hdr_target.rgb=options.output_gamut=="p3" ? convert_rec2020_pq_to_p3_pq(pair.hdr) : pair.hdr.rgb;auto packed=pq16_to_rgba1010102(hdr_target);
+  std::vector<uint32_t> sdr(sdr_pixels.size()/3);auto* out=reinterpret_cast<uint8_t*>(sdr.data());for(size_t i=0;i<sdr.size();++i){for(int c=0;c<3;++c)out[4*i+c]=uint8_t((sdr_pixels[3*i+c]+128)/257);out[4*i+3]=255;}
+  uhdr_raw_image_t h{},s{};h.fmt=UHDR_IMG_FMT_32bppRGBA1010102;h.cg=options.output_gamut=="p3" ? UHDR_CG_DISPLAY_P3 : UHDR_CG_BT_2100;h.ct=UHDR_CT_PQ;h.range=UHDR_CR_FULL_RANGE;h.w=pair.hdr.info.width;h.h=pair.hdr.info.height;h.planes[UHDR_PLANE_PACKED]=packed.data();h.stride[UHDR_PLANE_PACKED]=h.w;
   s=h;s.fmt=UHDR_IMG_FMT_32bppRGBA8888;s.ct=UHDR_CT_SRGB;s.planes[UHDR_PLANE_PACKED]=sdr.data();
   uhdr_compressed_image_t compressed{};compressed.data=const_cast<uint8_t*>(jpeg.data());compressed.data_sz=jpeg.size();compressed.capacity=jpeg.size();compressed.cg=h.cg;compressed.ct=UHDR_CT_SRGB;compressed.range=UHDR_CR_FULL_RANGE;
   UhdrEncoderPtr enc(uhdr_create_encoder());if(!enc)throw std::runtime_error("cannot create frame UHDR encoder");
   require_uhdr(uhdr_enc_set_raw_image(enc.get(),&h,UHDR_HDR_IMG),"set frame HDR");require_uhdr(uhdr_enc_set_raw_image(enc.get(),&s,UHDR_SDR_IMG),"set frame SDR");require_uhdr(uhdr_enc_set_compressed_image(enc.get(),&compressed,UHDR_SDR_IMG),"set frame JPEG");
   require_uhdr(uhdr_enc_set_gainmap_scale_factor(enc.get(),options.gainmap_scale),"set frame gain scale");require_uhdr(uhdr_enc_set_using_multi_channel_gainmap(enc.get(),options.multi_channel_gainmap ? 1 : 0),"set frame RGB gain");require_uhdr(uhdr_enc_set_quality(enc.get(),std::clamp(options.gainmap_quality,0,100),UHDR_GAIN_MAP_IMG),"set frame gain quality");
-  require_uhdr(uhdr_enc_set_target_display_peak_brightness(enc.get(),float(options.target_peak_nits != 0 ? options.target_peak_nits : std::max(204.0,stats.chosen_target_nits))),"set frame peak");require_uhdr(uhdr_encode(enc.get()),"encode frame UHDR");
+  require_uhdr(uhdr_enc_set_target_display_peak_brightness(enc.get(),float(std::max(204.0,stats.chosen_target_nits))),"set frame peak");require_uhdr(uhdr_encode(enc.get()),"encode frame UHDR");
   auto* stream=uhdr_get_encoded_stream(enc.get());if(!stream||!stream->data||!stream->data_sz)throw std::runtime_error("empty frame UHDR output");auto* first=static_cast<uint8_t*>(stream->data);return {first,first+stream->data_sz};
 }
 
@@ -253,10 +257,11 @@ ConversionResult convert_photo_frame(const std::filesystem::path& input,const st
                                      const ConversionOptions& options,const ProgressCallback& progress,std::atomic_bool* cancel) {
   auto start=Clock::now();
   if(options.frame_format!="jpeg"&&options.frame_format!="png")throw std::runtime_error("frame format must be jpeg or png");
-  if(options.frame_format=="jpeg" && options.output_gamut!="p3" && options.output_gamut!="rec709") throw std::runtime_error("frame JPEG gamut must be p3 or rec709");
+  if(options.output_gamut!="rec2020"&&options.output_gamut!="p3")throw std::runtime_error("output gamut must be rec2020 or p3");
+  if(options.output_transfer!="pq"&&options.output_transfer!="hlg")throw std::runtime_error("output transfer must be pq or hlg");
+  if(options.frame_format=="jpeg"&&options.output_transfer!="pq")throw std::runtime_error("frame JPEG output only supports pq transfer");
   if(options.frame_format=="jpeg" && options.gainmap_scale!=1 && options.gainmap_scale!=2 && options.gainmap_scale!=4) throw std::runtime_error("frame gain-map scale must be 1, 2, or 4");
   if(options.frame_font_path.empty())throw std::runtime_error("photo frame requires a font path");
-  if(options.target_peak_nits!=0 && (options.target_peak_nits<203 || options.target_peak_nits>10000))throw std::runtime_error("target peak override must be 203..10000 nits, or zero for Faithful/Auto");
   if(std::filesystem::exists(output)&&!options.overwrite)throw std::runtime_error("output exists; overwrite not enabled");
   const auto initial_revision=source_revision(std::filesystem::absolute(input));
   const auto initial_size=std::filesystem::file_size(input);
@@ -293,18 +298,28 @@ ConversionResult convert_photo_frame(const std::filesystem::path& input,const st
   const FramePair& pair=*cached;
   check_cancel(cancel);report(progress,75,"Encoding framed image");
   std::vector<uint16_t> pixels;
-  if(options.frame_format=="jpeg") pixels=frame_output_pixels(pair,options.output_gamut=="p3");
+  if(options.frame_format=="jpeg") pixels=frame_output_pixels(pair,options.output_gamut);
   std::vector<uint8_t> bytes;
+  std::vector<uint16_t> converted_png;
+  const std::vector<uint16_t>* png_pixels=&pair.hdr.rgb;
+  bool expect_png_icc=false;
   if(options.frame_format=="png") {
-    ConversionOptions pngopts=options;pngopts.output_gamut="rec2020";pngopts.output_transfer="pq";pngopts.png_compression_level=4;pngopts.copy_exif=false;pngopts.copy_xmp=false;bytes=encode_png(pair.hdr,pngopts,pair.hdr.rgb);
+    ConversionOptions pngopts=options;pngopts.copy_exif=false;pngopts.copy_xmp=false;
+    converted_png=options.output_transfer=="hlg"
+        ? convert_rec2020_pq_to_hlg(pair.hdr,options.output_gamut)
+        : options.output_gamut=="p3" ? convert_rec2020_pq_to_p3_pq(pair.hdr)
+                                     : std::vector<uint16_t>{};
+    if(!converted_png.empty()) png_pixels=&converted_png;
+    expect_png_icc=pngopts.output_transfer=="pq"&&pngopts.embed_hdr_icc;
+    bytes=encode_png(pair.hdr,pngopts,*png_pixels);
   }else{
     auto jpeg=frame_encode_jpeg(pair.hdr,pixels,options);
-    auto stats=measure_hdr(source,options.target_peak_nits);bytes=frame_encode_uhdr(pair,pixels,jpeg,stats,options);
+    auto stats=measure_hdr(source);bytes=frame_encode_uhdr(pair,pixels,jpeg,stats,options);
   }
   if(!output.parent_path().empty())std::filesystem::create_directories(output.parent_path());OutputTransaction tx(output);std::string error;if(!tx.create(error))throw std::runtime_error(error);
   write_file(tx.stage_path(),bytes);check_cancel(cancel);
   Verification verification;
-  if(options.frame_format=="png")verification=decode_png(bytes,&pair.hdr.rgb);
+  if(options.frame_format=="png")verification=decode_png(bytes,png_pixels,expect_png_icc,false,nullptr);
   else verification=decode_ultrahdr(bytes);
   verification.checks.push_back("frame main image origin="+std::to_string(pair.origin_x)+","+std::to_string(pair.origin_y)+" size="+std::to_string(pair.source_w)+"x"+std::to_string(pair.source_h));
   verification.checks.push_back("frame source interior maximum PQ16 code error="+std::to_string(pair.interior_error));

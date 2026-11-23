@@ -13,6 +13,10 @@ import java.util.*;
 
 public class MainActivity extends Activity {
   static final int PICK = 1, TREE = 2, NOTIFICATIONS = 3;
+  private static final String[] DIRECT_GAMUT_LABELS = {"Rec.2020", "Display P3"};
+  private static final String[] DIRECT_GAMUT_CODES = {"rec2020", "p3"};
+  private static final String[] GAIN_MAP_GAMUT_LABELS = {"Display P3", "Rec.2020"};
+  private static final String[] GAIN_MAP_GAMUT_CODES = {"p3", "rec2020"};
   int pendingStart = -2;
   AppModel model;
   android.content.SharedPreferences prefs;
@@ -110,12 +114,17 @@ public class MainActivity extends Activity {
     resumed = true;
     model.listener = () -> handler.post(this::refresh);
     updates.setListener(() -> handler.post(() -> {
-      if (resumed) { refreshUpdate(); scheduleAutomaticUpdateCheck(); }
+      if (resumed) {
+        refreshUpdate();
+        maybeOfferUpdate();
+        scheduleAutomaticUpdateCheck();
+      }
     }));
     if (updates.installPending()) updates.resumeInstall(this);
     handler.removeCallbacks(automaticUpdateCheck);
     automaticUpdateCheck.run();
     refreshUpdate();
+    maybeOfferUpdate();
     refresh();
   }
   @Override
@@ -127,12 +136,32 @@ public class MainActivity extends Activity {
     model.listener = null;
     super.onPause();
   }
+  @Override public void onWindowFocusChanged(boolean hasFocus) {
+    super.onWindowFocusChanged(hasFocus);
+    if (hasFocus) maybeOfferUpdate();
+  }
+
   void openUpdates() {
     if (updates.state == UpdateManager.State.IDLE || updates.state == UpdateManager.State.UP_TO_DATE)
       updates.check(true);
+    showUpdateDialog();
+  }
+  void maybeOfferUpdate() {
+    if (!resumed || isFinishing() || updateDialog != null || updates.state != UpdateManager.State.AVAILABLE)
+      return;
+    UpdateManifest.Release release = updates.release;
+    if (release == null || release.versionCode <= updates.offeredVersionCode) return;
+    if (model.running) {
+      // Match the desktop: a check that completes during conversion only adds the indicator.
+      updates.offeredVersionCode = release.versionCode;
+      return;
+    }
+    if (hasWindowFocus()) showUpdateDialog();
+  }
+  void showUpdateDialog() {
     updateDialog = new AlertDialog.Builder(this).setTitle(t("App updates"))
         .setMessage("").setPositiveButton(t("Close"), null).setNegativeButton(t("Close"), null).create();
-    updateDialog.setOnDismissListener(d -> updateDialog = null);
+    updateDialog.setOnDismissListener(d -> { if (updateDialog == d) updateDialog = null; });
     updateDialog.show();
     refreshUpdate();
   }
@@ -146,13 +175,17 @@ public class MainActivity extends Activity {
     }
     if (updateDialog == null || !updateDialog.isShowing()) return;
     String message = updates.message;
-    if (state == UpdateManager.State.AVAILABLE && updates.release != null)
-      message = tf("Version %s is available.", updates.release.version);
+    UpdateManifest.Release release = updates.release;
+    if (state == UpdateManager.State.AVAILABLE && release != null) {
+      updates.offeredVersionCode = Math.max(updates.offeredVersionCode, release.versionCode);
+      message = tf("Version %s is available. Download the update?", release.version);
+    }
     if (state == UpdateManager.State.DOWNLOADING) message = tf("Downloading update: %s%%", updates.progress);
     updateDialog.setMessage(t(message.isEmpty() ? "Check for updates" : message));
     Button action = updateDialog.getButton(AlertDialog.BUTTON_POSITIVE);
     Button close = updateDialog.getButton(AlertDialog.BUTTON_NEGATIVE);
     close.setVisibility(View.VISIBLE);
+    text(close, state == UpdateManager.State.AVAILABLE ? "Later" : "Close");
     action.setVisibility(View.VISIBLE);
     if (state == UpdateManager.State.AVAILABLE) {
       text(action, "Download");
@@ -465,46 +498,50 @@ public class MainActivity extends Activity {
     boolean gamut = f == 0 || f == 1 || f == 2 || f == 3 || f == 5 || f == 7;
     boolean transfer = f == 1 || f == 3 || f == 5;
     if (gamut) {
-      LinearLayout pair = row(optionsPanel);
-      String[] values = (f == 0 || f == 7) ? new String[]{"Rec.709", "Display P3"}
-          : current.gainmap() ? new String[]{"Rec.709", "Display P3", "Rec.2020"}
-          : new String[]{"Rec.2020", "Display P3"};
-      String[] codes = (f == 0 || f == 7) ? new String[]{"rec709", "p3"}
-          : current.gainmap() ? new String[]{"rec709", "p3", "rec2020"}
-          : new String[]{"rec2020", "p3"};
-      inlineChoice(pair, true, "Color gamut", values,
-          Math.max(0, Arrays.asList(codes).indexOf(current.gamut)), "output_gamut",
-          n -> current.gamut = codes[n]);
-      if (transfer) {
-        String[] choices = f == 1 ? new String[]{"PQ", "HLG"}
-            : new String[]{"PQ", "HLG", "Gain map"};
-        inlineChoice(pair, true, "HDR representation", choices, current.transfer,
-            "output_transfer", n -> {
-              current.transfer = n;
-              current.gamut = current.gainmap() ? "p3" : "rec2020";
-              current.suffix = Options.defaultSuffix(current.format, n);
-            });
-      } else if (f == 0 || f == 7) {
-        inlineChoice(pair, true, "Target peak", new String[]{"Faithful / Auto", "1000 nits",
-            "2000 nits", "4000 nits", "10000 nits"}, current.peak, "output_peak",
-            n -> current.peak = n);
-      } else if (f == 2) {
-        inlineChoice(pair, true, "TIFF compression", new String[]{"Compressed", "Uncompressed"},
-            current.compressed ? 0 : 1, "output_compression", n -> current.compressed = n == 0);
+      String[] labels = (f == 0 || f == 7) ? new String[]{"Display P3"}
+          : current.gainmap() ? GAIN_MAP_GAMUT_LABELS : DIRECT_GAMUT_LABELS;
+      String[] codes = (f == 0 || f == 7) ? new String[]{"p3"}
+          : current.gainmap() ? GAIN_MAP_GAMUT_CODES : DIRECT_GAMUT_CODES;
+      if (f == 0 || f == 7) {
+        inlineChoice(optionsPanel, false, "Color gamut", labels,
+            Math.max(0, Arrays.asList(codes).indexOf(current.gamut)), "output_gamut",
+            n -> current.gamut = codes[n]);
+      } else {
+        LinearLayout pair = row(optionsPanel);
+        inlineChoice(pair, true, "Color gamut", labels,
+            Math.max(0, Arrays.asList(codes).indexOf(current.gamut)), "output_gamut",
+            n -> current.gamut = codes[n]);
+        if (transfer) {
+          String[] choices = f == 1 ? new String[]{"PQ", "HLG"}
+              : new String[]{"PQ", "HLG", "Gain map"};
+          inlineChoice(pair, true, "HDR representation", choices, current.transfer,
+              "output_transfer", n -> {
+                boolean wasGainmap = current.gainmap();
+                current.transfer = n;
+                if (wasGainmap != current.gainmap()) {
+                  current.gamut = current.gainmap() ? "p3" : "rec2020";
+                }
+                current.suffix = Options.defaultSuffix(current.format, n);
+              });
+        } else if (f == 2) {
+          inlineChoice(pair, true, "TIFF compression", new String[]{"Compressed", "Uncompressed"},
+              current.compressed ? 0 : 1, "output_compression", n -> current.compressed = n == 0);
+        }
       }
     }
     if (current.gainmap()) {
-      LinearLayout pair = row(optionsPanel);
-      inlineChoice(pair, true, "Gain map size", new String[]{"Quarter", "Half", "Full"},
-          current.scale == 4 ? 0 : current.scale == 1 ? 2 : 1, "output_scale",
-          n -> current.scale = new int[]{4, 2, 1}[n]);
-      if (f == 0 || f == 7)
+      if (f == 0 || f == 7) {
+        LinearLayout pair = row(optionsPanel);
+        inlineChoice(pair, true, "Gain map size", new String[]{"Quarter", "Half", "Full"},
+            current.scale == 4 ? 0 : current.scale == 1 ? 2 : 1, "output_scale",
+            n -> current.scale = new int[]{4, 2, 1}[n]);
         inlineChoice(pair, true, "Channels", new String[]{"Mono", "RGB"}, current.channels,
             "output_channels", n -> current.channels = n);
-      else
-        inlineChoice(pair, true, "Target peak", new String[]{"Faithful / Auto", "1000 nits",
-            "2000 nits", "4000 nits", "10000 nits"}, current.peak, "output_peak",
-            n -> current.peak = n);
+      } else {
+        inlineChoice(optionsPanel, false, "Gain map size", new String[]{"Quarter", "Half", "Full"},
+            current.scale == 4 ? 0 : current.scale == 1 ? 2 : 1, "output_scale",
+            n -> current.scale = new int[]{4, 2, 1}[n]);
+      }
     }
     if (f == 6)
       inlineChoice(optionsPanel, false, "Export", new String[]{"Original", "PNG", "TIFF", "JPEG"},
@@ -1111,7 +1148,7 @@ public class MainActivity extends Activity {
     final HashMap<Integer, Options> drafts = new HashMap<>();
     LinearLayout panel;
     Spinner formatControl, transferControl, gamutControl, scaleControl, channelsControl,
-        peakControl, extractControl, compressionControl;
+        extractControl, compressionControl;
     EditText qualityControl, suffixControl, caption1Control, caption2Control;
     SeekBar qualitySlider;
     CheckBox losslessControl, exifControl, xmpControl, suffixCheck;
@@ -1234,7 +1271,7 @@ public class MainActivity extends Activity {
     void render() {
       rebuilding = true;
       panel.removeAllViews();
-      transferControl = gamutControl = scaleControl = channelsControl = peakControl =
+      transferControl = gamutControl = scaleControl = channelsControl =
           extractControl = compressionControl = null;
       qualityControl = suffixControl = null;
       qualitySlider = null;
@@ -1260,9 +1297,12 @@ public class MainActivity extends Activity {
                 if (rebuilding || n == value.transfer)
                   return;
                 try {
+                  boolean wasGainmap = value.gainmap();
                   read();
                   value.transfer = n;
-                  value.gamut = value.gainmap() ? "p3" : "rec2020";
+                  if (wasGainmap != value.gainmap()) {
+                    value.gamut = value.gainmap() ? "p3" : "rec2020";
+                  }
                   value.suffix = Options.defaultSuffix(value.format, n);
                   render();
                 } catch (Exception e) {
@@ -1273,15 +1313,12 @@ public class MainActivity extends Activity {
             });
       }
       if (f == 0 || f == 1 || f == 2 || f == 3 || f == 5 || f == 7) {
-        String[] labels = (f == 0 || f == 7) ? new String[] {"Rec.709", "Display P3"}
-            : gm                 ? new String[] {"Rec.709", "Display P3", "Rec.2020"}
-                                 : new String[] {"Rec.2020", "Display P3"};
-        int index = (f == 0 || f == 7) ? (value.gamut.equals("rec709") ? 0 : 1)
-            : gm           ? (value.gamut.equals("rec709")      ? 0
-                                     : value.gamut.equals("p3") ? 1
-                                                                : 2)
-                           : (value.gamut.equals("p3") ? 1 : 0);
-        gamutControl = spinner("Gamut", labels, index);
+        String[] labels = (f == 0 || f == 7) ? new String[] {"Display P3"}
+            : gm ? GAIN_MAP_GAMUT_LABELS : DIRECT_GAMUT_LABELS;
+        String[] codes = (f == 0 || f == 7) ? new String[] {"p3"}
+            : gm ? GAIN_MAP_GAMUT_CODES : DIRECT_GAMUT_CODES;
+        gamutControl = spinner("Gamut", labels,
+            Math.max(0, Arrays.asList(codes).indexOf(value.gamut)));
       }
       if (gm) {
         scaleControl = spinner("Gain map resolution", new String[] {"Quarter", "Half", "Full"},
@@ -1296,9 +1333,6 @@ public class MainActivity extends Activity {
           text(t, "Gain map channels: RGB");
           panel.addView(t);
         }
-        peakControl = spinner("Target peak",
-            new String[] {"Faithful / Auto", "1000 nits", "2000 nits", "4000 nits", "10000 nits"},
-            value.peak);
       }
       if (f == 2) {
         TextView fixedTransfer = new TextView(MainActivity.this);
@@ -1399,12 +1433,10 @@ public class MainActivity extends Activity {
         next.caption1 = caption1Control.getText().toString();
         next.caption2 = caption2Control.getText().toString();
       }
-      boolean gm = value.gainmap();
       if (gamutControl != null) {
-        int n = gamutControl.getSelectedItemPosition();
-        next.gamut = (f == 0 || f == 7) ? new String[] {"rec709", "p3"}[n]
-            : gm             ? new String[] {"rec709", "p3", "rec2020"}[n]
-                             : new String[] {"rec2020", "p3"}[n];
+        String[] codes = (f == 0 || f == 7) ? new String[] {"p3"}
+            : value.gainmap() ? GAIN_MAP_GAMUT_CODES : DIRECT_GAMUT_CODES;
+        next.gamut = codes[gamutControl.getSelectedItemPosition()];
       }
       if (transferControl != null)
         next.transfer = transferControl.getSelectedItemPosition();
@@ -1412,8 +1444,6 @@ public class MainActivity extends Activity {
         next.scale = new int[] {4, 2, 1}[scaleControl.getSelectedItemPosition()];
       if (channelsControl != null)
         next.channels = channelsControl.getSelectedItemPosition();
-      if (peakControl != null)
-        next.peak = peakControl.getSelectedItemPosition();
       if (extractControl != null)
         next.extraction = extractControl.getSelectedItemPosition();
       if (compressionControl != null)

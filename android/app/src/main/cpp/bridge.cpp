@@ -55,7 +55,7 @@ hdrbridge::ConversionOptions options_from_json(const std::string& input) {
 #define OPTION(name) read(j, #name, o.name)
   OPTION(mode); OPTION(lossless); OPTION(image_quality); OPTION(effort);
   OPTION(base_quality); OPTION(gainmap_quality); OPTION(gainmap_scale);
-  OPTION(multi_channel_gainmap); OPTION(target_peak_nits); OPTION(output_gamut);
+  OPTION(multi_channel_gainmap); OPTION(output_gamut);
   OPTION(output_representation); OPTION(output_transfer); OPTION(embed_hdr_icc);
   OPTION(png_icc_name_override); OPTION(png_compression_level);
   OPTION(tiff_compression_level); OPTION(tiff_compressed); OPTION(diagnostic_icc_only);

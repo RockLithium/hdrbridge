@@ -937,7 +937,7 @@ std::vector<uint8_t> encode_jxl_gainmap_raster(uint32_t width, uint32_t height,
                                                uint32_t channels,
                                                const JxlColorEncoding& color,
                                                bool use_container,
-                                               bool lossless, float quality) {
+                                               bool lossless, float quality, int effort) {
   auto encoder = JxlEncoderMake(nullptr);
   auto runner = JxlResizableParallelRunnerMake(nullptr);
   if (!encoder || !runner) throw std::runtime_error("cannot create gain-map JPEG XL encoder");
@@ -956,7 +956,10 @@ std::vector<uint8_t> encode_jxl_gainmap_raster(uint32_t width, uint32_t height,
     throw std::runtime_error("cannot configure gain-map JPEG XL raster");
   auto* frame = JxlEncoderFrameSettingsCreate(encoder.get(), nullptr);
   if (!frame) throw std::runtime_error("cannot create gain-map JPEG XL frame");
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, 7);
+  if (JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT,
+                                       std::clamp(effort, 1, 10)) != JXL_ENC_SUCCESS) {
+    throw std::runtime_error("cannot set gain-map JPEG XL effort");
+  }
   if (lossless) JxlEncoderSetFrameLossless(frame, JXL_TRUE);
   else JxlEncoderSetFrameDistance(frame, std::max(0.01f, 1.0f - quality) * 4.0f);
   const JxlPixelFormat format{channels, JXL_TYPE_UINT16, JXL_NATIVE_ENDIAN, 0};
@@ -1057,10 +1060,11 @@ std::vector<uint8_t> encode_gainmap_jxl(const DecodedImage& decoded,
   map_color.transfer_function = JXL_TRANSFER_FUNCTION_LINEAR;
   map_color.rendering_intent = JXL_RENDERING_INTENT_RELATIVE;
   auto base_bytes = encode_jxl_gainmap_raster(decoded.info.width, decoded.info.height, base, 3,
-                                               base_color, true, options.lossless, options.image_quality);
+                                               base_color, true, options.lossless,
+                                               options.image_quality, options.effort);
   auto map_bytes = encode_jxl_gainmap_raster(map_width, map_height, map, channels,
                                               map_color, false, options.lossless,
-                                              options.gainmap_quality / 100.0f);
+                                              options.gainmap_quality / 100.0f, options.effort);
   constexpr uint32_t denominator = 1000000u;
   std::vector<uint8_t> metadata;
   append_be16(metadata, 0); append_be16(metadata, 0);
@@ -1361,7 +1365,7 @@ double histogram_percentile(const std::array<uint64_t, 10001>& histogram,
   return 10000.0;
 }
 
-HdrStats measure_hdr(const DecodedImage& decoded, float requested_target_nits = 0.0f) {
+HdrStats measure_hdr(const DecodedImage& decoded) {
   HdrStats stats;
   std::array<uint64_t, 10001> luminance_histogram{};
   std::array<uint64_t, 10001> channel_histogram{};
@@ -1404,30 +1408,20 @@ HdrStats measure_hdr(const DecodedImage& decoded, float requested_target_nits = 
   }
   stats.p999_nits = histogram_percentile(luminance_histogram, count, 0.999);
   stats.p9999_nits = histogram_percentile(luminance_histogram, count, 0.9999);
-  if (requested_target_nits > 0.0f) {
-    stats.chosen_target_nits = std::clamp(static_cast<double>(requested_target_nits), 203.0, 10000.0);
-    if (stats.chosen_target_nits <= 203.0) {
-      stats.chosen_target_nits = 204.0;
-      stats.reason = "203 nit override adjusted to 204 because libultrahdr requires capacity max > capacity min";
-    } else {
-      stats.reason = "explicit user target peak override";
-    }
+  const double p9999_channel = histogram_percentile(channel_histogram, count, 0.9999);
+  const double robust = std::max(stats.p9999_nits, p9999_channel) * 1.05;
+  const double absolute_peak = std::max(stats.max_luminance_nits, stats.max_channel_nits);
+  if (absolute_peak <= 203.0) {
+    stats.chosen_target_nits = 204.0;
+    stats.reason = "source peak is below the API floor; 204 nits is the minimum decodable capacity above 1.0";
+  } else if (absolute_peak <= std::max(robust * 1.25, robust + 25.0)) {
+    stats.chosen_target_nits = std::ceil(absolute_peak);
+    stats.reason = "finite source maximum is within the 99.99-percentile robustness envelope";
   } else {
-    const double p9999_channel = histogram_percentile(channel_histogram, count, 0.9999);
-    const double robust = std::max(stats.p9999_nits, p9999_channel) * 1.05;
-    const double absolute_peak = std::max(stats.max_luminance_nits, stats.max_channel_nits);
-    if (absolute_peak <= 203.0) {
-      stats.chosen_target_nits = 204.0;
-      stats.reason = "source peak is below the API floor; 204 nits is the minimum decodable capacity above 1.0";
-    } else if (absolute_peak <= std::max(robust * 1.25, robust + 25.0)) {
-      stats.chosen_target_nits = std::ceil(absolute_peak);
-      stats.reason = "finite source maximum is within the 99.99-percentile robustness envelope";
-    } else {
-      stats.chosen_target_nits = std::ceil(std::clamp(robust, 203.0, 10000.0));
-      stats.reason = "99.99-percentile guard excluded sparse hot pixels from capacity selection";
-    }
-    stats.chosen_target_nits = std::clamp(stats.chosen_target_nits, 203.0, 10000.0);
+    stats.chosen_target_nits = std::ceil(std::clamp(robust, 203.0, 10000.0));
+    stats.reason = "99.99-percentile guard excluded sparse hot pixels from capacity selection";
   }
+  stats.chosen_target_nits = std::clamp(stats.chosen_target_nits, 203.0, 10000.0);
   std::vector<uint64_t> clipped_parts(default_worker_count());
   const size_t clipped_workers = parallel_indexed_blocks(
       count, [&](size_t worker, size_t begin, size_t end) {
@@ -2793,6 +2787,8 @@ void encode_avif(const std::filesystem::path& path, const DecodedImage& decoded,
   HeifEncoderPtr encoder(raw_encoder);
   const int quality = std::clamp(static_cast<int>(std::lround(options.image_quality * 100.0f)), 1, 100);
   require_heif(heif_encoder_set_lossy_quality(encoder.get(), quality), "set direct PQ AVIF quality");
+  require_heif(heif_encoder_set_parameter_integer(encoder.get(), "speed",
+      std::clamp(options.avif_speed, 0, 9)), "set direct AVIF encoder speed");
   require_heif(heif_encoder_set_parameter_string(encoder.get(), "chroma", "444"), "force direct PQ AVIF 4:4:4");
   for (auto parameter = heif_encoder_list_parameters(encoder.get()); *parameter; ++parameter) {
     if (std::strcmp(heif_encoder_parameter_get_name(*parameter), "threads") != 0) continue;
@@ -2965,6 +2961,7 @@ void encode_gainmap_avif(const std::filesystem::path& path,
   }
   AvifEncoderPtr encoder(avifEncoderCreate());
   if (!encoder) throw std::bad_alloc();
+  encoder->speed = std::clamp(options.avif_speed, 0, 9);
   encoder->maxThreads = static_cast<int>(default_worker_count());
   encoder->quality = std::clamp(static_cast<int>(std::lround(options.image_quality * 100.0f)), 1, 100);
   encoder->qualityGainMap = std::clamp(options.gainmap_quality, 1, 100);
@@ -4002,7 +3999,7 @@ Verification decode_ultrahdr(const std::vector<uint8_t>& bytes,
     const bool capacity_matches = std::abs(metadata->hdr_capacity_max - expected_capacity) <=
                                   std::max(0.02, expected_capacity * 0.02);
     v.checks.push_back(capacity_matches
-        ? "gain-map capacity matches measured/overridden target peak"
+        ? "gain-map capacity matches measured target peak"
         : "gain-map capacity does not match chosen target peak");
     v.checks.push_back("linear-light source reconstruction RMSE recorded");
   }
@@ -4952,26 +4949,18 @@ ConversionResult convert(const std::filesystem::path& input,
     return convert_gainmap_extract(input, output, options, progress, cancel);
   }
   if (std::filesystem::exists(output) && !options.overwrite) throw std::runtime_error("output exists; overwrite not enabled");
-  if (options.target_peak_nits != 0.0f &&
-      (options.target_peak_nits < 203.0f || options.target_peak_nits > 10000.0f)) {
-    throw std::runtime_error("target peak override must be 203..10000 nits, or zero for Faithful/Auto");
-  }
   if (options.mode == "ultrahdr" && options.gainmap_scale != 1 &&
       options.gainmap_scale != 2 && options.gainmap_scale != 4) {
     throw std::runtime_error("Ultra HDR gain-map scale must be 1 (full), 2 (half), or 4 (quarter)");
   }
-  if (options.output_gamut != "rec2020" && options.output_gamut != "p3" &&
-      options.output_gamut != "rec709") {
-    throw std::runtime_error("output gamut must be rec2020, p3, or rec709");
+  if (options.output_gamut != "rec2020" && options.output_gamut != "p3") {
+    throw std::runtime_error("output gamut must be rec2020 or p3");
   }
   if (options.output_transfer != "pq" && options.output_transfer != "hlg") {
     throw std::runtime_error("output transfer must be pq or hlg");
   }
   if (options.diagnostic_icc_only && options.output_transfer != "pq") {
     throw std::runtime_error("ICC-only regression fixtures are limited to PQ");
-  }
-  if (options.diagnostic_icc_only && options.output_gamut == "rec709") {
-    throw std::runtime_error("diagnostic ICC-only fixture supports Rec.2020 or Display P3");
   }
   if (options.diagnostic_icc_only && options.mode != "png-pq16" &&
       options.mode != "jxl-pq16" && options.mode != "avif-pq10") {
@@ -5021,7 +5010,7 @@ ConversionResult convert(const std::filesystem::path& input,
         decoded.info.asset_kind != "gain-map-hdr") {
       throw std::runtime_error("No HDR data");
     }
-    const HdrStats stats = measure_hdr(decoded, options.target_peak_nits);
+    const HdrStats stats = measure_hdr(decoded);
     std::vector<uint8_t> bytes;
     Verification verification;
     if (options.mode == "jxl-pq16") {
@@ -5149,7 +5138,7 @@ ConversionResult convert(const std::filesystem::path& input,
         report(progress, 50, "Resampling linear HDR to the JPEG 65500-pixel codec limit");
         resized = resize_linear_hdr_to_fit(decoded, 65500u);
         uhdr_source = &*resized;
-        uhdr_stats = measure_hdr(*uhdr_source, options.target_peak_nits);
+        uhdr_stats = measure_hdr(*uhdr_source);
       }
       if (uhdr_stats.chosen_target_nits <= 203.0) {
         uhdr_stats.chosen_target_nits = 204.0;

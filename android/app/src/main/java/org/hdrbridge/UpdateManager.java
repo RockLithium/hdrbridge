@@ -20,6 +20,7 @@ final class UpdateManager {
   volatile String message = "";
   volatile int progress;
   volatile UpdateManifest.Release release;
+  long offeredVersionCode; // UI-thread state shared across Activity instances in this process.
   private final Context context;
   private final ExecutorService worker = Executors.newSingleThreadExecutor();
   private volatile Runnable listener;

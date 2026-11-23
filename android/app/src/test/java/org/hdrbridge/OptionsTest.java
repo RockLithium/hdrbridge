@@ -36,23 +36,22 @@ public class OptionsTest {
       assertEquals(1, o.json().getInt("gainmap_scale"));
       o.gamut = "p3";
       o.scale = 4;
-      o.peak = 2;
       JSONObject j = o.json();
       assertEquals("gainmap", j.getString("output_representation"));
       assertEquals("p3", j.getString("output_gamut"));
       assertTrue(j.getBoolean("multi_channel_gainmap"));
       assertEquals(4, j.getInt("gainmap_scale"));
-      assertEquals(2000, j.getInt("target_peak_nits"));
       assertEquals("_gainmap", Options.defaultSuffix(format, 2));
+      assertEquals("p3", Options.from(o.save().put("output_gamut", "rec709")).gamut);
+      assertEquals("rec2020", Options.from(o.save().put("output_gamut", "rec2020")).gamut);
     }
     Options jpeg = Options.defaults(0);
     assertTrue(jpeg.json().getBoolean("multi_channel_gainmap"));
     assertEquals(1, jpeg.json().getInt("gainmap_scale"));
     jpeg.channels = 0;
-    jpeg.gamut = "rec709";
     jpeg.scale = 2;
     assertFalse(jpeg.json().getBoolean("multi_channel_gainmap"));
-    assertEquals("rec709", jpeg.json().getString("output_gamut"));
+    assertEquals("p3", Options.from(jpeg.save().put("output_gamut", "rec709")).gamut);
     assertEquals(2, jpeg.json().getInt("gainmap_scale"));
   }
 
@@ -80,6 +79,7 @@ public class OptionsTest {
     assertEquals("photo.avif", copy.filename("photo.heic"));
     copy.useSuffix = true;
     assertEquals("photo_custom.avif", copy.filename("photo.heic"));
+    assertEquals("rec2020", Options.from(copy.save().put("output_gamut", "rec709")).gamut);
   }
 
   @Test
@@ -109,6 +109,7 @@ public class OptionsTest {
     assertEquals(95, copy.json().getInt("base_quality"));
     assertEquals("jpeg", copy.json().getString("frame_format"));
     assertEquals("p3", copy.json().getString("output_gamut"));
+    assertEquals("p3", Options.from(o.save().put("output_gamut", "rec709")).gamut);
   }
 
 }

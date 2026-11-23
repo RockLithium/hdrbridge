@@ -41,6 +41,8 @@ bool verify_installer(const std::filesystem::path& path, std::string_view expect
                       std::uint64_t expected_size = 0, std::string* error = nullptr);
 // Call only after the user confirms the update in the UI. Uses the normal installer/UAC flow.
 bool launch_installer(const VerifiedInstaller& installer, std::string* error = nullptr);
+// Used only when an installer launches the GUI. Requires initialized COM.
+bool relaunch_from_explorer_if_elevated();
 
 // Stable numeric versions only. Returns -1, 0, or 1; invalid input returns nullopt.
 std::optional<int> compare_versions(std::string_view lhs, std::string_view rhs);

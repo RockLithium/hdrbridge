@@ -59,10 +59,22 @@ int main(){try{
   // This fixture has only Make, so provide an explicit caption on the first run.
   o.frame_caption1="FRAME TEST";auto jpeg=convert(src,temp.dir/"frame.jpg",o);pairChecks(jpeg);
   require(jpeg.verification.gain_map_channels==3,"RGB gain map");require(jpeg.verification.gain_map_width==jpeg.verification.width&&jpeg.verification.gain_map_height==jpeg.verification.height,"full-resolution gain map");
-  o.frame_format="png";auto png=convert(src,temp.dir/"frame.png",o);pairChecks(png);require(png.timings.canonical_cache_hit,"paired frame cache reused");require(png.verification.exact_roundtrip,"HDR PNG exact decoding");
+  o.frame_format="png";o.output_transfer="hlg";
+  auto png=convert(src,temp.dir/"frame.png",o);pairChecks(png);
+  require(png.timings.canonical_cache_hit,"paired frame cache reused");
+  require(png.verification.exact_roundtrip,"HDR PNG exact decoding");
   require(png.verification.width==jpeg.verification.width&&png.verification.height==jpeg.verification.height,"paired canvas dimensions");
   require(std::any_of(png.verification.checks.begin(),png.verification.checks.end(),[](const std::string& s){return s.find("frame main image origin=")==0 && s.find("size=48x64")!=std::string::npos;}),"source orientation and layout dimensions");
   auto encoded=read(temp.dir/"frame.png");require(chunk(encoded,"eXIf").empty(),"source EXIF must not be copied");
+  require(chunk(encoded,"cICP")==std::vector<uint8_t>{12,18,0,1},"frame PNG signals Display P3/HLG");
+
+  o.frame_format="jpeg";o.output_gamut="rec2020";o.output_transfer="pq";
+  const auto jpeg2020Path=temp.dir/"frame-2020.jpg";
+  const auto jpeg2020=convert(src,jpeg2020Path,o);
+  require(jpeg2020.success&&jpeg2020.verification.passed,"Rec.2020 frame JPEG verified");
+  require(inspect(jpeg2020Path).icc_primaries==9,"frame JPEG base ICC signals Rec.2020");
+
+  o.frame_format="png";
   o.frame_caption1.clear();auto automatic=convert(src,temp.dir/"automatic.png",o);pairChecks(automatic);
   // A source without metadata gives empty automatic captions.
   o.frame_caption1.clear();auto noCaptionSource=temp.dir/"empty.png";createPng(noCaptionSource,true,false);

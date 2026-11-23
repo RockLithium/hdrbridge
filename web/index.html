@@ -66,27 +66,26 @@
     <section class="group" aria-labelledby="format-title">
       <h2 id="format-title" data-i18n="outputFormat">OUTPUT FORMAT</h2>
       <div class="format-grid" id="format-grid">
-        <button class="option-box" type="button" data-format="uhdr" data-i18n="formatUhdr">Ultra HDR JPEG</button>
-        <button class="option-box active" type="button" data-format="png" data-i18n="formatPng">HDR PNG</button>
+        <button class="option-box active" type="button" data-format="uhdr" data-i18n="formatUhdr">Ultra HDR JPEG</button>
+        <button class="option-box" type="button" data-format="png" data-i18n="formatPng">HDR PNG</button>
         <button class="option-box" type="button" data-format="tiff" data-i18n="formatTiff">HDR TIFF</button>
         <button class="option-box" type="button" data-format="jxl">JPEG XL</button>
         <button class="option-box" type="button" data-format="jxr">JPEG XR</button>
         <button class="option-box" type="button" data-format="avif" data-i18n="formatAvif">HDR AVIF</button>
       </div>
-      <div class="availability" id="availability">HDR PNG is available now for direct PQ/HLG HEIF/HIF input.</div>
+      <div class="availability" id="availability">Ultra HDR JPEG with a faithful ISO gain map.</div>
     </section>
 
     <section class="group parameters" aria-label="Format parameters">
       <div class="parameter" id="color-space-row">
         <span class="parameter-label" data-i18n="colorSpace">Color Space</span>
         <div class="inline-options" data-setting="primaries">
-          <button class="mini-option active" type="button" data-value="9">Rec.2020</button>
-          <button class="mini-option" type="button" data-value="12" data-i18n="displayP3">Display P3</button>
-          <button class="mini-option" type="button" data-value="1">Rec.709</button>
+          <button class="mini-option" type="button" data-value="9" hidden>Rec.2020</button>
+          <button class="mini-option active" type="button" data-value="12" data-i18n="displayP3">Display P3</button>
         </div>
       </div>
 
-      <div class="parameter" id="transfer-row">
+      <div class="parameter" id="transfer-row" hidden>
         <span class="parameter-label" data-i18n="transfer">Transfer</span>
         <div class="inline-options" data-setting="transfer">
           <button class="mini-option active" type="button" data-value="16">PQ / ST2084</button>
@@ -95,7 +94,7 @@
         </div>
       </div>
 
-      <div class="parameter" id="gain-resolution-row" hidden>
+      <div class="parameter" id="gain-resolution-row">
         <span class="parameter-label" data-i18n="gainResolution">Gain Map Resolution</span>
         <div class="inline-options" data-setting="gainResolution">
           <button class="mini-option" type="button" data-value="4">1/4</button>
@@ -104,7 +103,7 @@
         </div>
       </div>
 
-      <div class="parameter" id="gain-channels-row" hidden>
+      <div class="parameter" id="gain-channels-row">
         <span class="parameter-label" data-i18n="gainChannels">Gain Map Channels</span>
         <div class="inline-options" data-setting="gainChannels">
           <button class="mini-option" type="button" data-value="mono" data-i18n="mono">Mono</button>
@@ -112,21 +111,10 @@
         </div>
       </div>
 
-      <div class="parameter" id="peak-row" hidden>
-        <span class="parameter-label" data-i18n="peak">Peak</span>
-        <div class="inline-options five-options" data-setting="peak">
-          <button class="mini-option active" type="button" data-value="0" data-i18n="faithful">Faithful / Auto</button>
-          <button class="mini-option" type="button" data-value="1000">1000 nits</button>
-          <button class="mini-option" type="button" data-value="2000">2000 nits</button>
-          <button class="mini-option" type="button" data-value="4000">4000 nits</button>
-          <button class="mini-option" type="button" data-value="10000">10000 nits</button>
-        </div>
-      </div>
-
       <div class="parameter" id="preservation-row">
         <span class="parameter-label" data-i18n="preserve">Preserve</span>
         <div class="inline-options three-options">
-          <button class="mini-option active" id="lossless-option" type="button" data-toggle="lossless" data-i18n="lossless">Lossless</button>
+          <button class="mini-option active" id="lossless-option" type="button" data-toggle="lossless" data-i18n="lossless" hidden>Lossless</button>
           <button class="mini-option active" type="button" data-toggle="copyExif">Exif</button>
           <button class="mini-option active" type="button" data-toggle="copyXmp">XMP</button>
         </div>
@@ -141,10 +129,10 @@
       </div>
 
       <div class="parameter" id="encoding-row">
-        <span class="parameter-label" id="slider-label">PNG Compression</span>
+        <span class="parameter-label" id="slider-label">JPEG Quality</span>
         <div class="slider-line">
-          <input id="encoding-slider" type="range" min="1" max="9" value="4" step="1">
-          <output id="encoding-value" for="encoding-slider">4</output>
+          <input id="encoding-slider" type="range" min="1" max="100" value="95" step="1">
+          <output id="encoding-value" for="encoding-slider">95</output>
         </div>
       </div>
     </section>
@@ -185,6 +173,6 @@
         }).catch(() => {});
     }
   </script>
-  <script type="module" src="./src/app.js?v=9"></script>
+  <script type="module" src="./src/app.js?v=10"></script>
 </body>
 </html>

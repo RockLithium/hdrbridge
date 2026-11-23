@@ -12,8 +12,8 @@ const translations = {
     representation: "Representation", raster: "Raster", signal: "Signal", metadata: "Metadata", outputFormat: "OUTPUT FORMAT",
     formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
     colorSpace: "Color Space", displayP3: "Display P3", transfer: "Transfer", gainMap: "Gain Map", gainResolution: "Gain Map Resolution", gainChannels: "Gain Map Channels", mono: "Mono",
-    faithful: "Faithful / Auto", lossless: "Lossless",
-    peak: "Peak", preserve: "Preserve", convert: "Start Processing", stop: "Stop Processing", complete: "Processing Complete",
+    lossless: "Lossless",
+    preserve: "Preserve", convert: "Start Processing", stop: "Stop Processing", complete: "Processing Complete",
     selectBegin: "Select a supported HDR image to begin.", preview: "PREVIEW", noFile: "No file loaded", download: "DOWNLOAD",
     previewUnavailable: "Preview unavailable in this browser", coreLoading: "Loading the local conversion core...", inspecting: "Inspecting the HDR container locally...",
     coreLoadFailed: "The conversion core could not be downloaded. Open Compatibility Mode? You will need to select the image again.",
@@ -35,8 +35,8 @@ const translations = {
     representation: "源表示", raster: "图像", signal: "信号", metadata: "元数据", outputFormat: "输出格式",
     formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
     colorSpace: "色彩空间", displayP3: "Display P3", transfer: "传递函数", gainMap: "增益图", gainResolution: "增益图分辨率", gainChannels: "增益图通道", mono: "单通道",
-    faithful: "保真 / 自动", lossless: "无损",
-    peak: "峰值", preserve: "保留", convert: "开始转换", stop: "停止转换", complete: "转换完成",
+    lossless: "无损",
+    preserve: "保留", convert: "开始转换", stop: "停止转换", complete: "转换完成",
     selectBegin: "请选择受支持的 HDR 图像。", preview: "预览", noFile: "未加载文件", download: "下载",
     previewUnavailable: "此浏览器无法预览该格式", coreLoading: "正在加载本地转换核心...", inspecting: "正在本地检查 HDR 容器...",
     coreLoadFailed: "无法下载转换核心。是否打开兼容模式？你需要重新选择图像。",
@@ -58,8 +58,8 @@ const translations = {
     representation: "Représentation", raster: "Image", signal: "Signal", metadata: "Métadonnées", outputFormat: "FORMAT DE SORTIE",
     formatUhdr: "JPEG Ultra HDR", formatPng: "PNG HDR", formatAvif: "AVIF HDR", formatTiff: "TIFF HDR",
     colorSpace: "Espace colorimétrique", displayP3: "Display P3", transfer: "Transfert", gainMap: "Gain map", gainResolution: "Résolution de la gain map", gainChannels: "Canaux de la gain map", mono: "Mono",
-    faithful: "Fidèle / Auto", lossless: "Sans perte",
-    peak: "Pic", preserve: "Conserver", convert: "Lancer la conversion", stop: "Arrêter", complete: "Terminé",
+    lossless: "Sans perte",
+    preserve: "Conserver", convert: "Lancer la conversion", stop: "Arrêter", complete: "Terminé",
     selectBegin: "Choisissez une image HDR prise en charge.", preview: "APERÇU", noFile: "Aucun fichier", download: "TÉLÉCHARGER",
     previewUnavailable: "Aperçu indisponible dans ce navigateur", coreLoading: "Chargement du moteur de conversion local...", inspecting: "Analyse locale du conteneur HDR...",
     coreLoadFailed: "Impossible de télécharger le moteur de conversion. Ouvrir le mode de compatibilité ? Vous devrez sélectionner de nouveau l’image.",
@@ -81,8 +81,8 @@ const translations = {
     representation: "Представление", raster: "Растр", signal: "Сигнал", metadata: "Метаданные", outputFormat: "ФОРМАТ ВЫВОДА",
     formatUhdr: "Ultra HDR JPEG", formatPng: "HDR PNG", formatAvif: "HDR AVIF", formatTiff: "HDR TIFF",
     colorSpace: "Цветовое пространство", displayP3: "Display P3", transfer: "Передаточная функция", gainMap: "Карта усиления", gainResolution: "Разрешение карты усиления", gainChannels: "Каналы карты усиления", mono: "Моно",
-    faithful: "Точно / Авто", lossless: "Без потерь",
-    peak: "Пик", preserve: "Сохранить", convert: "Запустить", stop: "Остановить", complete: "Готово",
+    lossless: "Без потерь",
+    preserve: "Сохранить", convert: "Запустить", stop: "Остановить", complete: "Готово",
     selectBegin: "Выберите поддерживаемое HDR-изображение.", preview: "ПРЕДПРОСМОТР", noFile: "Файл не выбран", download: "СКАЧАТЬ",
     previewUnavailable: "Предпросмотр недоступен в этом браузере", coreLoading: "Загрузка локального ядра преобразования...", inspecting: "Локальная проверка HDR-контейнера...",
     coreLoadFailed: "Не удалось загрузить ядро преобразования. Открыть режим совместимости? Изображение потребуется выбрать снова.",
@@ -102,13 +102,12 @@ const translations = {
 const state = {
   file: null,
   sourceSupported: false,
-  format: "png",
-  primaries: 9,
+  format: "uhdr",
+  primaries: 12,
   transfer: 16,
   outputRepresentation: "direct",
   gainResolution: 1,
   gainChannels: "rgb",
-  peak: 0,
   lossless: true,
   copyExif: true,
   copyXmp: true,
@@ -144,7 +143,6 @@ const elements = {
   transferRow: document.querySelector("#transfer-row"),
   gainResolutionRow: document.querySelector("#gain-resolution-row"),
   gainChannelsRow: document.querySelector("#gain-channels-row"),
-  peakRow: document.querySelector("#peak-row"),
   losslessOption: document.querySelector("#lossless-option"),
   tiffCompressionRow: document.querySelector("#tiff-compression-row"),
   encodingRow: document.querySelector("#encoding-row"),
@@ -320,7 +318,7 @@ function clearOutput() {
 }
 
 function optionValue(setting, rawValue) {
-  return ["primaries", "gainResolution", "peak"].includes(setting)
+  return ["primaries", "gainResolution"].includes(setting)
     ? Number(rawValue)
     : setting === "transfer" && rawValue !== "gainmap" ? Number(rawValue)
     : rawValue;
@@ -343,13 +341,13 @@ function configureParameters() {
   const supportsTransfer = ["png", "jxl", "avif"].includes(state.format);
   elements.gainmapTransferOption.hidden = !supportsRepresentation;
   elements.colorRow.hidden = !supportsColor;
+  elements.colorRow.querySelector('[data-value="9"]').hidden = isUhdr;
   elements.transferRow.hidden = !supportsTransfer;
   elements.gainResolutionRow.hidden = !isGainMap;
   elements.gainChannelsRow.hidden = !isGainMap;
   const monoChannel = elements.gainChannelsRow.querySelector('[data-value="mono"]');
   monoChannel.hidden = rgbOnlyGainMap;
   if (rgbOnlyGainMap) state.gainChannels = "rgb";
-  elements.peakRow.hidden = !isGainMap;
   const parameters = elements.colorRow.parentElement;
   const preservationRow = document.querySelector("#preservation-row");
   if (isGainMap && supportsRepresentation) {
@@ -365,7 +363,6 @@ function configureParameters() {
   elements.losslessOption.disabled = fixedLossless;
   elements.tiffCompressionRow.hidden = state.format !== "tiff";
   elements.encodingRow.hidden = (isJxl || isJxr) && state.lossless;
-  document.querySelector('[data-setting="primaries"] [data-value="1"]').hidden = !isGainMap;
 
   if (state.format === "png" || state.format === "tiff") {
     elements.sliderLabel.textContent = tr(state.format === "png" ? "compressionPng" : "compressionTiff");
@@ -386,7 +383,6 @@ function configureParameters() {
 
   updateOptionButtons("primaries");
   updateOptionButtons("transfer");
-  updateOptionButtons("peak");
   updateOptionButtons("gainResolution");
   updateOptionButtons("gainChannels");
   updateOptionButtons("tiffCompression");
@@ -571,7 +567,6 @@ async function convert() {
     copyXmp: state.copyXmp,
     gainResolution: state.gainResolution,
     gainChannels: state.gainChannels,
-    peak: state.peak,
   };
   await runForCurrentRequest(file, requestId, (id) => id === state.requestId, (buffer) => {
     postCodecMessage({
@@ -606,12 +601,15 @@ document.querySelectorAll("[data-format]").forEach((button) => {
 document.querySelectorAll("[data-setting]").forEach((group) => {
   group.addEventListener("click", (event) => {
     const button = event.target.closest(".mini-option");
-    if (!button) return;
+    if (!button || button.hidden) return;
     const setting = group.dataset.setting;
+    const prevRepresentation = state.outputRepresentation;
     state[setting] = optionValue(setting, button.dataset.value);
     if (setting === "transfer") {
       state.outputRepresentation = state.transfer === "gainmap" ? "gainmap" : "direct";
-      state.primaries = state.outputRepresentation === "gainmap" ? 12 : 9;
+      if (prevRepresentation !== state.outputRepresentation) {
+        state.primaries = state.outputRepresentation === "gainmap" ? 12 : 9;
+      }
       if (state.outputRepresentation === "gainmap") state.gainChannels = "rgb";
     }
     updateOptionButtons(setting);

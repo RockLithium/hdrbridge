@@ -68,7 +68,7 @@ Name: "{group}\HDR Bridge"; Filename: "{app}\hdrbridge.exe"; WorkingDir: "{app}"
 Name: "{autodesktop}\HDR Bridge"; Filename: "{app}\hdrbridge.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\hdrbridge.exe"; Description: "{cm:LaunchProgram,HDR Bridge}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\hdrbridge.exe"; Parameters: "--post-install"; Description: "{cm:LaunchProgram,HDR Bridge}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 const
