@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.pm.ActivityInfo;
 import android.database.Cursor;
 import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -19,6 +20,9 @@ import android.view.Surface;
 import android.view.SurfaceControl;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -37,7 +41,7 @@ public final class HdrPreviewActivity extends Activity {
   private long nativeSession;
   private int imageWidth, imageHeight, width, height;
   private float fitScale = 1, scale = 1, x, y, peak = 1, displayHeadroom;
-  private boolean closing, surfaceReady, attached, renderPending, warned, hdrListenerRegistered;
+  private boolean isFit = true, closing, surfaceReady, attached, renderPending, warned, hdrListenerRegistered;
   private int retries;
   private final Consumer<Display> hdrRatioListener = display -> {
     float next = readDisplayHeadroom(display);
@@ -66,6 +70,14 @@ public final class HdrPreviewActivity extends Activity {
     }
     Display display = getDisplay();
     getWindow().setColorMode(ActivityInfo.COLOR_MODE_HDR);
+    getWindow().setBackgroundDrawable(new ColorDrawable(Color.BLACK));
+    if (Build.VERSION.SDK_INT >= 30) {
+      getWindow().setDecorFitsSystemWindows(false);
+      WindowManager.LayoutParams lp = getWindow().getAttributes();
+      lp.layoutInDisplayCutoutMode =
+          WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+      getWindow().setAttributes(lp);
+    }
     displayHeadroom = readDisplayHeadroom(display);
     if (display.isHdrSdrRatioAvailable()) {
       display.registerHdrSdrRatioChangedListener(getMainExecutor(), hdrRatioListener);
@@ -76,6 +88,7 @@ public final class HdrPreviewActivity extends Activity {
     view = new SurfaceView(this);
     root.addView(view, new FrameLayout.LayoutParams(-1, -1));
     setContentView(root);
+    hideSystemBars();
     worker = new HandlerThread("hdr-preview-gl");
     worker.start();
     handler = new Handler(worker.getLooper());
@@ -87,9 +100,23 @@ public final class HdrPreviewActivity extends Activity {
       }
       @Override public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
         synchronized (lock) {
-          boolean wasFit = Math.abs(scale - fitScale) < .001f;
+          int oldWidth = width, oldHeight = height;
+          float oldFitScale = fitScale;
           width = w; height = h; surfaceReady = true;
-          if (wasFit) fitLocked();
+          if (oldWidth <= 0 || oldHeight <= 0 || imageWidth <= 0 || imageHeight <= 0 || oldFitScale <= 0 || isFit) {
+            fitLocked();
+          } else {
+            float oldScale = scale;
+            float relativeZoom = oldScale / oldFitScale;
+            float imgCenterX = oldScale > 0 ? (oldWidth * 0.5f - x) / oldScale : imageWidth * 0.5f;
+            float imgCenterY = oldScale > 0 ? (oldHeight * 0.5f - y) / oldScale : imageHeight * 0.5f;
+            fitScale = Math.min((float) width / imageWidth, (float) height / imageHeight);
+            float maxZoom = Math.max(fitScale * 32f, 4f);
+            scale = Math.max(fitScale * .25f, Math.min(maxZoom, fitScale * relativeZoom));
+            x = width * 0.5f - imgCenterX * scale;
+            y = height * 0.5f - imgCenterY * scale;
+            clampLocked();
+          }
         }
         attach(holder.getSurface());
         requestRender();
@@ -125,11 +152,27 @@ public final class HdrPreviewActivity extends Activity {
     decode();
   }
 
+  @Override public void onWindowFocusChanged(boolean hasFocus) {
+    super.onWindowFocusChanged(hasFocus);
+    if (hasFocus && !closing) hideSystemBars();
+  }
+
+  private void hideSystemBars() {
+    if (Build.VERSION.SDK_INT < 30) return;
+    WindowInsetsController controller = getWindow().getInsetsController();
+    if (controller == null) return;
+    controller.setSystemBarsBehavior(
+        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+    controller.hide(WindowInsets.Type.systemBars());
+  }
+
   private void setupGestures() {
     ScaleGestureDetector pinch = new ScaleGestureDetector(this,
         new ScaleGestureDetector.SimpleOnScaleGestureListener() {
           @Override public boolean onScale(ScaleGestureDetector d) {
-            synchronized (lock) { zoomLocked(d.getScaleFactor(), d.getFocusX(), d.getFocusY()); }
+            float factor = d.getScaleFactor();
+            if (factor == 1f) return true;
+            synchronized (lock) { zoomLocked(factor, d.getFocusX(), d.getFocusY()); }
             requestRender(); return true;
           }
         });
@@ -138,13 +181,13 @@ public final class HdrPreviewActivity extends Activity {
           @Override public boolean onDown(MotionEvent e) { return true; }
           @Override public boolean onDoubleTap(MotionEvent e) {
             synchronized (lock) {
-              if (scale > fitScale * 1.1f) fitLocked();
+              if (!isFit) fitLocked();
               else zoomLocked(2, e.getX(), e.getY());
             }
             requestRender(); return true;
           }
           @Override public boolean onScroll(MotionEvent a, MotionEvent b, float dx, float dy) {
-            synchronized (lock) { x -= dx; y -= dy; }
+            synchronized (lock) { x -= dx; y -= dy; clampLocked(); }
             requestRender(); return true;
           }
         });
@@ -156,15 +199,27 @@ public final class HdrPreviewActivity extends Activity {
     });
   }
   private void zoomLocked(float factor, float fx, float fy) {
-    if (imageWidth <= 0) return;
-    float next = Math.max(fitScale * .25f, Math.min(fitScale * 32, scale * factor));
+    if (imageWidth <= 0 || fitScale <= 0) return;
+    isFit = false;
+    float maxZoom = Math.max(fitScale * 32f, 4f);
+    float next = Math.max(fitScale * .25f, Math.min(maxZoom, scale * factor));
     float ratio = next / scale;
     x = fx - (fx - x) * ratio; y = fy - (fy - y) * ratio; scale = next;
+    clampLocked();
+  }
+  private void clampLocked() {
+    if (width <= 0 || height <= 0 || imageWidth <= 0 || imageHeight <= 0) return;
+    float drawW = imageWidth * scale;
+    float drawH = imageHeight * scale;
+    if (drawW <= width) x = (width - drawW) * 0.5f;
+    else x = Math.max(width - drawW, Math.min(0f, x));
+    if (drawH <= height) y = (height - drawH) * 0.5f;
+    else y = Math.max(height - drawH, Math.min(0f, y));
   }
   private void fitLocked() {
     if (width <= 0 || height <= 0 || imageWidth <= 0 || imageHeight <= 0) return;
     fitScale = Math.min((float) width / imageWidth, (float) height / imageHeight);
-    scale = fitScale; x = (width - imageWidth * scale) / 2; y = (height - imageHeight * scale) / 2;
+    scale = fitScale; isFit = true; x = (width - imageWidth * scale) / 2; y = (height - imageHeight * scale) / 2;
   }
 
   private void decode() {

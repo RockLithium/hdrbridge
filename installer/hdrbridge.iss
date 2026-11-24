@@ -65,6 +65,8 @@ Type: files; Name: "{app}\docs\COMPATIBILITY_MATRIX.md"
 Type: files; Name: "{app}\docs\METADATA.md"
 Type: files; Name: "{app}\docs\CONVERSION_FIDELITY.md"
 Type: dirifempty; Name: "{app}\docs"
+Type: files; Name: "{app}\assets\frame-logos\LICENSE-yiyin.txt"
+Type: files; Name: "{app}\assets\frame-logos\songdian-w.svg"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

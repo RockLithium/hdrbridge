@@ -867,11 +867,12 @@ class PreviewRenderer {
       textures_ = std::move(textures);
       image_width_ = image.width;
       image_height_ = image.height;
-      fit_ = true;
+      error_.clear();
+      fit_ = fitted_scale() < 1.0f;
       zoom_ = 1.0f;
       pan_x_ = pan_y_ = 0.0f;
-      if (zoom_combo_) SendMessageW(zoom_combo_, CB_SETCURSEL, 0, 0);
-      error_.clear();
+      if (fit_) sync_fit_combo();
+      else update_zoom_combo();
       const std::wstring title = HB_UI("HDR Bridge — Preview — ") +
           std::to_wstring(image_width_) + L" × " + std::to_wstring(image_height_);
       ui::set_text(window_, title.c_str());
@@ -1149,12 +1150,39 @@ class PreviewRenderer {
                         image_height_);
   }
 
+  void clamp_pan() {
+    if (!window_ || image_width_ == 0 || image_height_ == 0) return;
+    if (fit_) {
+      pan_x_ = pan_y_ = 0.0f;
+      return;
+    }
+    RECT rect{};
+    GetClientRect(window_, &rect);
+    const float viewport_width = static_cast<float>(std::max<LONG>(1, rect.right));
+    const float viewport_height = static_cast<float>(
+        std::max<LONG>(1, rect.bottom - toolbar_height_));
+    const float max_pan_x = std::max(0.0f, (image_width_ * zoom_ - viewport_width) * 0.5f);
+    const float max_pan_y = std::max(0.0f, (image_height_ * zoom_ - viewport_height) * 0.5f);
+    pan_x_ = std::clamp(pan_x_, -max_pan_x, max_pan_x);
+    pan_y_ = std::clamp(pan_y_, -max_pan_y, max_pan_y);
+  }
+
+  void sync_fit_combo() {
+    if (!zoom_combo_) return;
+    updating_zoom_text_ = true;
+    ui::set_text(zoom_combo_, HB_UI("Fit"));
+    SendMessageW(zoom_combo_, CB_SETCURSEL, 0, 0);
+    updating_zoom_text_ = false;
+  }
+
   void set_zoom(float next, POINT anchor) {
     if (image_width_ == 0 || image_height_ == 0) return;
     RECT rect{};
     GetClientRect(window_, &rect);
-    const float old_scale = fit_ ? fitted_scale() : zoom_;
-    next = std::clamp(next, 0.05f, 16.0f);
+    const float fit = fitted_scale();
+    const float old_scale = fit_ ? fit : zoom_;
+    next = std::clamp(next, std::min(0.01f, fit), std::max(16.0f, fit));
+    if (fit_ && next == old_scale && (fit <= 0.01f || fit >= 16.0f)) return;
     const float center_x = rect.right * 0.5f;
     const float center_y = (rect.bottom - toolbar_height_) * 0.5f;
     const float image_x = (anchor.x - center_x - pan_x_) / old_scale;
@@ -1163,6 +1191,7 @@ class PreviewRenderer {
     zoom_ = next;
     pan_x_ = anchor.x - center_x - image_x * next;
     pan_y_ = anchor.y - center_y - image_y * next;
+    clamp_pan();
     update_zoom_combo();
     render();
   }
@@ -1170,12 +1199,7 @@ class PreviewRenderer {
   void set_fit() {
     fit_ = true;
     pan_x_ = pan_y_ = 0.0f;
-    if (zoom_combo_) {
-      updating_zoom_text_ = true;
-      ui::set_text(zoom_combo_, HB_UI("Fit"));
-      SendMessageW(zoom_combo_, CB_SETCURSEL, 0, 0);
-      updating_zoom_text_ = false;
-    }
+    sync_fit_combo();
     render();
   }
 
@@ -1209,7 +1233,10 @@ class PreviewRenderer {
     }
     wchar_t* end = nullptr;
     const double percent = wcstod(value.c_str(), &end);
-    if (end == value.c_str() || *end != L'\0' || percent < 5.0 || percent > 1600.0) return;
+    const float fit = fitted_scale();
+    const double min_percent = std::min(1.0, static_cast<double>(fit) * 100.0);
+    const double max_percent = std::max(1600.0, static_cast<double>(fit) * 100.0);
+    if (end == value.c_str() || *end != L'\0' || percent < min_percent || percent > max_percent) return;
     RECT rect{};
     GetClientRect(window_, &rect);
     set_zoom(static_cast<float>(percent / 100.0),
@@ -1286,6 +1313,16 @@ class PreviewRenderer {
       case WM_SIZE:
         self->layout_toolbar();
         self->resize();
+        if (!self->fit_ && self->image_width_ > 0 && self->image_height_ > 0) {
+          const float fit = self->fitted_scale();
+          const float clamped_zoom = std::clamp(
+              self->zoom_, std::min(0.01f, fit), std::max(16.0f, fit));
+          if (clamped_zoom != self->zoom_) {
+            self->zoom_ = clamped_zoom;
+            self->update_zoom_combo();
+          }
+        }
+        self->clamp_pan();
         self->render();
         return 0;
       case WM_MEASUREITEM: {
@@ -1360,8 +1397,21 @@ class PreviewRenderer {
       case WM_MOUSEMOVE:
         if (self->dragging_) {
           if (self->fit_) return 0;
-          self->pan_x_ = self->drag_pan_x_ + GET_X_LPARAM(lparam) - self->drag_origin_.x;
-          self->pan_y_ = self->drag_pan_y_ + GET_Y_LPARAM(lparam) - self->drag_origin_.y;
+          const int cursor_x = GET_X_LPARAM(lparam);
+          const int cursor_y = GET_Y_LPARAM(lparam);
+          const float raw_x = self->drag_pan_x_ + cursor_x - self->drag_origin_.x;
+          const float raw_y = self->drag_pan_y_ + cursor_y - self->drag_origin_.y;
+          self->pan_x_ = raw_x;
+          self->pan_y_ = raw_y;
+          self->clamp_pan();
+          if (self->pan_x_ != raw_x) {
+            self->drag_pan_x_ = self->pan_x_;
+            self->drag_origin_.x = cursor_x;
+          }
+          if (self->pan_y_ != raw_y) {
+            self->drag_pan_y_ = self->pan_y_;
+            self->drag_origin_.y = cursor_y;
+          }
           self->render();
           return 0;
         }
