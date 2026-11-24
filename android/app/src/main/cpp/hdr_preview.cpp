@@ -1,5 +1,6 @@
 #include "hdr_preview.h"
 #include "hdrbridge_core.h"
+#include "hdr_preview_tiles.h"
 #include <android/native_window.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -17,6 +18,7 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <limits>
 
 namespace hdrbridge::android_preview {
 namespace {
@@ -123,13 +125,50 @@ struct Renderer::Impl {
   PreviewImage image;
   float peak = 1;
   EGLDisplay display = EGL_NO_DISPLAY; EGLContext context = EGL_NO_CONTEXT; EGLSurface surface = EGL_NO_SURFACE;
-  GLuint texture = 0, program = 0, vao = 0;
-  bool uploaded = false;
+  GLuint program = 0, vao = 0;
+  uint32_t textureLimit = 0;
+  struct Texture { preview::Tile tile; GLuint name = 0; };
+  std::vector<Texture> textures;
   int mode = 0, ringWidth = 0, ringHeight = 0;
   ASurfaceControl* child = nullptr;
   struct Slot { AHardwareBuffer* buffer=nullptr; EGLImageKHR image=EGL_NO_IMAGE_KHR; GLuint texture=0, framebuffer=0; };
   std::array<Slot, 3> slots{};
   std::shared_ptr<RingState> ring;
+  void clearTextures(bool contextCurrent = true) {
+    if (contextCurrent) {
+      for (const auto& texture : textures) glDeleteTextures(1, &texture.name);
+    }
+    textures.clear();
+  }
+  bool uploadTextures() {
+    GLint limit = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &limit);
+    if (limit <= 0) return false;
+    const auto tiles = preview::texture_tiles(image.width, image.height,
+        std::min(textureLimit, static_cast<uint32_t>(limit)));
+    textures.reserve(tiles.size());
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, static_cast<GLint>(image.width));
+    for (const auto& tile : tiles) {
+      auto& texture = textures.emplace_back(Texture{tile});
+      glGenTextures(1, &texture.name);
+      glBindTexture(GL_TEXTURE_2D, texture.name);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      const auto* pixels = image.rgba_fp16.data() +
+          (static_cast<size_t>(tile.y.sample_offset) * image.width + tile.x.sample_offset) * 4u;
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, tile.x.sample_length, tile.y.sample_length,
+                   0, GL_RGBA, GL_HALF_FLOAT, pixels);
+      if (glGetError() != GL_NO_ERROR) {
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        clearTextures();
+        return false;
+      }
+    }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    return true;
+  }
   void clearSlots(bool contextCurrent = true) {
     auto& api=surfaceApi();
     for(auto& s: slots) {
@@ -177,13 +216,12 @@ int Renderer::maxTextureSize() {
   }
   if (oldDisplay != EGL_NO_DISPLAY && oldContext != EGL_NO_CONTEXT)
     eglMakeCurrent(oldDisplay, oldDraw, oldRead, oldContext);
-  return std::min(result,16384);
+  return result;
 }
 bool Renderer::decode(const std::string& path, uint32_t limit, std::string& error) {
   try {
-    auto info = inspect(path);
-    if (info.width > limit || info.height > limit) { error="Image exceeds the maximum HDR texture size"; return false; }
-    auto image = decode_preview(path, limit); if (!image.width || !image.height || image.rgba_fp16.empty()) { error="Image decode produced no pixels"; return false; }
+    auto image = decode_preview(path, std::numeric_limits<uint32_t>::max());
+    if (!image.width || !image.height || image.rgba_fp16.empty()) { error="Image decode produced no pixels"; return false; }
     // Positive finite IEEE half values have the same ordering as their bit patterns.
     // Scan all channels exactly, converting only the maximum instead of every sample.
     uint16_t maximum = 0;
@@ -194,7 +232,7 @@ bool Renderer::decode(const std::string& path, uint32_t limit, std::string& erro
       }
     }
     const float peak = std::max(1.0f, half(maximum));
-    impl_->image=std::move(image); impl_->peak=std::clamp(peak / (203.f / 80.f),1.f,16.f); impl_->uploaded=false; return true;
+    impl_->image=std::move(image); impl_->peak=std::clamp(peak / (203.f / 80.f),1.f,16.f); impl_->textureLimit=limit; return true;
   } catch(const std::exception& e) { error=e.what(); return false; }
 }
 uint32_t Renderer::width() const { return impl_->image.width; }
@@ -225,8 +263,12 @@ int Renderer::attach(ANativeWindow* window, std::string& error) {
     }
     if(p.surface==EGL_NO_SURFACE || !eglMakeCurrent(p.display,p.surface,p.surface,p.context)) return false;
     const char* vs=R"(#version 300 es
-      precision highp float; uniform vec4 transform; uniform int flip; out vec2 uv;
-      void main(){ vec2 p=vec2((gl_VertexID&1)==1?1.:-1.,gl_VertexID>=2?1.:-1.); uv=vec2((p.x+1.)*.5,flip==1?(p.y+1.)*.5:(1.-p.y)*.5); gl_Position=vec4(p*transform.xy+transform.zw,0,1); })";
+      precision highp float; uniform vec4 bounds; uniform vec4 sampleRect; uniform int flip; out vec2 uv;
+      void main(){
+        bool right=(gl_VertexID&1)==1, top=gl_VertexID>=2;
+        uv=vec2(right?sampleRect.z:sampleRect.x,(top!=(flip==1))?sampleRect.y:sampleRect.w);
+        gl_Position=vec4(right?bounds.z:bounds.x,top?bounds.w:bounds.y,0,1);
+      })";
     const char* fs=R"(#version 300 es
       precision highp float; uniform sampler2D image; uniform int mode; uniform float headroom; uniform float peak; in vec2 uv; out vec4 color;
       void main(){ vec3 c=texture(image,uv).rgb;
@@ -249,7 +291,7 @@ int Renderer::attach(ANativeWindow* window, std::string& error) {
     GLuint v=shader(GL_VERTEX_SHADER,vs), f=shader(GL_FRAGMENT_SHADER,fs);
     if(!v || !f) { if(v) glDeleteShader(v); if(f) glDeleteShader(f); return false; }
     p.program=glCreateProgram(); glAttachShader(p.program,v); glAttachShader(p.program,f); glLinkProgram(p.program); glDeleteShader(v); glDeleteShader(f); GLint ok=0; glGetProgramiv(p.program,GL_LINK_STATUS,&ok); if(!ok) return false;
-    glGenTextures(1,&p.texture); glBindTexture(GL_TEXTURE_2D,p.texture); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE); glGenVertexArrays(1,&p.vao);
+    glGenVertexArrays(1,&p.vao);
     if(mode==1 && !p.makeSlots(64,64)) return false;
     p.mode=mode; return true;
   };
@@ -259,8 +301,8 @@ int Renderer::attach(ANativeWindow* window, std::string& error) {
 FrameResult Renderer::render(int w,int h,float scale,float x,float y,float displayHeadroom) {
   auto& p=*impl_; if(p.surface==EGL_NO_SURFACE || !p.image.width || w<=0 || h<=0 || !std::isfinite(scale) || scale<=0 || !std::isfinite(x) || !std::isfinite(y)) return FrameResult::Busy;
   if(!eglMakeCurrent(p.display,p.surface,p.surface,p.context)) return FrameResult::Busy;
-  glBindTexture(GL_TEXTURE_2D,p.texture);
-  if(!p.uploaded) { GLint max=0; glGetIntegerv(GL_MAX_TEXTURE_SIZE,&max); if(p.image.width>unsigned(max)||p.image.height>unsigned(max)) return FrameResult::Unavailable; glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA16F,p.image.width,p.image.height,0,GL_RGBA,GL_HALF_FLOAT,p.image.rgba_fp16.data()); if(glGetError()!=GL_NO_ERROR) return FrameResult::Unavailable; p.uploaded=true; }
+  glActiveTexture(GL_TEXTURE0);
+  if(p.textures.empty() && !p.uploadTextures()) return FrameResult::Unavailable;
   int index=-1; auto& api=surfaceApi();
   if(p.mode==1) {
     if(!p.makeSlots(w,h)) return FrameResult::Busy;
@@ -274,15 +316,28 @@ FrameResult Renderer::render(int w,int h,float scale,float x,float y,float displ
     if(index<0) return FrameResult::Busy;
     glBindFramebuffer(GL_FRAMEBUFFER,p.slots[index].framebuffer);
   } else glBindFramebuffer(GL_FRAMEBUFFER,0);
-  float drawWidth=p.image.width*scale, drawHeight=p.image.height*scale;
-  glViewport(0,0,w,h); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT); glUseProgram(p.program); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,p.texture);
-  float yOffset=1-(2*y+drawHeight)/h;
-  glUniform4f(glGetUniformLocation(p.program,"transform"),drawWidth/w,drawHeight/h,(2*x+drawWidth)/w-1,p.mode==1 ? -yOffset : yOffset);
+  glViewport(0,0,w,h); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT); glUseProgram(p.program);
   glUniform1i(glGetUniformLocation(p.program,"image"),0); glUniform1i(glGetUniformLocation(p.program,"mode"),p.mode); glUniform1i(glGetUniformLocation(p.program,"flip"),p.mode==1);
   float desired=std::clamp(p.peak,1.f,16.f);
   float headroom=(displayHeadroom>0.f && std::isfinite(displayHeadroom)) ? std::clamp(displayHeadroom,1.f,desired) : desired;
   glUniform1f(glGetUniformLocation(p.program,"headroom"),headroom); glUniform1f(glGetUniformLocation(p.program,"peak"),desired);
-  glBindVertexArray(p.vao); glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+  glBindVertexArray(p.vao);
+  const GLint boundsUniform = glGetUniformLocation(p.program, "bounds");
+  const GLint sampleRectUniform = glGetUniformLocation(p.program, "sampleRect");
+  for (const auto& [tile, texture] : p.textures) {
+    const float left = 2 * (x + tile.x.offset * scale) / w - 1;
+    const float right = 2 * (x + (tile.x.offset + tile.x.length) * scale) / w - 1;
+    const float top = 1 - 2 * (y + tile.y.offset * scale) / h;
+    const float bottom = 1 - 2 * (y + (tile.y.offset + tile.y.length) * scale) / h;
+    if (right <= -1 || left >= 1 || top <= -1 || bottom >= 1) continue;
+    glUniform4f(boundsUniform, left, p.mode==1 ? -top : bottom, right, p.mode==1 ? -bottom : top);
+    const float u = static_cast<float>(tile.x.offset - tile.x.sample_offset);
+    const float v = static_cast<float>(tile.y.offset - tile.y.sample_offset);
+    glUniform4f(sampleRectUniform, u / tile.x.sample_length, v / tile.y.sample_length,
+                (u + tile.x.length) / tile.x.sample_length, (v + tile.y.length) / tile.y.sample_length);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+  }
   if(p.mode!=1) return eglSwapBuffers(p.display,p.surface) ? FrameResult::Drawn : FrameResult::Busy;
   glBindFramebuffer(GL_FRAMEBUFFER,0);
   ASurfaceTransaction* tx=api.transaction(); if(!tx) { glFinish(); return FrameResult::Busy; }
@@ -308,8 +363,8 @@ void Renderer::detach() {
     if (current) glFinish();
     // CPU-owned AHardwareBuffer/EGLImage references must also be released after context loss.
     p.clearSlots(current);
+    p.clearTextures(current);
     if (current) {
-      if (p.texture) glDeleteTextures(1, &p.texture);
       if (p.program) glDeleteProgram(p.program);
       if (p.vao) glDeleteVertexArrays(1, &p.vao);
     }
@@ -317,6 +372,6 @@ void Renderer::detach() {
     if (p.surface != EGL_NO_SURFACE) eglDestroySurface(p.display, p.surface);
     if (p.context != EGL_NO_CONTEXT) eglDestroyContext(p.display, p.context);
   }
-  p.display=EGL_NO_DISPLAY; p.surface=EGL_NO_SURFACE; p.context=EGL_NO_CONTEXT; p.texture=p.program=p.vao=0; p.mode=0; p.uploaded=false;
+  p.display=EGL_NO_DISPLAY; p.surface=EGL_NO_SURFACE; p.context=EGL_NO_CONTEXT; p.program=p.vao=0; p.mode=0;
 }
 }

@@ -4476,6 +4476,7 @@ std::mutex canonical_cache_mutex;
 // Serialize cache misses so only one full-resolution source is decoded.
 std::mutex canonical_decode_mutex;
 CanonicalCacheEntry canonical_cache;
+uint64_t canonical_cache_generation = 0;
 
 std::shared_ptr<const DecodedImage> decode_input(
     const std::filesystem::path& path,
@@ -4489,17 +4490,26 @@ std::shared_ptr<const DecodedImage> decode_input(
   const uintmax_t size = std::filesystem::file_size(absolute);
   const auto write_time = std::filesystem::last_write_time(absolute);
   const auto revision = source_revision(absolute);
+  uint64_t cache_generation;
+  std::shared_ptr<const DecodedImage> cached;
   {
     std::lock_guard lock(canonical_cache_mutex);
+    check_cancel(cancel);
+    cache_generation = canonical_cache_generation;
     if (canonical_cache.image && canonical_cache.path == absolute &&
         canonical_cache.file_size == size && canonical_cache.write_time == write_time &&
         revision.valid && canonical_cache.revision == revision) {
-      timings = {};
-      timings.canonical_cache_hit = true;
-      report(progress, 42, "Reusing cached canonical high-precision HDR master");
-      return canonical_cache.image;
+      cached = canonical_cache.image;
+    } else {
+      canonical_cache = {};
+      canonical_cache.path = absolute;
     }
-    canonical_cache = {};
+  }
+  if (cached) {
+    timings = {};
+    timings.canonical_cache_hit = true;
+    report(progress, 42, "Reusing cached canonical high-precision HDR master");
+    return cached;
   }
   auto decoded = std::make_shared<DecodedImage>(
       decode_input_uncached(absolute, progress, cancel));
@@ -4513,7 +4523,9 @@ std::shared_ptr<const DecodedImage> decode_input(
   if (revision.valid && (decoded->info.asset_kind == "direct-hdr" ||
       decoded->info.asset_kind == "gain-map-hdr")) {
     std::lock_guard lock(canonical_cache_mutex);
-    canonical_cache = {absolute, size, write_time, revision, decoded};
+    if (cache_generation == canonical_cache_generation) {
+      canonical_cache = {absolute, size, write_time, revision, decoded};
+    }
   }
   return decoded;
 }
@@ -4902,9 +4914,20 @@ ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
 }  // namespace
 
 void clear_input_cache() {
-  std::lock_guard decode_lock(canonical_decode_mutex);
   std::lock_guard lock(canonical_cache_mutex);
+  ++canonical_cache_generation;
   canonical_cache = {};
+}
+
+void discard_cached_input(const std::filesystem::path& path) {
+  std::error_code error;
+  const auto absolute = std::filesystem::weakly_canonical(path, error);
+  if (error) return;
+  std::lock_guard lock(canonical_cache_mutex);
+  if (canonical_cache.path == absolute) {
+    ++canonical_cache_generation;
+    canonical_cache = {};
+  }
 }
 
 SourceInfo inspect(const std::filesystem::path& path) {

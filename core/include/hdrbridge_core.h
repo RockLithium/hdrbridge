@@ -226,8 +226,10 @@ struct PreviewImage {
 using ProgressCallback = std::function<void(int, const std::string&)>;
 
 SourceInfo inspect(const std::filesystem::path& path);
-// Release the single-source raster cache when an in-memory source is replaced.
+// Release the cached raster and prevent an in-flight decode from refilling it.
 void clear_input_cache();
+// Invalidate this source only, including any in-flight cache fill.
+void discard_cached_input(const std::filesystem::path& path);
 ConversionResult convert(const std::filesystem::path& input,
                          const std::filesystem::path& output,
                          const ConversionOptions& options,

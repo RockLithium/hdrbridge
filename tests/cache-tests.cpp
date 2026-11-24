@@ -10,6 +10,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -139,9 +140,16 @@ int main() {
     require(first.success && first.verification.passed, "first conversion failed");
     require(first.timings.canonical_cache_hit, "inspect did not warm cache");
     require(read_png(first.output_path) == a, "first output pixels differ from source");
+    hdrbridge::discard_cached_input(other);
     auto second = convert(source, root / "second.png");
     require(second.success && second.timings.canonical_cache_hit, "repeat conversion did not hit cache");
     require(read_png(second.output_path) == a, "repeat conversion returned different pixels");
+
+    hdrbridge::discard_cached_input(source);
+    const auto discarded = convert(source, root / "discarded.png");
+    require(discarded.success && !discarded.timings.canonical_cache_hit,
+            "removed source was still cached");
+    require(read_png(discarded.output_path) == a, "decoding after removal changed pixels");
 
     auto switched = convert(other, root / "other-output.png");
     require(switched.success && !switched.timings.canonical_cache_hit, "different path reused cache");
@@ -167,6 +175,8 @@ int main() {
     // Last-write time can be restored by staged copies. The Windows file
     // change time must still invalidate a same-path, same-size replacement.
     const auto restored_time = fs::last_write_time(source);
+    // Separate the writes so the filesystem can report distinct change times.
+    std::this_thread::sleep_for(std::chrono::milliseconds(32));
     write_png(source, b, true);
     require(fs::file_size(source) == fs::file_size(other), "restored-time replacement changed fixture size");
     fs::last_write_time(source, restored_time);

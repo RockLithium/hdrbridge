@@ -1,4 +1,5 @@
 #include "hdrbridge_core.h"
+#include "hdr_preview_tiles.h"
 #include "output_naming.h"
 #include "hdrbridge_version.h"
 #include "app_update.h"
@@ -838,30 +839,38 @@ class PreviewRenderer {
   void set_image(hdrbridge::PreviewImage image) {
     try {
       if (!ready()) create_device();
+      std::vector<PreviewTexture> textures;
+      for (const auto& tile : hdrbridge::preview::texture_tiles(
+               image.width, image.height, D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = tile.x.sample_length;
+        desc.Height = tile.y.sample_length;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA data{};
+        data.pSysMem = image.rgba_fp16.data() +
+            (static_cast<size_t>(tile.y.sample_offset) * image.width + tile.x.sample_offset) * 4u;
+        data.SysMemPitch = image.width * 8u;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        require_hr(device_->CreateTexture2D(&desc, &data, &texture), "create preview texture");
+        PreviewTexture item{tile, {}};
+        require_hr(device_->CreateShaderResourceView(texture.Get(), nullptr, &item.view),
+                   "create preview shader view");
+        textures.push_back(std::move(item));
+      }
+      ID3D11ShaderResourceView* empty = nullptr;
+      context_->PSSetShaderResources(0, 1, &empty);
+      textures_ = std::move(textures);
       image_width_ = image.width;
       image_height_ = image.height;
       fit_ = true;
       zoom_ = 1.0f;
       pan_x_ = pan_y_ = 0.0f;
       if (zoom_combo_) SendMessageW(zoom_combo_, CB_SETCURSEL, 0, 0);
-      texture_.Reset();
-      shader_view_.Reset();
-      D3D11_TEXTURE2D_DESC desc{};
-      desc.Width = image.width;
-      desc.Height = image.height;
-      desc.MipLevels = 1;
-      desc.ArraySize = 1;
-      desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-      desc.SampleDesc.Count = 1;
-      desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-      D3D11_SUBRESOURCE_DATA data{};
-      data.pSysMem = image.rgba_fp16.data();
-      data.SysMemPitch = image.width * 8u;
-      require_hr(device_->CreateTexture2D(&desc, &data, &texture_),
-                  "create preview texture");
-      require_hr(device_->CreateShaderResourceView(texture_.Get(), nullptr, &shader_view_),
-                  "create preview shader view");
       error_.clear();
       const std::wstring title = HB_UI("HDR Bridge — Preview — ") +
           std::to_wstring(image_width_) + L" × " + std::to_wstring(image_height_);
@@ -869,18 +878,23 @@ class PreviewRenderer {
       render();
     } catch (const std::exception& error) {
       error_ = widen(error.what());
+      clear();
       ui::set_text(window_, HB_UI("HDR Bridge — Preview (unavailable)"));
-      texture_.Reset();
-      shader_view_.Reset();
       if (window_) InvalidateRect(window_, nullptr, TRUE);
     }
   }
 
   void clear() {
     image_width_ = image_height_ = 0;
-    texture_.Reset();
-    shader_view_.Reset();
+    Microsoft::WRL::ComPtr<IDXGIDevice3> dxgi_device;
+    if (!textures_.empty()) {
+      textures_.clear();
+      context_->ClearState();
+      context_->Flush();
+      device_.As(&dxgi_device);
+    }
     render();
+    if (dxgi_device) dxgi_device->Trim();
   }
 
   void refresh_fonts() {
@@ -1055,6 +1069,12 @@ class PreviewRenderer {
     GetClientRect(window_, &rect);
     const int content_height = std::max(0, static_cast<int>(rect.bottom) - toolbar_height_);
     if (rect.right <= 0 || content_height <= 0) return;
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    if (rtv_ && SUCCEEDED(swapchain_->GetDesc1(&desc)) &&
+        desc.Width == static_cast<UINT>(rect.right) && desc.Height == static_cast<UINT>(rect.bottom)) {
+      return;
+    }
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
     rtv_.Reset();
     if (SUCCEEDED(swapchain_->ResizeBuffers(0, static_cast<UINT>(rect.right),
                                              static_cast<UINT>(rect.bottom),
@@ -1075,7 +1095,7 @@ class PreviewRenderer {
     const FLOAT clear[] = {0.015f, 0.017f, 0.02f, 1.0f};
     context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
     context_->ClearRenderTargetView(rtv_.Get(), clear);
-    if (shader_view_ && image_width_ && image_height_) {
+    if (!textures_.empty()) {
       const float fit_scale = std::min(
           static_cast<float>(rect.right) / image_width_,
           static_cast<float>(content_height) / image_height_);
@@ -1084,33 +1104,39 @@ class PreviewRenderer {
       const float draw_height = image_height_ * scale;
       const float draw_x = (rect.right - draw_width) * 0.5f + pan_x_;
       const float draw_y = (content_height - draw_height) * 0.5f + pan_y_;
-      const float clip_left = std::max(0.0f, draw_x);
-      const float clip_top = std::max(0.0f, draw_y);
-      const float clip_right = std::min(static_cast<float>(rect.right), draw_x + draw_width);
-      const float clip_bottom = std::min(static_cast<float>(content_height), draw_y + draw_height);
-      if (clip_right <= clip_left || clip_bottom <= clip_top) {
-        swapchain_->Present(1, 0);
-        return;
-      }
-      D3D11_VIEWPORT viewport{};
-      viewport.TopLeftX = clip_left;
-      viewport.TopLeftY = clip_top;
-      viewport.Width = clip_right - clip_left;
-      viewport.Height = clip_bottom - clip_top;
-      viewport.MaxDepth = 1.0f;
-      const float view[4] = {
-          viewport.Width / draw_width, viewport.Height / draw_height,
-          (clip_left - draw_x) / draw_width, (clip_top - draw_y) / draw_height};
-      context_->UpdateSubresource(view_buffer_.Get(), 0, nullptr, view, 0, 0);
-      context_->RSSetViewports(1, &viewport);
       context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
       context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
-      context_->PSSetShaderResources(0, 1, shader_view_.GetAddressOf());
       context_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
       context_->PSSetConstantBuffers(0, 1, view_buffer_.GetAddressOf());
-      context_->Draw(3, 0);
+      // Assign pixel centers to exactly one tile. Keep the sampling transform
+      // in the original continuous coordinates even when the viewport snaps.
+      const auto pixel_edge = [](float edge) { return std::ceil(edge - 0.5f); };
+      for (const auto& [tile, view_resource] : textures_) {
+        const float left = std::max(0.0f, pixel_edge(draw_x + tile.x.offset * scale));
+        const float top = std::max(0.0f, pixel_edge(draw_y + tile.y.offset * scale));
+        const float right = std::min(static_cast<float>(rect.right),
+                                     pixel_edge(draw_x + (tile.x.offset + tile.x.length) * scale));
+        const float bottom = std::min(static_cast<float>(content_height),
+                                      pixel_edge(draw_y + (tile.y.offset + tile.y.length) * scale));
+        if (right <= left || bottom <= top) continue;
+        const D3D11_VIEWPORT viewport{left, top, right - left, bottom - top, 0.0f, 1.0f};
+        const float sample_width = tile.x.sample_length * scale;
+        const float sample_height = tile.y.sample_length * scale;
+        const float view[4] = {
+            viewport.Width / sample_width, viewport.Height / sample_height,
+            (left - (draw_x + tile.x.sample_offset * scale)) / sample_width,
+            (top - (draw_y + tile.y.sample_offset * scale)) / sample_height};
+        context_->UpdateSubresource(view_buffer_.Get(), 0, nullptr, view, 0, 0);
+        context_->RSSetViewports(1, &viewport);
+        context_->PSSetShaderResources(0, 1, view_resource.GetAddressOf());
+        context_->Draw(3, 0);
+      }
     }
+    // Frame overlays can use the last viewport as their coordinate space.
+    const D3D11_VIEWPORT window_viewport{0.0f, 0.0f, static_cast<float>(rect.right),
+                                        static_cast<float>(rect.bottom), 0.0f, 1.0f};
+    context_->RSSetViewports(1, &window_viewport);
     swapchain_->Present(1, 0);
   }
 
@@ -1302,7 +1328,7 @@ class PreviewRenderer {
         if (LOWORD(lparam) == HTCLIENT) {
           SetCursor(LoadCursorW(nullptr,
               self->dragging_ ? IDC_SIZEALL :
-              (self->shader_view_ ? IDC_HAND : IDC_ARROW)));
+              (!self->textures_.empty() ? IDC_HAND : IDC_ARROW)));
           return TRUE;
         }
         break;
@@ -1383,8 +1409,11 @@ class PreviewRenderer {
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
   Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain_;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv_;
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> texture_;
-  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shader_view_;
+  struct PreviewTexture {
+    hdrbridge::preview::Tile tile;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+  };
+  std::vector<PreviewTexture> textures_;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> vertex_shader_;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> pixel_shader_;
   Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
@@ -3159,9 +3188,11 @@ void request_preview(AppState* state, const std::filesystem::path& path) {
     try {
       auto image = hdrbridge::decode_preview(
           path, std::numeric_limits<uint32_t>::max(), {}, cancel.get());
-      PostMessageW(window, WM_APP_PREVIEW_READY, 0,
-                   reinterpret_cast<LPARAM>(new PreviewPayload{
-                       generation, std::move(image)}));
+      if (cancel->load()) return;
+      auto payload = std::make_unique<PreviewPayload>(PreviewPayload{generation, std::move(image)});
+      if (PostMessageW(window, WM_APP_PREVIEW_READY, 0, reinterpret_cast<LPARAM>(payload.get()))) {
+        payload.release();
+      }
     } catch (const std::exception& error) {
       if (!cancel->load()) {
         PostMessageW(window, WM_APP_PREVIEW_ERROR, 0,
@@ -3215,7 +3246,7 @@ void load_source(AppState* state, const std::filesystem::path& path) {
       ui::set_text(state->folder_path, state->selected_folder.c_str());
     }
     update_mode_ui(state);
-    request_preview(state, path);
+    if (state->preview_source != path) request_preview(state, path);
     refresh_convert_button(state);
     append_log(state, HB_UI("Source inspected: ") + std::to_wstring(info.width) + L"×" + std::to_wstring(info.height) +
                       L", " + widen(info.chroma) + L", " + std::to_wstring(info.bit_depth) + L"-bit, CICP " +
@@ -3403,9 +3434,16 @@ void remove_selected_source(AppState* state) {
     return;
   }
   const int first_removed = selected.front();
+  bool removed_preview = false;
   for (auto it = selected.rbegin(); it != selected.rend(); ++it) {
     const int index = *it;
     if (index < 0 || static_cast<size_t>(index) >= state->inputs.size()) continue;
+    const auto& removed = state->inputs[static_cast<size_t>(index)];
+    if (removed == state->preview_source) {
+      removed_preview = true;
+      if (state->preview_cancel) state->preview_cancel->store(true);
+    }
+    hdrbridge::discard_cached_input(removed);
     state->inputs.erase(state->inputs.begin() + index);
     if (static_cast<size_t>(index) < state->input_infos.size()) {
       state->input_infos.erase(state->input_infos.begin() + index);
@@ -3415,11 +3453,12 @@ void remove_selected_source(AppState* state) {
     }
     ui::send(state->queue, LB_DELETESTRING, index, 0);
   }
+  if (removed_preview || state->inputs.empty()) clear_preview(state);
   if (state->inputs.empty()) {
+    hdrbridge::clear_input_cache();
     state->editing_task = -1;
     state->input.clear();
     state->output.clear();
-    clear_preview(state);
     ui::set_text(state->source_path, HB_UI("Drop or add supported HDR still images"));
     set_inspector_text(state, HB_UI("SOURCE INSPECTOR\r\n\r\nNo image selected"), true);
     ui::set_text(state->output_path, HB_UI("No output yet"));
@@ -3431,7 +3470,10 @@ void remove_selected_source(AppState* state) {
     EnableWindow(state->clear, FALSE);
     return;
   }
-  const int next = std::min(first_removed, static_cast<int>(state->inputs.size()) - 1);
+  const auto current = std::find(state->inputs.begin(), state->inputs.end(), state->input);
+  const int next = current == state->inputs.end()
+      ? std::min(first_removed, static_cast<int>(state->inputs.size()) - 1)
+      : static_cast<int>(current - state->inputs.begin());
   SendMessageW(state->queue, LB_SETSEL, TRUE, next);
   SendMessageW(state->queue, LB_SETCARETINDEX, next, FALSE);
   load_source(state, state->inputs[static_cast<size_t>(next)]);
@@ -3446,6 +3488,7 @@ void clear_sources(AppState* state) {
   state->input.clear();
   state->output.clear();
   clear_preview(state);
+  hdrbridge::clear_input_cache();
   ui::send(state->queue, LB_RESETCONTENT, 0, 0);
   ui::set_text(state->source_path, HB_UI("Drop or add supported HDR still images"));
   set_inspector_text(state, HB_UI("SOURCE INSPECTOR\r\n\r\nNo image selected"), true);
@@ -4716,7 +4759,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
       if (payload->generation == state->preview_generation &&
           state->preview_renderer && state->preview_enabled) {
         state->preview_renderer->set_image(std::move(payload->image));
-        state->preview_renderer->show(true);
       }
       return 0;
     }

@@ -179,7 +179,7 @@ public final class HdrPreviewActivity extends Activity {
         else { staged = stage(uri); path = staged.getAbsolutePath(); }
         int limit = NativeBridge.previewMaxTextureSize();
         if (limit <= 0) throw new IOException("HDR graphics initialization failed.");
-        handle = NativeBridge.previewDecode(path, Math.min(limit, 16384));
+        handle = NativeBridge.previewDecode(path, limit);
         if (handle == 0) throw new IOException("Unable to decode this image.");
         float[] stats = NativeBridge.previewStats(handle);
         if (stats == null || stats.length < 3 || stats[0] <= 0 || stats[1] <= 0)

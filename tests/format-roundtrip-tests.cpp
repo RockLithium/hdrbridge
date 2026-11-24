@@ -1,4 +1,5 @@
 #include "hdrbridge_core.h"
+#include "hdr_preview_tiles.h"
 #include "../core/src/gainmap_adapters.h"
 #include <png.h>
 #include <tiffio.h>
@@ -214,10 +215,35 @@ void compare_preview(const hdrbridge::PreviewImage& a, const hdrbridge::PreviewI
   std::cout << label << " preview RMSE " << rmse << '\n';
   if (rmse > limit) throw std::runtime_error(label + " preview RMSE " + std::to_string(rmse));
 }
+void preview_tile_boundaries() {
+  using hdrbridge::preview::split_texture_axis;
+  constexpr uint32_t limit = 16384;
+  for (const auto& [length, sizes] : std::vector<std::pair<uint32_t, std::vector<uint32_t>>>{
+           {16384, {16384}}, {16390, {8195, 8195}}, {32766, {16383, 16383}},
+           {32769, {10923, 10923, 10923}}, {32770, {10924, 10923, 10923}}}) {
+    const auto spans = split_texture_axis(length, limit);
+    require(spans.size() == sizes.size(), "preview tile count");
+    uint32_t offset = 0;
+    for (size_t i = 0; i < spans.size(); ++i) {
+      const auto& span = spans[i];
+      const uint32_t left_border = i > 0;
+      const uint32_t right_border = i + 1 < spans.size();
+      require(span.offset == offset && span.length == sizes[i] &&
+              span.sample_offset == offset - left_border &&
+              span.sample_length == span.length + left_border + right_border &&
+              span.sample_length <= limit, "preview tile or filtering border");
+      offset += span.length;
+    }
+    require(offset == length, "preview tiles cover each pixel");
+  }
+  require(hdrbridge::preview::texture_tiles(16390, 32770, limit).size() == 6,
+          "preview tile grid");
+}
 }
 int main() {
   const auto dir = std::filesystem::temp_directory_path() / ("hdrbridge-roundtrip-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   try {
+    preview_tile_boundaries();
     std::filesystem::create_directories(dir);
     precision_regression(dir / "precision.png");
     const auto src = dir / "source.png";

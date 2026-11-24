@@ -83,7 +83,7 @@ final class AppModel {
     changed();
     executor.execute(() -> {
       try {
-        inspectNow(s);
+        if (hasSourceReference(s)) inspectNow(s);
       } catch (Exception e) {
         s.error = message(e);
       } finally {
@@ -297,23 +297,15 @@ final class AppModel {
     return u;
   }
   synchronized void clearSources() {
-    for (Source s : sources) s.selected = true;
-    removeSelectedSources();
+    ArrayList<Source> removed = new ArrayList<>(sources);
+    sources.clear();
+    for (Source s : removed) release(s);
+    executor.execute(NativeBridge::clearCache);
   }
   synchronized void removeSource(Source s) {
-    if (sources.remove(s)) release(s);
-  }
-  synchronized void removeSelectedSources() {
-    Iterator<Source> it = sources.iterator();
-    ArrayList<Source> removed = new ArrayList<>();
-    while (it.hasNext()) {
-      Source s = it.next();
-      if (s.selected) {
-        it.remove();
-        removed.add(s);
-      }
-    }
-    for (Source s : removed) release(s);
+    if (!sources.remove(s)) return;
+    release(s);
+    executor.execute(NativeBridge::clearCache);
   }
   synchronized void removeTask(Task t) {
     if (running || "Running".equals(t.status)) return;
@@ -340,12 +332,14 @@ final class AppModel {
     changed();
     return true;
   }
-  synchronized void release(Source s) {
-    if (sources.contains(s) || s.inspecting)
-      return;
+  private synchronized boolean hasSourceReference(Source s) {
+    if (sources.contains(s)) return true;
     for (Task t : tasks)
-      if (t.source == s)
-        return;
+      if (t.source == s) return true;
+    return false;
+  }
+  synchronized void release(Source s) {
+    if (s.inspecting || hasSourceReference(s)) return;
     if (s.file != null) {
       s.file.delete();
       s.file = null;

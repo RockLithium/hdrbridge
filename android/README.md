@@ -22,7 +22,7 @@ Filenames use the source base name, optional suffix and format-controlled extens
 
 ## HDR preview
 
-Preview uses the shared HDR decoder and requires Android 14 or later, an HDR display and a compatible native graphics surface. It decodes only when opened and supports pinch zoom, pan and double-tap. Source resolution is retained up to the GPU texture limit, capped at 16,384 pixels per dimension. Images outside these limits remain convertible. Unsupported devices do not receive an SDR simulation.
+Preview uses the shared HDR decoder and requires Android 14 or later, an HDR display and a compatible native graphics surface. It decodes only when opened and supports pinch zoom, pan and double-tap. Images wider or taller than a single GPU texture are drawn in full-resolution tiles when memory permits. Unsupported devices do not receive an SDR simulation.
 
 ## Platform limitations
 
