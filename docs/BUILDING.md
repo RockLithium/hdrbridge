@@ -42,7 +42,7 @@ Web build commands and module configuration are in [web/README.md](../web/README
 
 ## Tests
 
-Windows CTest covers transfer math, orientation, naming, caching, output transactions, format round trips and metadata. Fixtures for these tests are generated at runtime.
+Windows CTest covers transfer math, orientation, naming, caching, output transactions, format round trips, Photo Frame rendering, preview tiling/mipmap resampling and metadata. Fixtures for these tests are generated at runtime.
 
 ```powershell
 ctest --test-dir build-vs -C Release --output-on-failure

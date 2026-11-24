@@ -123,12 +123,21 @@ float half(uint16_t h) {
 }
 struct Renderer::Impl {
   PreviewImage image;
+  std::vector<preview::MipLevel> mipLevels;
   float peak = 1;
   EGLDisplay display = EGL_NO_DISPLAY; EGLContext context = EGL_NO_CONTEXT; EGLSurface surface = EGL_NO_SURFACE;
   GLuint program = 0, vao = 0;
   uint32_t textureLimit = 0;
   struct Texture { preview::Tile tile; GLuint name = 0; };
-  std::vector<Texture> textures;
+  struct Level {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<preview::TileSpan> cols;
+    std::vector<preview::TileSpan> rows;
+    std::vector<Texture> textures;
+  };
+  std::vector<Level> levels;
+  std::vector<preview::LevelExtent> levelExtents;
   int mode = 0, ringWidth = 0, ringHeight = 0;
   ASurfaceControl* child = nullptr;
   struct Slot { AHardwareBuffer* buffer=nullptr; EGLImageKHR image=EGL_NO_IMAGE_KHR; GLuint texture=0, framebuffer=0; };
@@ -136,37 +145,92 @@ struct Renderer::Impl {
   std::shared_ptr<RingState> ring;
   void clearTextures(bool contextCurrent = true) {
     if (contextCurrent) {
-      for (const auto& texture : textures) glDeleteTextures(1, &texture.name);
+      for (const auto& level : levels) {
+        for (const auto& texture : level.textures) glDeleteTextures(1, &texture.name);
+      }
     }
-    textures.clear();
+    levels.clear();
+    levelExtents.clear();
+  }
+  bool dropExtraMipLevels(bool contextCurrent = true) {
+    if (levels.size() <= 1u) return false;
+    if (contextCurrent) {
+      for (size_t i = 1u; i < levels.size(); ++i) {
+        for (const auto& texture : levels[i].textures) glDeleteTextures(1, &texture.name);
+      }
+    }
+    levels.resize(1u);
+    if (levelExtents.size() > 1u) levelExtents.resize(1u);
+    return true;
+  }
+  bool uploadLevel(uint32_t w, uint32_t h, const uint16_t* rgbaFp16, uint32_t maxLimit, Level& out) {
+    while (glGetError() != GL_NO_ERROR) {}
+    glActiveTexture(GL_TEXTURE0);
+    out.width = w;
+    out.height = h;
+    out.cols = preview::split_texture_axis(w, maxLimit);
+    out.rows = preview::split_texture_axis(h, maxLimit);
+    out.textures.reserve(out.cols.size() * out.rows.size());
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, static_cast<GLint>(w));
+    for (const auto& y : out.rows) {
+      for (const auto& x : out.cols) {
+        const preview::Tile tile{x, y};
+        auto& texture = out.textures.emplace_back(Texture{tile});
+        glGenTextures(1, &texture.name);
+        glBindTexture(GL_TEXTURE_2D, texture.name);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        const auto* pixels = rgbaFp16 +
+            (static_cast<size_t>(tile.y.sample_offset) * w + tile.x.sample_offset) * 4u;
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, tile.x.sample_length, tile.y.sample_length,
+                     0, GL_RGBA, GL_HALF_FLOAT, pixels);
+        if (glGetError() != GL_NO_ERROR) {
+          glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+          for (const auto& partial : out.textures) glDeleteTextures(1, &partial.name);
+          out.textures.clear();
+          return false;
+        }
+      }
+    }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    return true;
   }
   bool uploadTextures() {
     GLint limit = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &limit);
     if (limit <= 0) return false;
-    const auto tiles = preview::texture_tiles(image.width, image.height,
-        std::min(textureLimit, static_cast<uint32_t>(limit)));
-    textures.reserve(tiles.size());
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, static_cast<GLint>(image.width));
-    for (const auto& tile : tiles) {
-      auto& texture = textures.emplace_back(Texture{tile});
-      glGenTextures(1, &texture.name);
-      glBindTexture(GL_TEXTURE_2D, texture.name);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-      const auto* pixels = image.rgba_fp16.data() +
-          (static_cast<size_t>(tile.y.sample_offset) * image.width + tile.x.sample_offset) * 4u;
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, tile.x.sample_length, tile.y.sample_length,
-                   0, GL_RGBA, GL_HALF_FLOAT, pixels);
-      if (glGetError() != GL_NO_ERROR) {
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        clearTextures();
-        return false;
+    const uint32_t maxLimit = std::min(textureLimit, static_cast<uint32_t>(limit));
+    levels.clear();
+    levelExtents.clear();
+    levels.reserve(1u + mipLevels.size());
+    levelExtents.reserve(1u + mipLevels.size());
+    if (!uploadLevel(image.width, image.height, image.rgba_fp16.data(), maxLimit, levels.emplace_back())) {
+      clearTextures();
+      return false;
+    }
+    levelExtents.push_back({image.width, image.height});
+    if (mipLevels.empty() && std::max(image.width, image.height) > 64u) {
+      try {
+        mipLevels = preview::build_2x_mip_levels(image.width, image.height, image.rgba_fp16);
+      } catch (const std::exception&) {
+        mipLevels.clear();
       }
     }
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    for (const auto& mip : mipLevels) {
+      try {
+        Level mipLevel;
+        if (!uploadLevel(mip.width, mip.height, mip.rgba_fp16.data(), maxLimit, mipLevel)) {
+          break;
+        }
+        levels.push_back(std::move(mipLevel));
+        levelExtents.push_back({mip.width, mip.height});
+      } catch (const std::exception&) {
+        break;
+      }
+    }
+    std::vector<preview::MipLevel>().swap(mipLevels);
     return true;
   }
   void clearSlots(bool contextCurrent = true) {
@@ -232,7 +296,13 @@ bool Renderer::decode(const std::string& path, uint32_t limit, std::string& erro
       }
     }
     const float peak = std::max(1.0f, half(maximum));
-    impl_->image=std::move(image); impl_->peak=std::clamp(peak / (203.f / 80.f),1.f,16.f); impl_->textureLimit=limit; return true;
+    std::vector<preview::MipLevel> mipLevels;
+    try {
+      mipLevels = preview::build_2x_mip_levels(image.width, image.height, image.rgba_fp16);
+    } catch (const std::exception&) {
+      mipLevels.clear();
+    }
+    impl_->image=std::move(image); impl_->mipLevels=std::move(mipLevels); impl_->peak=std::clamp(peak / (203.f / 80.f),1.f,16.f); impl_->textureLimit=limit; return true;
   } catch(const std::exception& e) { error=e.what(); return false; }
 }
 uint32_t Renderer::width() const { return impl_->image.width; }
@@ -263,15 +333,21 @@ int Renderer::attach(ANativeWindow* window, std::string& error) {
     }
     if(p.surface==EGL_NO_SURFACE || !eglMakeCurrent(p.display,p.surface,p.surface,p.context)) return false;
     const char* vs=R"(#version 300 es
-      precision highp float; uniform vec4 bounds; uniform vec4 sampleRect; uniform int flip; out vec2 uv;
+      precision highp float; uniform vec4 bounds; uniform vec4 sampleRect0; uniform vec4 sampleRect1; uniform int flip; out vec2 uv0; out vec2 uv1;
       void main(){
         bool right=(gl_VertexID&1)==1, top=gl_VertexID>=2;
-        uv=vec2(right?sampleRect.z:sampleRect.x,(top!=(flip==1))?sampleRect.y:sampleRect.w);
+        bool sampleTop=(top!=(flip==1));
+        uv0=vec2(right?sampleRect0.z:sampleRect0.x,sampleTop?sampleRect0.y:sampleRect0.w);
+        uv1=vec2(right?sampleRect1.z:sampleRect1.x,sampleTop?sampleRect1.y:sampleRect1.w);
         gl_Position=vec4(right?bounds.z:bounds.x,top?bounds.w:bounds.y,0,1);
       })";
     const char* fs=R"(#version 300 es
-      precision highp float; uniform sampler2D image; uniform int mode; uniform float headroom; uniform float peak; in vec2 uv; out vec4 color;
-      void main(){ vec3 c=texture(image,uv).rgb;
+      precision highp float; uniform sampler2D image0; uniform sampler2D image1; uniform float lodBlend; uniform int mode; uniform float headroom; uniform float peak; in vec2 uv0; in vec2 uv1; out vec4 color;
+      void main(){
+        vec3 c=texture(image0,uv0).rgb;
+        if(lodBlend>0.) {
+          c=mix(c,texture(image1,uv1).rgb,lodBlend);
+        }
         const mat3 m=mat3(0.627404,0.069097,0.016391, 0.329283,0.919541,0.088013, 0.043313,0.011362,0.895595);
         if(mode==1) {
           vec3 r=max(m*c,0.)*(80./203.);
@@ -301,11 +377,17 @@ int Renderer::attach(ANativeWindow* window, std::string& error) {
 FrameResult Renderer::render(int w,int h,float scale,float x,float y,float displayHeadroom) {
   auto& p=*impl_; if(p.surface==EGL_NO_SURFACE || !p.image.width || w<=0 || h<=0 || !std::isfinite(scale) || scale<=0 || !std::isfinite(x) || !std::isfinite(y)) return FrameResult::Busy;
   if(!eglMakeCurrent(p.display,p.surface,p.surface,p.context)) return FrameResult::Busy;
-  glActiveTexture(GL_TEXTURE0);
-  if(p.textures.empty() && !p.uploadTextures()) return FrameResult::Unavailable;
   int index=-1; auto& api=surfaceApi();
   if(p.mode==1) {
-    if(!p.makeSlots(w,h)) return FrameResult::Busy;
+    if(!p.makeSlots(w,h)) {
+      if(!p.dropExtraMipLevels(true)) return FrameResult::Busy;
+      glFinish();
+      if(!p.makeSlots(w,h)) return FrameResult::Busy;
+    }
+  }
+  glActiveTexture(GL_TEXTURE0);
+  if(p.levels.empty() && !p.uploadTextures()) return FrameResult::Unavailable;
+  if(p.mode==1) {
     std::lock_guard<std::mutex> lock(p.ring->mutex);
     for(int i=0;i<3;++i) {
       if(p.ring->busy[i]) continue;
@@ -317,27 +399,62 @@ FrameResult Renderer::render(int w,int h,float scale,float x,float y,float displ
     glBindFramebuffer(GL_FRAMEBUFFER,p.slots[index].framebuffer);
   } else glBindFramebuffer(GL_FRAMEBUFFER,0);
   glViewport(0,0,w,h); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT); glUseProgram(p.program);
-  glUniform1i(glGetUniformLocation(p.program,"image"),0); glUniform1i(glGetUniformLocation(p.program,"mode"),p.mode); glUniform1i(glGetUniformLocation(p.program,"flip"),p.mode==1);
+  glUniform1i(glGetUniformLocation(p.program,"image0"),0);
+  glUniform1i(glGetUniformLocation(p.program,"image1"),1);
+  glUniform1i(glGetUniformLocation(p.program,"mode"),p.mode); glUniform1i(glGetUniformLocation(p.program,"flip"),p.mode==1);
   float desired=std::clamp(p.peak,1.f,16.f);
   float headroom=(displayHeadroom>0.f && std::isfinite(displayHeadroom)) ? std::clamp(displayHeadroom,1.f,desired) : desired;
   glUniform1f(glGetUniformLocation(p.program,"headroom"),headroom); glUniform1f(glGetUniformLocation(p.program,"peak"),desired);
   glBindVertexArray(p.vao);
+  const auto selection = preview::select_trilinear_levels(
+      p.image.width, p.image.height, scale, p.levelExtents);
+  const auto& level0 = p.levels[selection.level0];
+  const auto& level1 = p.levels[selection.level1];
+  const auto xSpans = preview::trilinear_axis_spans(
+      p.image.width, level0.width, level0.cols, level1.width, level1.cols, selection.blend);
+  const auto ySpans = preview::trilinear_axis_spans(
+      p.image.height, level0.height, level0.rows, level1.height, level1.rows, selection.blend);
+  const double rx0 = static_cast<double>(level0.width) / p.image.width;
+  const double ry0 = static_cast<double>(level0.height) / p.image.height;
+  const double rx1 = static_cast<double>(level1.width) / p.image.width;
+  const double ry1 = static_cast<double>(level1.height) / p.image.height;
+  glUniform1f(glGetUniformLocation(p.program, "lodBlend"), selection.blend);
   const GLint boundsUniform = glGetUniformLocation(p.program, "bounds");
-  const GLint sampleRectUniform = glGetUniformLocation(p.program, "sampleRect");
-  for (const auto& [tile, texture] : p.textures) {
-    const float left = 2 * (x + tile.x.offset * scale) / w - 1;
-    const float right = 2 * (x + (tile.x.offset + tile.x.length) * scale) / w - 1;
-    const float top = 1 - 2 * (y + tile.y.offset * scale) / h;
-    const float bottom = 1 - 2 * (y + (tile.y.offset + tile.y.length) * scale) / h;
-    if (right <= -1 || left >= 1 || top <= -1 || bottom >= 1) continue;
-    glUniform4f(boundsUniform, left, p.mode==1 ? -top : bottom, right, p.mode==1 ? -bottom : top);
-    const float u = static_cast<float>(tile.x.offset - tile.x.sample_offset);
-    const float v = static_cast<float>(tile.y.offset - tile.y.sample_offset);
-    glUniform4f(sampleRectUniform, u / tile.x.sample_length, v / tile.y.sample_length,
-                (u + tile.x.length) / tile.x.sample_length, (v + tile.y.length) / tile.y.sample_length);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+  const GLint sampleRect0Uniform = glGetUniformLocation(p.program, "sampleRect0");
+  const GLint sampleRect1Uniform = glGetUniformLocation(p.program, "sampleRect1");
+  for (const auto& ry : ySpans) {
+    const float top = 1 - 2 * static_cast<float>(y + ry.base_start * scale) / h;
+    const float bottom = 1 - 2 * static_cast<float>(y + ry.base_end * scale) / h;
+    if (top <= -1 || bottom >= 1) continue;
+    for (const auto& rx : xSpans) {
+      const float left = 2 * static_cast<float>(x + rx.base_start * scale) / w - 1;
+      const float right = 2 * static_cast<float>(x + rx.base_end * scale) / w - 1;
+      if (right <= -1 || left >= 1) continue;
+      const auto& tex0 = level0.textures[ry.tile0 * level0.cols.size() + rx.tile0];
+      const auto& tex1 = level1.textures[ry.tile1 * level1.cols.size() + rx.tile1];
+      glUniform4f(boundsUniform, left, p.mode==1 ? -top : bottom, right, p.mode==1 ? -bottom : top);
+      const float u0 = static_cast<float>(rx.base_start * rx0 - tex0.tile.x.sample_offset);
+      const float v0 = static_cast<float>(ry.base_start * ry0 - tex0.tile.y.sample_offset);
+      const float u0End = static_cast<float>(rx.base_end * rx0 - tex0.tile.x.sample_offset);
+      const float v0End = static_cast<float>(ry.base_end * ry0 - tex0.tile.y.sample_offset);
+      glUniform4f(sampleRect0Uniform,
+                  u0 / tex0.tile.x.sample_length, v0 / tex0.tile.y.sample_length,
+                  u0End / tex0.tile.x.sample_length, v0End / tex0.tile.y.sample_length);
+      const float u1 = static_cast<float>(rx.base_start * rx1 - tex1.tile.x.sample_offset);
+      const float v1 = static_cast<float>(ry.base_start * ry1 - tex1.tile.y.sample_offset);
+      const float u1End = static_cast<float>(rx.base_end * rx1 - tex1.tile.x.sample_offset);
+      const float v1End = static_cast<float>(ry.base_end * ry1 - tex1.tile.y.sample_offset);
+      glUniform4f(sampleRect1Uniform,
+                  u1 / tex1.tile.x.sample_length, v1 / tex1.tile.y.sample_length,
+                  u1End / tex1.tile.x.sample_length, v1End / tex1.tile.y.sample_length);
+      glActiveTexture(GL_TEXTURE0);
+      glBindTexture(GL_TEXTURE_2D, tex0.name);
+      glActiveTexture(GL_TEXTURE1);
+      glBindTexture(GL_TEXTURE_2D, tex1.name);
+      glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+    }
   }
+  glActiveTexture(GL_TEXTURE0);
   if(p.mode!=1) return eglSwapBuffers(p.display,p.surface) ? FrameResult::Drawn : FrameResult::Busy;
   glBindFramebuffer(GL_FRAMEBUFFER,0);
   ASurfaceTransaction* tx=api.transaction(); if(!tx) { glFinish(); return FrameResult::Busy; }

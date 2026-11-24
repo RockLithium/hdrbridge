@@ -10,7 +10,10 @@
     <receiver android:name=".UpdateStatusReceiver" android:exported="false" />
     <service android:name=".ConversionService" android:exported="false" android:foregroundServiceType="dataSync" />
     <activity android:name=".UpdateConfirmActivity" android:exported="false" />
-    <activity android:name=".HdrPreviewActivity" android:exported="false" />
+    <activity
+        android:name=".HdrPreviewActivity"
+        android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density"
+        android:exported="false" />
     <activity android:name=".MainActivity" android:exported="true">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />

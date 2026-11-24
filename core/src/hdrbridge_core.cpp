@@ -3266,83 +3266,6 @@ Verification decode_jxr(const std::filesystem::path& path, const std::vector<uin
   return v;
 }
 
-std::vector<uint32_t> pq16_to_bgr101010(const DecodedImage& decoded) {
-  const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
-  std::vector<uint32_t> packed(count);
-  for (size_t i = 0; i < count; ++i) {
-    const uint32_t r = (static_cast<uint32_t>(decoded.rgb[i * 3u]) * 1023u + 32767u) / 65535u;
-    const uint32_t g = (static_cast<uint32_t>(decoded.rgb[i * 3u + 1u]) * 1023u + 32767u) / 65535u;
-    const uint32_t b = (static_cast<uint32_t>(decoded.rgb[i * 3u + 2u]) * 1023u + 32767u) / 65535u;
-    packed[i] = b | (g << 10) | (r << 20);
-  }
-  return packed;
-}
-
-void encode_jxr_rgb10(const std::filesystem::path& path, uint32_t width, uint32_t height,
-                      const std::vector<uint32_t>& pixels, const ConversionOptions& options) {
-  ComScope com;
-  auto factory = wic_factory();
-  ComPtr<IWICStream> stream;
-  require_hr(factory->CreateStream(&stream), "create WIC stream");
-  require_hr(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE), "open packed-10 JXR output");
-  ComPtr<IWICBitmapEncoder> encoder;
-  require_hr(factory->CreateEncoder(GUID_ContainerFormatWmp, nullptr, &encoder), "create packed-10 JPEG XR encoder");
-  require_hr(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache), "initialize packed-10 JPEG XR encoder");
-  ComPtr<IWICBitmapFrameEncode> frame;
-  ComPtr<IPropertyBag2> properties;
-  require_hr(encoder->CreateNewFrame(&frame, &properties), "create packed-10 JPEG XR frame");
-  if (properties) {
-    PROPBAG2 prop{}; prop.pstrName = const_cast<wchar_t*>(L"Lossless");
-    VARIANT value{}; VariantInit(&value); value.vt = VT_BOOL; value.boolVal = options.lossless ? VARIANT_TRUE : VARIANT_FALSE;
-    require_hr(properties->Write(1, &prop, &value), "set packed-10 JPEG XR lossless property");
-  }
-  require_hr(frame->Initialize(properties.Get()), "initialize packed-10 JPEG XR frame");
-  require_hr(frame->SetSize(width, height), "set packed-10 JPEG XR dimensions");
-  WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGR101010;
-  require_hr(frame->SetPixelFormat(&format), "set GUID_WICPixelFormat32bppBGR101010");
-  if (format != GUID_WICPixelFormat32bppBGR101010) throw std::runtime_error("WIC JPEG XR encoder rejected GUID_WICPixelFormat32bppBGR101010");
-  require_hr(frame->WritePixels(height, width * 4u, static_cast<UINT>(pixels.size() * 4u),
-                                reinterpret_cast<BYTE*>(const_cast<uint32_t*>(pixels.data()))), "write packed-10 JPEG XR pixels");
-  require_hr(frame->Commit(), "commit packed-10 JPEG XR frame");
-  require_hr(encoder->Commit(), "commit packed-10 JPEG XR file");
-}
-
-Verification decode_jxr_rgb10(const std::filesystem::path& path, const std::vector<uint32_t>* expected) {
-  ComScope com;
-  auto factory = wic_factory();
-  ComPtr<IWICBitmapDecoder> decoder;
-  require_hr(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
-      WICDecodeMetadataCacheOnDemand, &decoder), "open packed-10 JPEG XR decoder");
-  ComPtr<IWICBitmapFrameDecode> frame;
-  require_hr(decoder->GetFrame(0, &frame), "read packed-10 JPEG XR frame");
-  Verification v;
-  require_hr(frame->GetSize(&v.width, &v.height), "read packed-10 JPEG XR dimensions");
-  WICPixelFormatGUID format{};
-  require_hr(frame->GetPixelFormat(&format), "read packed-10 JPEG XR pixel format");
-  v.pixel_format = format == GUID_WICPixelFormat32bppBGR101010
-      ? "GUID_WICPixelFormat32bppBGR101010" : "unexpected WIC pixel format";
-  if (format != GUID_WICPixelFormat32bppBGR101010) {
-    v.checks.push_back("WIC decoder did not preserve packed 10-bit format");
-    return v;
-  }
-  v.bit_depth = 10;
-  std::vector<uint32_t> pixels(static_cast<size_t>(v.width) * v.height);
-  require_hr(frame->CopyPixels(nullptr, v.width * 4u, static_cast<UINT>(pixels.size() * 4u),
-                               reinterpret_cast<BYTE*>(pixels.data())), "decode packed-10 JPEG XR pixels");
-  v.exact_roundtrip = expected && expected->size() == pixels.size() &&
-                      std::memcmp(expected->data(), pixels.data(), pixels.size() * sizeof(uint32_t)) == 0;
-  uint32_t max_code = 0;
-  for (uint32_t pixel : pixels) max_code = std::max({max_code, pixel & 1023u, (pixel >> 10) & 1023u, (pixel >> 20) & 1023u});
-  v.min_value = 0;
-  v.max_value = max_code;
-  v.color_encoding = "Rec.2020/PQ sample values; WIC JXR profile interpretation experimental";
-  v.checks.push_back("WIC JPEG XR decoder opened output");
-  v.checks.push_back("GUID_WICPixelFormat32bppBGR101010 preserved (not 8-bit)");
-  if (expected) v.checks.push_back(v.exact_roundtrip ? "exact packed-word lossless roundtrip" : "packed-word roundtrip mismatch");
-  v.passed = v.width > 0 && v.height > 0 && max_code > 255u && (!expected || v.exact_roundtrip);
-  return v;
-}
-
 DecodedImage decode_jxr_input(const std::filesystem::path& path) {
   ComScope com;
   auto factory = wic_factory();
@@ -3427,26 +3350,6 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
     decoded.info.color_signal_kind = "WIC pixel format / scRGB convention";
     decoded.info.primaries = 1; decoded.info.transfer = 8;
     decoded.info.matrix = 0; decoded.info.full_range = true; decoded.info.range_known = true;
-  } else if (format == GUID_WICPixelFormat32bppBGR101010) {
-    decoded.info.asset_kind = "direct-hdr";
-    decoded.rgb.resize(count * 3u);
-    std::vector<uint32_t> words(count);
-    require_hr(frame->CopyPixels(nullptr, decoded.info.width * 4u, static_cast<UINT>(words.size() * sizeof(uint32_t)),
-                                 reinterpret_cast<BYTE*>(words.data())), "decode packed-10 JPEG XR input");
-    parallel_pixel_blocks(count, [&](size_t begin, size_t end) {
-    for (size_t p = begin; p < end; ++p) {
-      const uint32_t word = words[p];
-      decoded.rgb[p * 3u] = static_cast<uint16_t>((((word >> 20) & 1023u) * 65535u + 511u) / 1023u);
-      decoded.rgb[p * 3u + 1u] = static_cast<uint16_t>((((word >> 10) & 1023u) * 65535u + 511u) / 1023u);
-      decoded.rgb[p * 3u + 2u] = static_cast<uint16_t>(((word & 1023u) * 65535u + 511u) / 1023u);
-    }
-    });
-    decoded.info.profile = "packed RGB10 Rec.2020/PQ interpretation (Experimental)";
-    decoded.info.bit_depth = 10; decoded.info.chroma = "4:4:4 RGB";
-    decoded.info.pixel_format = "GUID_WICPixelFormat32bppBGR101010";
-    decoded.info.color_signal_kind = "WIC pixel format + experimental interpretation";
-    decoded.info.primaries = 9; decoded.info.transfer = 16;
-    decoded.info.matrix = 0; decoded.info.full_range = true; decoded.info.range_known = true;
   } else if (format == GUID_WICPixelFormat8bppGray ||
              format == GUID_WICPixelFormat16bppGray ||
              format == GUID_WICPixelFormat24bppBGR ||
@@ -3464,7 +3367,7 @@ DecodedImage decode_jxr_input(const std::filesystem::path& path) {
     decoded.info.pixel_format = "SDR integer JPEG XR";
     decoded.info.color_signal_kind = "No validated HDR representation";
   } else {
-    throw std::runtime_error("JPEG XR input is neither validated FP16 scRGB nor packed RGB10");
+    throw std::runtime_error("JPEG XR input is not a validated FP16 scRGB image");
   }
   return decoded;
 }
@@ -3621,28 +3524,6 @@ Verification decode_jxr(const std::filesystem::path& path,
     cleanup();
     throw;
   }
-}
-
-std::vector<uint32_t> pq16_to_bgr101010(const DecodedImage& decoded) {
-  const size_t count = static_cast<size_t>(decoded.info.width) * decoded.info.height;
-  std::vector<uint32_t> packed(count);
-  for (size_t i = 0; i < count; ++i) {
-    const uint32_t r = (static_cast<uint32_t>(decoded.rgb[i * 3u]) * 1023u + 32767u) / 65535u;
-    const uint32_t g = (static_cast<uint32_t>(decoded.rgb[i * 3u + 1u]) * 1023u + 32767u) / 65535u;
-    const uint32_t b = (static_cast<uint32_t>(decoded.rgb[i * 3u + 2u]) * 1023u + 32767u) / 65535u;
-    packed[i] = b | (g << 10) | (r << 20);
-  }
-  return packed;
-}
-
-void encode_jxr_rgb10(const std::filesystem::path&, uint32_t, uint32_t,
-                      const std::vector<uint32_t>&, const ConversionOptions&) {
-  throw std::runtime_error("portable RGB10 JPEG XR encoder is unavailable");
-}
-
-Verification decode_jxr_rgb10(const std::filesystem::path&,
-                              const std::vector<uint32_t>*) {
-  throw std::runtime_error("portable RGB10 JPEG XR decoder is unavailable");
 }
 
 DecodedImage decode_jxr_input(const std::filesystem::path& path) {
@@ -4471,20 +4352,28 @@ struct CanonicalCacheEntry {
   std::shared_ptr<const DecodedImage> image;
 };
 
-std::mutex canonical_cache_mutex;
-// Preview, Inspector and conversion can request the same file concurrently.
-// Serialize cache misses so only one full-resolution source is decoded.
-std::mutex canonical_decode_mutex;
-CanonicalCacheEntry canonical_cache;
-uint64_t canonical_cache_generation = 0;
+struct CanonicalCacheState {
+  std::mutex cache_mutex;
+  // Preview, Inspector and conversion can request the same file concurrently.
+  // Serialize cache misses so only one full-resolution source is decoded.
+  std::mutex decode_mutex;
+  CanonicalCacheEntry cache;
+  uint64_t generation = 0;
+};
+
+CanonicalCacheState& canonical_cache_state() {
+  static auto* state = new CanonicalCacheState();
+  return *state;
+}
 
 std::shared_ptr<const DecodedImage> decode_input(
     const std::filesystem::path& path,
     const ProgressCallback& progress,
     std::atomic_bool* cancel,
     TimingDiagnostics& timings) {
+  auto& cache_state = canonical_cache_state();
   check_cancel(cancel);
-  std::lock_guard decode_lock(canonical_decode_mutex);
+  std::lock_guard decode_lock(cache_state.decode_mutex);
   check_cancel(cancel);
   const auto absolute = std::filesystem::weakly_canonical(path);
   const uintmax_t size = std::filesystem::file_size(absolute);
@@ -4493,16 +4382,16 @@ std::shared_ptr<const DecodedImage> decode_input(
   uint64_t cache_generation;
   std::shared_ptr<const DecodedImage> cached;
   {
-    std::lock_guard lock(canonical_cache_mutex);
+    std::lock_guard lock(cache_state.cache_mutex);
     check_cancel(cancel);
-    cache_generation = canonical_cache_generation;
-    if (canonical_cache.image && canonical_cache.path == absolute &&
-        canonical_cache.file_size == size && canonical_cache.write_time == write_time &&
-        revision.valid && canonical_cache.revision == revision) {
-      cached = canonical_cache.image;
+    cache_generation = cache_state.generation;
+    if (cache_state.cache.image && cache_state.cache.path == absolute &&
+        cache_state.cache.file_size == size && cache_state.cache.write_time == write_time &&
+        revision.valid && cache_state.cache.revision == revision) {
+      cached = cache_state.cache.image;
     } else {
-      canonical_cache = {};
-      canonical_cache.path = absolute;
+      cache_state.cache = {};
+      cache_state.cache.path = absolute;
     }
   }
   if (cached) {
@@ -4522,9 +4411,9 @@ std::shared_ptr<const DecodedImage> decode_input(
   }
   if (revision.valid && (decoded->info.asset_kind == "direct-hdr" ||
       decoded->info.asset_kind == "gain-map-hdr")) {
-    std::lock_guard lock(canonical_cache_mutex);
-    if (cache_generation == canonical_cache_generation) {
-      canonical_cache = {absolute, size, write_time, revision, decoded};
+    std::lock_guard lock(cache_state.cache_mutex);
+    if (cache_generation == cache_state.generation) {
+      cache_state.cache = {absolute, size, write_time, revision, decoded};
     }
   }
   return decoded;
@@ -4914,19 +4803,21 @@ ConversionResult convert_gainmap_extract(const std::filesystem::path& input,
 }  // namespace
 
 void clear_input_cache() {
-  std::lock_guard lock(canonical_cache_mutex);
-  ++canonical_cache_generation;
-  canonical_cache = {};
+  auto& cache_state = canonical_cache_state();
+  std::lock_guard lock(cache_state.cache_mutex);
+  ++cache_state.generation;
+  cache_state.cache = {};
 }
 
 void discard_cached_input(const std::filesystem::path& path) {
   std::error_code error;
   const auto absolute = std::filesystem::weakly_canonical(path, error);
   if (error) return;
-  std::lock_guard lock(canonical_cache_mutex);
-  if (canonical_cache.path == absolute) {
-    ++canonical_cache_generation;
-    canonical_cache = {};
+  auto& cache_state = canonical_cache_state();
+  std::lock_guard lock(cache_state.cache_mutex);
+  if (cache_state.cache.path == absolute) {
+    ++cache_state.generation;
+    cache_state.cache = {};
   }
 }
 

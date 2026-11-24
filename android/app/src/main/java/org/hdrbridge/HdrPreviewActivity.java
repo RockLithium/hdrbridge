@@ -3,6 +3,7 @@ package org.hdrbridge;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
@@ -41,9 +42,14 @@ public final class HdrPreviewActivity extends Activity {
   private long nativeSession;
   private int imageWidth, imageHeight, width, height;
   private float fitScale = 1, scale = 1, x, y, peak = 1, displayHeadroom;
-  private boolean isFit = true, closing, surfaceReady, attached, renderPending, warned, hdrListenerRegistered;
+  private boolean isFit = true, closing, surfaceReady, attached, renderPending, warned;
+  private Display hdrDisplay;
   private int retries;
   private final Consumer<Display> hdrRatioListener = display -> {
+    Display current = Build.VERSION.SDK_INT >= 30 ? getDisplay() : null;
+    if (display != null && current != null && display.getDisplayId() != current.getDisplayId()) {
+      return;
+    }
     float next = readDisplayHeadroom(display);
     boolean changed;
     synchronized (lock) {
@@ -54,11 +60,31 @@ public final class HdrPreviewActivity extends Activity {
   };
 
   private static float readDisplayHeadroom(Display display) {
-    if (Build.VERSION.SDK_INT < 34 || display == null || !display.isHdrSdrRatioAvailable()) {
+    if (Build.VERSION.SDK_INT < 34 || display == null) {
+      return 0;
+    }
+    if (!display.isHdr()) {
+      return 1f;
+    }
+    if (!display.isHdrSdrRatioAvailable()) {
       return 0;
     }
     float ratio = display.getHdrSdrRatio();
     return Float.isFinite(ratio) && ratio > 0 ? Math.max(1f, ratio) : 1f;
+  }
+
+  private void syncDisplayHdrListener() {
+    if (Build.VERSION.SDK_INT < 34) return;
+    Display current = getDisplay();
+    if (hdrDisplay != null &&
+        (current == null || current.getDisplayId() != hdrDisplay.getDisplayId())) {
+      hdrDisplay.unregisterHdrSdrRatioChangedListener(hdrRatioListener);
+      hdrDisplay = null;
+    }
+    if (current != null && hdrDisplay == null && current.isHdrSdrRatioAvailable()) {
+      current.registerHdrSdrRatioChangedListener(getMainExecutor(), hdrRatioListener);
+      hdrDisplay = current;
+    }
   }
 
   @Override public void onCreate(Bundle saved) {
@@ -79,10 +105,7 @@ public final class HdrPreviewActivity extends Activity {
       getWindow().setAttributes(lp);
     }
     displayHeadroom = readDisplayHeadroom(display);
-    if (display.isHdrSdrRatioAvailable()) {
-      display.registerHdrSdrRatioChangedListener(getMainExecutor(), hdrRatioListener);
-      hdrListenerRegistered = true;
-    }
+    syncDisplayHdrListener();
     FrameLayout root = new FrameLayout(this);
     root.setBackgroundColor(Color.BLACK);
     view = new SurfaceView(this);
@@ -155,6 +178,22 @@ public final class HdrPreviewActivity extends Activity {
   @Override public void onWindowFocusChanged(boolean hasFocus) {
     super.onWindowFocusChanged(hasFocus);
     if (hasFocus && !closing) hideSystemBars();
+  }
+
+  @Override public void onConfigurationChanged(Configuration newConfig) {
+    super.onConfigurationChanged(newConfig);
+    if (closing) return;
+    hideSystemBars();
+    if (Build.VERSION.SDK_INT >= 34) {
+      syncDisplayHdrListener();
+      float next = readDisplayHeadroom(getDisplay());
+      boolean changed;
+      synchronized (lock) {
+        changed = Math.abs(next - displayHeadroom) > 0.01f;
+        if (changed) displayHeadroom = next;
+      }
+      if (changed) requestRender();
+    }
   }
 
   private void hideSystemBars() {
@@ -341,10 +380,9 @@ public final class HdrPreviewActivity extends Activity {
         .setOnCancelListener(d -> finish()).show();
   }
   @Override public void onDestroy() {
-    if (hdrListenerRegistered && Build.VERSION.SDK_INT >= 34) {
-      Display display = getDisplay();
-      if (display != null) display.unregisterHdrSdrRatioChangedListener(hdrRatioListener);
-      hdrListenerRegistered = false;
+    if (hdrDisplay != null && Build.VERSION.SDK_INT >= 34) {
+      hdrDisplay.unregisterHdrSdrRatioChangedListener(hdrRatioListener);
+      hdrDisplay = null;
     }
     long fallback = 0;
     synchronized (lock) {

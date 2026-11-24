@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cwctype>
 #include <cmath>
 #include <cstring>
@@ -183,11 +184,118 @@ struct TaskOutputPayload {
 struct PreviewPayload {
   uint64_t generation = 0;
   hdrbridge::PreviewImage image;
+  std::vector<hdrbridge::preview::MipLevel> mip_levels;
 };
 
 struct PreviewErrorPayload {
   uint64_t generation = 0;
   std::wstring error;
+};
+
+std::wstring widen(const std::string& input);
+
+struct PreviewRequest {
+  uint64_t generation = 0;
+  std::filesystem::path path;
+  std::shared_ptr<std::atomic_bool> cancel;
+};
+
+struct PreviewWorker {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool stop = false;
+  bool has_pending = false;
+  PreviewRequest pending;
+  std::shared_ptr<std::atomic_bool> active_cancel;
+  std::thread thread;
+
+  ~PreviewWorker() { shutdown(); }
+
+  void submit(HWND window, uint64_t generation, std::filesystem::path path,
+              std::shared_ptr<std::atomic_bool> cancel) {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (stop) return;
+      if (!thread.joinable()) {
+        thread = std::thread([this, window] { run(window); });
+      }
+      if (active_cancel) active_cancel->store(true);
+      if (has_pending && pending.cancel) pending.cancel->store(true);
+      pending = {generation, std::move(path), std::move(cancel)};
+      has_pending = true;
+    }
+    cv.notify_one();
+  }
+
+  void cancel_all() {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (active_cancel) active_cancel->store(true);
+    if (has_pending && pending.cancel) pending.cancel->store(true);
+    has_pending = false;
+    pending = {};
+  }
+
+  void shutdown() {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      stop = true;
+      if (active_cancel) active_cancel->store(true);
+      if (has_pending && pending.cancel) pending.cancel->store(true);
+      has_pending = false;
+      pending = {};
+    }
+    cv.notify_all();
+    if (thread.joinable()) thread.join();
+  }
+
+  void run(HWND window) {
+    for (;;) {
+      PreviewRequest job;
+      {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [&] { return stop || has_pending; });
+        if (stop && !has_pending) break;
+        job = std::move(pending);
+        pending = {};
+        has_pending = false;
+        active_cancel = job.cancel;
+      }
+      auto clear_active = [&] {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (active_cancel == job.cancel) active_cancel.reset();
+      };
+      if (job.cancel && !job.cancel->load()) {
+        try {
+          auto image = hdrbridge::decode_preview(
+              job.path, std::numeric_limits<uint32_t>::max(), {}, job.cancel.get());
+          if (!job.cancel->load()) {
+            std::vector<hdrbridge::preview::MipLevel> mip_levels;
+            try {
+              mip_levels = hdrbridge::preview::build_2x_mip_levels(
+                  image.width, image.height, image.rgba_fp16, 64u, job.cancel.get());
+            } catch (const std::exception&) {
+              mip_levels.clear();
+            }
+            if (!job.cancel->load()) {
+              auto payload = std::make_unique<PreviewPayload>(
+                  PreviewPayload{job.generation, std::move(image), std::move(mip_levels)});
+              if (PostMessageW(window, WM_APP_PREVIEW_READY, 0,
+                               reinterpret_cast<LPARAM>(payload.get()))) {
+                payload.release();
+              }
+            }
+          }
+        } catch (const std::exception& error) {
+          if (!job.cancel->load()) {
+            PostMessageW(window, WM_APP_PREVIEW_ERROR, 0,
+                         reinterpret_cast<LPARAM>(new PreviewErrorPayload{
+                             job.generation, widen(error.what())}));
+          }
+        }
+      }
+      clear_active();
+    }
+  }
 };
 
 struct SuccessPayload {
@@ -310,13 +418,12 @@ struct AppState {
   bool tiff_compressed = true;
   std::array<int, 9> encoding_values{95, 4, 6, 90, 95, 95, 95, 95, 4};
   std::unique_ptr<PreviewRenderer> preview_renderer;
+  PreviewWorker preview_worker;
   std::shared_ptr<std::atomic_bool> preview_cancel;
   uint64_t preview_generation = 0;
   bool preview_enabled = false;
   std::filesystem::path preview_source;
 };
-
-std::wstring widen(const std::string& input);
 
 bool font_available(const wchar_t* family) {
   LOGFONTW query{};
@@ -712,6 +819,33 @@ class PreviewRenderer {
   static LRESULT CALLBACK zoom_edit_subclass(HWND edit, UINT message, WPARAM wparam,
                                              LPARAM lparam, UINT_PTR, DWORD_PTR data) {
     auto* self = reinterpret_cast<PreviewRenderer*>(data);
+    if (message == WM_CHAR && (wparam == L'\r' || wparam == L'\n' || wparam == VK_ESCAPE)) {
+      return 0;
+    }
+    if (message == WM_KEYDOWN && self) {
+      if (wparam == VK_RETURN) {
+        self->commit_zoom_edit();
+        if (self->window_) SetFocus(self->window_);
+        return 0;
+      }
+      if (wparam == VK_ESCAPE) {
+        self->zoom_edit_dirty_ = false;
+        self->sync_zoom_combo();
+        if (self->window_) SetFocus(self->window_);
+        return 0;
+      }
+    }
+    if (message == WM_KILLFOCUS && self && self->window_) {
+      HWND next = reinterpret_cast<HWND>(wparam);
+      if (next != nullptr && (next == self->window_ || IsChild(self->window_, next))) {
+        COMBOBOXINFO info{sizeof(info)};
+        const bool has_info = self->zoom_combo_ && GetComboBoxInfo(self->zoom_combo_, &info);
+        if (next != self->zoom_combo_ && next != edit &&
+            (!has_info || next != info.hwndList)) {
+          self->commit_zoom_edit();
+        }
+      }
+    }
     if (message == WM_PAINT && self && self->toolbar_font_ && GetFocus() != edit) {
       const int length = GetWindowTextLengthW(edit);
       std::wstring text(static_cast<size_t>(std::max(length, 0)) + 1u, L'\0');
@@ -836,12 +970,30 @@ class PreviewRenderer {
                y, 110, 240, TRUE);
   }
 
-  void set_image(hdrbridge::PreviewImage image) {
-    try {
-      if (!ready()) create_device();
-      std::vector<PreviewTexture> textures;
-      for (const auto& tile : hdrbridge::preview::texture_tiles(
-               image.width, image.height, D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)) {
+ private:
+  struct PreviewTexture {
+    hdrbridge::preview::Tile tile;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+  };
+  struct PreviewLevel {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<hdrbridge::preview::TileSpan> cols;
+    std::vector<hdrbridge::preview::TileSpan> rows;
+    std::vector<PreviewTexture> textures;
+  };
+
+  PreviewLevel upload_level(uint32_t width, uint32_t height, const uint16_t* rgba_fp16) {
+    PreviewLevel level{
+        width,
+        height,
+        hdrbridge::preview::split_texture_axis(width, D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION),
+        hdrbridge::preview::split_texture_axis(height, D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION),
+        {}};
+    level.textures.reserve(level.cols.size() * level.rows.size());
+    for (const auto& y : level.rows) {
+      for (const auto& x : level.cols) {
+        const hdrbridge::preview::Tile tile{x, y};
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = tile.x.sample_length;
         desc.Height = tile.y.sample_length;
@@ -852,19 +1004,43 @@ class PreviewRenderer {
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         D3D11_SUBRESOURCE_DATA data{};
-        data.pSysMem = image.rgba_fp16.data() +
-            (static_cast<size_t>(tile.y.sample_offset) * image.width + tile.x.sample_offset) * 4u;
-        data.SysMemPitch = image.width * 8u;
+        data.pSysMem = rgba_fp16 +
+            (static_cast<size_t>(tile.y.sample_offset) * width + tile.x.sample_offset) * 4u;
+        data.SysMemPitch = width * 8u;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
         require_hr(device_->CreateTexture2D(&desc, &data, &texture), "create preview texture");
         PreviewTexture item{tile, {}};
         require_hr(device_->CreateShaderResourceView(texture.Get(), nullptr, &item.view),
                    "create preview shader view");
-        textures.push_back(std::move(item));
+        level.textures.push_back(std::move(item));
       }
-      ID3D11ShaderResourceView* empty = nullptr;
-      context_->PSSetShaderResources(0, 1, &empty);
-      textures_ = std::move(textures);
+    }
+    return level;
+  }
+
+ public:
+  void set_image(hdrbridge::PreviewImage image,
+                 std::vector<hdrbridge::preview::MipLevel> mip_levels = {}) {
+    try {
+      if (!ready()) create_device();
+      std::vector<PreviewLevel> levels;
+      std::vector<hdrbridge::preview::LevelExtent> extents;
+      levels.reserve(1u + mip_levels.size());
+      extents.reserve(1u + mip_levels.size());
+      levels.push_back(upload_level(image.width, image.height, image.rgba_fp16.data()));
+      extents.push_back({image.width, image.height});
+      for (const auto& mip : mip_levels) {
+        try {
+          levels.push_back(upload_level(mip.width, mip.height, mip.rgba_fp16.data()));
+          extents.push_back({mip.width, mip.height});
+        } catch (const std::exception&) {
+          break;
+        }
+      }
+      ID3D11ShaderResourceView* empty[2] = {nullptr, nullptr};
+      context_->PSSetShaderResources(0, 2, empty);
+      levels_ = std::move(levels);
+      level_extents_ = std::move(extents);
       image_width_ = image.width;
       image_height_ = image.height;
       error_.clear();
@@ -888,8 +1064,9 @@ class PreviewRenderer {
   void clear() {
     image_width_ = image_height_ = 0;
     Microsoft::WRL::ComPtr<IDXGIDevice3> dxgi_device;
-    if (!textures_.empty()) {
-      textures_.clear();
+    if (!levels_.empty()) {
+      levels_.clear();
+      level_extents_.clear();
       context_->ClearState();
       context_->Flush();
       device_.As(&dxgi_device);
@@ -1026,13 +1203,22 @@ class PreviewRenderer {
       }
     )";
     static constexpr char pixel_source[] = R"(
-      Texture2D image_texture : register(t0);
+      Texture2D image_texture0 : register(t0);
+      Texture2D image_texture1 : register(t1);
       SamplerState image_sampler : register(s0);
-      cbuffer View : register(b0) { float4 uv_transform; };
+      cbuffer View : register(b0) {
+        float4 uv_transform0;
+        float4 uv_transform1;
+        float4 blend_params;
+      };
       struct VSOut { float4 position : SV_POSITION; float2 uv : TEXCOORD0; };
       float4 main(VSOut input) : SV_TARGET {
-        return image_texture.Sample(image_sampler,
-                                    input.uv * uv_transform.xy + uv_transform.zw);
+        float4 c0 = image_texture0.Sample(
+            image_sampler, input.uv * uv_transform0.xy + uv_transform0.zw);
+        if (blend_params.x <= 0.0) return c0;
+        float4 c1 = image_texture1.Sample(
+            image_sampler, input.uv * uv_transform1.xy + uv_transform1.zw);
+        return lerp(c0, c1, blend_params.x);
       }
     )";
     auto vertex = compile_shader(vertex_source, "main", "vs_5_0");
@@ -1048,7 +1234,7 @@ class PreviewRenderer {
     sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
     require_hr(device_->CreateSamplerState(&sampler_desc, &sampler_), "create preview sampler");
     D3D11_BUFFER_DESC view_desc{};
-    view_desc.ByteWidth = sizeof(float) * 4;
+    view_desc.ByteWidth = sizeof(float) * 12;
     view_desc.Usage = D3D11_USAGE_DEFAULT;
     view_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     require_hr(device_->CreateBuffer(&view_desc, nullptr, &view_buffer_),
@@ -1096,7 +1282,7 @@ class PreviewRenderer {
     const FLOAT clear[] = {0.015f, 0.017f, 0.02f, 1.0f};
     context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
     context_->ClearRenderTargetView(rtv_.Get(), clear);
-    if (!textures_.empty()) {
+    if (!levels_.empty()) {
       const float fit_scale = std::min(
           static_cast<float>(rect.right) / image_width_,
           static_cast<float>(content_height) / image_height_);
@@ -1105,33 +1291,59 @@ class PreviewRenderer {
       const float draw_height = image_height_ * scale;
       const float draw_x = (rect.right - draw_width) * 0.5f + pan_x_;
       const float draw_y = (content_height - draw_height) * 0.5f + pan_y_;
+      const auto selection = hdrbridge::preview::select_trilinear_levels(
+          image_width_, image_height_, scale, level_extents_);
+      const auto& level0 = levels_[selection.level0];
+      const auto& level1 = levels_[selection.level1];
+      const auto x_spans = hdrbridge::preview::trilinear_axis_spans(
+          image_width_, level0.width, level0.cols, level1.width, level1.cols, selection.blend);
+      const auto y_spans = hdrbridge::preview::trilinear_axis_spans(
+          image_height_, level0.height, level0.rows, level1.height, level1.rows, selection.blend);
+      const float sx0 = scale * (static_cast<float>(image_width_) / level0.width);
+      const float sy0 = scale * (static_cast<float>(image_height_) / level0.height);
+      const float sx1 = scale * (static_cast<float>(image_width_) / level1.width);
+      const float sy1 = scale * (static_cast<float>(image_height_) / level1.height);
       context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
       context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
       context_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
       context_->PSSetConstantBuffers(0, 1, view_buffer_.GetAddressOf());
-      // Assign pixel centers to exactly one tile. Keep the sampling transform
+      // Assign pixel centers to exactly one sub-rect. Keep the sampling transform
       // in the original continuous coordinates even when the viewport snaps.
       const auto pixel_edge = [](float edge) { return std::ceil(edge - 0.5f); };
-      for (const auto& [tile, view_resource] : textures_) {
-        const float left = std::max(0.0f, pixel_edge(draw_x + tile.x.offset * scale));
-        const float top = std::max(0.0f, pixel_edge(draw_y + tile.y.offset * scale));
-        const float right = std::min(static_cast<float>(rect.right),
-                                     pixel_edge(draw_x + (tile.x.offset + tile.x.length) * scale));
-        const float bottom = std::min(static_cast<float>(content_height),
-                                      pixel_edge(draw_y + (tile.y.offset + tile.y.length) * scale));
-        if (right <= left || bottom <= top) continue;
-        const D3D11_VIEWPORT viewport{left, top, right - left, bottom - top, 0.0f, 1.0f};
-        const float sample_width = tile.x.sample_length * scale;
-        const float sample_height = tile.y.sample_length * scale;
-        const float view[4] = {
-            viewport.Width / sample_width, viewport.Height / sample_height,
-            (left - (draw_x + tile.x.sample_offset * scale)) / sample_width,
-            (top - (draw_y + tile.y.sample_offset * scale)) / sample_height};
-        context_->UpdateSubresource(view_buffer_.Get(), 0, nullptr, view, 0, 0);
-        context_->RSSetViewports(1, &viewport);
-        context_->PSSetShaderResources(0, 1, view_resource.GetAddressOf());
-        context_->Draw(3, 0);
+      for (const auto& ry : y_spans) {
+        const float top = std::max(0.0f, pixel_edge(draw_y + static_cast<float>(ry.base_start * scale)));
+        const float bottom = std::min(
+            static_cast<float>(content_height),
+            pixel_edge(draw_y + static_cast<float>(ry.base_end * scale)));
+        if (bottom <= top) continue;
+        for (const auto& rx : x_spans) {
+          const float left = std::max(0.0f, pixel_edge(draw_x + static_cast<float>(rx.base_start * scale)));
+          const float right = std::min(
+              static_cast<float>(rect.right),
+              pixel_edge(draw_x + static_cast<float>(rx.base_end * scale)));
+          if (right <= left) continue;
+          const auto& tex0 = level0.textures[ry.tile0 * level0.cols.size() + rx.tile0];
+          const auto& tex1 = level1.textures[ry.tile1 * level1.cols.size() + rx.tile1];
+          const D3D11_VIEWPORT viewport{left, top, right - left, bottom - top, 0.0f, 1.0f};
+          const float sw0 = tex0.tile.x.sample_length * sx0;
+          const float sh0 = tex0.tile.y.sample_length * sy0;
+          const float sw1 = tex1.tile.x.sample_length * sx1;
+          const float sh1 = tex1.tile.y.sample_length * sy1;
+          const float view[12] = {
+              viewport.Width / sw0, viewport.Height / sh0,
+              (left - (draw_x + tex0.tile.x.sample_offset * sx0)) / sw0,
+              (top - (draw_y + tex0.tile.y.sample_offset * sy0)) / sh0,
+              viewport.Width / sw1, viewport.Height / sh1,
+              (left - (draw_x + tex1.tile.x.sample_offset * sx1)) / sw1,
+              (top - (draw_y + tex1.tile.y.sample_offset * sy1)) / sh1,
+              selection.blend, 0.0f, 0.0f, 0.0f};
+          ID3D11ShaderResourceView* srvs[2] = {tex0.view.Get(), tex1.view.Get()};
+          context_->UpdateSubresource(view_buffer_.Get(), 0, nullptr, view, 0, 0);
+          context_->RSSetViewports(1, &viewport);
+          context_->PSSetShaderResources(0, 2, srvs);
+          context_->Draw(3, 0);
+        }
       }
     }
     // Frame overlays can use the last viewport as their coordinate space.
@@ -1168,6 +1380,7 @@ class PreviewRenderer {
   }
 
   void sync_fit_combo() {
+    zoom_edit_dirty_ = false;
     if (!zoom_combo_) return;
     updating_zoom_text_ = true;
     ui::set_text(zoom_combo_, HB_UI("Fit"));
@@ -1204,6 +1417,7 @@ class PreviewRenderer {
   }
 
   void update_zoom_combo() {
+    zoom_edit_dirty_ = false;
     if (!zoom_combo_) return;
     const int percent = static_cast<int>(std::lround(zoom_ * 100.0f));
     int selection = CB_ERR;
@@ -1219,8 +1433,13 @@ class PreviewRenderer {
     updating_zoom_text_ = false;
   }
 
-  void apply_typed_zoom() {
-    if (updating_zoom_text_ || !zoom_combo_) return;
+  void sync_zoom_combo() {
+    if (fit_) sync_fit_combo();
+    else update_zoom_combo();
+  }
+
+  bool apply_typed_zoom() {
+    if (updating_zoom_text_ || !zoom_combo_) return false;
     wchar_t text[64]{};
     GetWindowTextW(zoom_combo_, text, 64);
     std::wstring value(text);
@@ -1229,18 +1448,31 @@ class PreviewRenderer {
     if (!value.empty() && value.back() == L'%') value.pop_back();
     if (_wcsicmp(value.c_str(), L"fit") == 0 || value == ui::render(HB_UI("Fit"))) {
       set_fit();
-      return;
+      return true;
     }
     wchar_t* end = nullptr;
     const double percent = wcstod(value.c_str(), &end);
     const float fit = fitted_scale();
     const double min_percent = std::min(1.0, static_cast<double>(fit) * 100.0);
     const double max_percent = std::max(1600.0, static_cast<double>(fit) * 100.0);
-    if (end == value.c_str() || *end != L'\0' || percent < min_percent || percent > max_percent) return;
+    if (end == value.c_str() || *end != L'\0' || !std::isfinite(percent) ||
+        percent < min_percent || percent > max_percent) {
+      return false;
+    }
     RECT rect{};
     GetClientRect(window_, &rect);
     set_zoom(static_cast<float>(percent / 100.0),
              POINT{rect.right / 2, (rect.bottom - toolbar_height_) / 2});
+    sync_zoom_combo();
+    return true;
+  }
+
+  void commit_zoom_edit() {
+    if (!zoom_edit_dirty_) return;
+    zoom_edit_dirty_ = false;
+    if (!apply_typed_zoom()) {
+      sync_zoom_combo();
+    }
   }
 
   void select_zoom(int selection) {
@@ -1353,7 +1585,7 @@ class PreviewRenderer {
           return 0;
         }
         if (LOWORD(wparam) == IDC_PREVIEW_ZOOM && HIWORD(wparam) == CBN_EDITCHANGE) {
-          self->apply_typed_zoom();
+          if (!self->updating_zoom_text_) self->zoom_edit_dirty_ = true;
           return 0;
         }
         if (LOWORD(wparam) == IDC_PREVIEW_FULLSCREEN && HIWORD(wparam) == BN_CLICKED) {
@@ -1365,7 +1597,7 @@ class PreviewRenderer {
         if (LOWORD(lparam) == HTCLIENT) {
           SetCursor(LoadCursorW(nullptr,
               self->dragging_ ? IDC_SIZEALL :
-              (!self->textures_.empty() ? IDC_HAND : IDC_ARROW)));
+              (!self->levels_.empty() ? IDC_HAND : IDC_ARROW)));
           return TRUE;
         }
         break;
@@ -1387,7 +1619,17 @@ class PreviewRenderer {
         }
         return 0;
       }
+      case WM_NCLBUTTONDOWN:
+        self->commit_zoom_edit();
+        break;
+      case WM_RBUTTONDOWN:
+      case WM_MBUTTONDOWN:
+        if (GetFocus() == self->zoom_edit_) SetFocus(window);
+        self->commit_zoom_edit();
+        break;
       case WM_LBUTTONDOWN:
+        if (GetFocus() == self->zoom_edit_) SetFocus(window);
+        self->commit_zoom_edit();
         self->dragging_ = true;
         self->drag_origin_ = POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         self->drag_pan_x_ = self->pan_x_;
@@ -1459,11 +1701,8 @@ class PreviewRenderer {
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
   Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain_;
   Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv_;
-  struct PreviewTexture {
-    hdrbridge::preview::Tile tile;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
-  };
-  std::vector<PreviewTexture> textures_;
+  std::vector<PreviewLevel> levels_;
+  std::vector<hdrbridge::preview::LevelExtent> level_extents_;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> vertex_shader_;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> pixel_shader_;
   Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
@@ -1489,6 +1728,7 @@ class PreviewRenderer {
   HFONT icon_font_ = nullptr;
   HBRUSH surface_brush_ = nullptr;
   bool updating_zoom_text_ = false;
+  bool zoom_edit_dirty_ = false;
 };
 
 std::wstring widen(const std::string& input) {
@@ -2613,8 +2853,13 @@ std::wstring control_text(HWND control) {
 
 void request_preview(AppState* state, const std::filesystem::path& path);
 
-void clear_preview(AppState* state) {
+void cancel_preview(AppState* state) {
   if (state->preview_cancel) state->preview_cancel->store(true);
+  state->preview_worker.cancel_all();
+}
+
+void clear_preview(AppState* state) {
+  cancel_preview(state);
   ++state->preview_generation;
   state->preview_source.clear();
   if (state->preview_renderer) state->preview_renderer->clear();
@@ -3227,30 +3472,13 @@ void replace_queue_summary(HWND queue, int index, const std::wstring& text) {
 
 void request_preview(AppState* state, const std::filesystem::path& path) {
   if (!state->preview_enabled || !state->preview_renderer || path.empty()) return;
-  if (state->preview_cancel) state->preview_cancel->store(true);
+  cancel_preview(state);
   const uint64_t generation = ++state->preview_generation;
   state->preview_source = path;
   const auto cancel = std::make_shared<std::atomic_bool>(false);
   state->preview_cancel = cancel;
   state->preview_renderer->show(true);
-  const HWND window = state->window;
-  std::thread([window, path, generation, cancel] {
-    try {
-      auto image = hdrbridge::decode_preview(
-          path, std::numeric_limits<uint32_t>::max(), {}, cancel.get());
-      if (cancel->load()) return;
-      auto payload = std::make_unique<PreviewPayload>(PreviewPayload{generation, std::move(image)});
-      if (PostMessageW(window, WM_APP_PREVIEW_READY, 0, reinterpret_cast<LPARAM>(payload.get()))) {
-        payload.release();
-      }
-    } catch (const std::exception& error) {
-      if (!cancel->load()) {
-        PostMessageW(window, WM_APP_PREVIEW_ERROR, 0,
-                     reinterpret_cast<LPARAM>(new PreviewErrorPayload{
-                         generation, widen(error.what())}));
-      }
-    }
-  }).detach();
+  state->preview_worker.submit(state->window, generation, path, cancel);
 }
 
 void load_source(AppState* state, const std::filesystem::path& path) {
@@ -3491,7 +3719,7 @@ void remove_selected_source(AppState* state) {
     const auto& removed = state->inputs[static_cast<size_t>(index)];
     if (removed == state->preview_source) {
       removed_preview = true;
-      if (state->preview_cancel) state->preview_cancel->store(true);
+      cancel_preview(state);
     }
     hdrbridge::discard_cached_input(removed);
     state->inputs.erase(state->inputs.begin() + index);
@@ -4572,7 +4800,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           } else if (state->preview_enabled && state->preview_renderer) {
             state->preview_renderer->show(true);
           } else if (state->preview_renderer) {
-            if (state->preview_cancel) state->preview_cancel->store(true);
+            cancel_preview(state);
             state->preview_renderer->show(false);
           }
           ui::set_text(state->preview_toggle,
@@ -4808,7 +5036,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           reinterpret_cast<PreviewPayload*>(lparam));
       if (payload->generation == state->preview_generation &&
           state->preview_renderer && state->preview_enabled) {
-        state->preview_renderer->set_image(std::move(payload->image));
+        state->preview_renderer->set_image(
+            std::move(payload->image), std::move(payload->mip_levels));
       }
       return 0;
     }
@@ -5020,11 +5249,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         ui::message_box(window, HB_UI("Cancellation requested. Close HDR Bridge after the conversion worker stops."), L"HDR Bridge", MB_OK | MB_ICONINFORMATION);
         return 0;
       }
+      cancel_preview(state);
+      if (state->preview_renderer) state->preview_renderer->show(false);
+      ShowWindow(window, SW_HIDE);
       DestroyWindow(window);
       return 0;
     case WM_DESTROY:
       save_layout(state);
       if (state->preview_cancel) state->preview_cancel->store(true);
+      state->preview_worker.shutdown();
       RemoveWindowSubclass(state->queue, queue_subclass, 1);
       RemoveWindowSubclass(state->tasks, queue_subclass, 2);
       RemoveWindowSubclass(state->vertical_splitter, splitter_subclass, 1);
@@ -5148,9 +5381,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show)
     if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) {
       HWND root = GetAncestor(message.hwnd, GA_ROOT);
       wchar_t class_name[64]{};
+      wchar_t focus_class[64]{};
       if (root && root != message.hwnd &&
           GetClassNameW(root, class_name, 64) > 0 &&
-          wcscmp(class_name, L"HDRBridgePreviewWindow") == 0) {
+          wcscmp(class_name, L"HDRBridgePreviewWindow") == 0 &&
+          !(GetClassNameW(message.hwnd, focus_class, 64) > 0 &&
+            _wcsicmp(focus_class, L"Edit") == 0)) {
         SendMessageW(root, WM_KEYDOWN, message.wParam, message.lParam);
         continue;
       }
