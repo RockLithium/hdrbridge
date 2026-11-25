@@ -1,4 +1,4 @@
-#include "hdr_transfer.h"
+#include "color/hdr_transfer.h"
 
 #include <algorithm>
 #include <array>

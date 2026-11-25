@@ -1,5 +1,4 @@
 #include "hdrbridge_core.h"
-#include "frame_exif.h"
 #include <png.h>
 #include <zlib.h>
 #include <algorithm>

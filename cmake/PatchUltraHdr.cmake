@@ -1,7 +1,7 @@
 set(UHDR_MAX_DIMENSION 65500 CACHE STRING "Maximum Ultra HDR JPEG dimension permitted by JPEG" FORCE)
 
 function(hdrbridge_patch_ultrahdr source_dir)
-  file(COPY "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../core/src/uhdr_limits.h" DESTINATION "${source_dir}/lib/src")
+  file(COPY "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../core/src/codecs/uhdr_limits.h" DESTINATION "${source_dir}/lib/src")
   set(path "${source_dir}/lib/src/ultrahdr_api.cpp")
   file(READ "${path}" contents)
   set(original "${contents}")

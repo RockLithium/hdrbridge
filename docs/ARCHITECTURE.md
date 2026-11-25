@@ -23,6 +23,23 @@ The worker and WebAssembly core are loaded only after the user selects a file. S
 
 The native Android application builds the existing C++ core through JNI, independently of the Windows desktop and Web interfaces. Android uses a user-selected document tree for output and an app-private intermediate for conversion; it streams verified results to the document provider. Its optional HDR preview uses the shared decoder and native HDR surfaces on Android 14 or later. A dedicated graphics thread owns surface resources; decoding begins when the preview activity opens, while configuration changes preserve the decoded session and re-bind display HDR headroom listeners when the active display changes. Update checking, SHA-256 and certificate-pin verification, and `PackageInstaller` handoff run in the Java layer outside the conversion core. The Android app targets ARM64 and Android 8.0 or later. See the [Android guide](../android/README.md) for build and platform details.
 
+## C++ core modules
+
+The public conversion API lives in [hdrbridge_core.h](../core/include/hdrbridge_core.h). The implementation stays in a single core linked into each platform target. [HdrBridgeCoreSources.cmake](../cmake/HdrBridgeCoreSources.cmake) lists the shared sources for Windows, Android and both WASM builds. It includes Photo Frame on Windows and Android and the WIC helpers on Windows.
+
+| Module under `core/src/` | Responsibility |
+| --- | --- |
+| `operations/` | Public Inspect, Convert, Preview and Verify entry points, plus Gain Map Extract orchestration. Owns output selection, progress, cancellation checkpoints and commit order. |
+| `canonical/` | Working raster type, input dispatch, orientation handoff and single-source cache. |
+| `codecs/` | Per-format input, encoding and readback checks. Gain-map container parsing, reconstruction and extraction live in `codecs/gainmap/`, with separate adapters for AVIF, TIFF, JPEG XL, Apple HEIF and JPEG. |
+| `color/` | Transfer functions, gamut transforms, ICC/CICP interpretation and profile generation, and linear FP16 scRGB packing. |
+| `image/` | Orientation, straight alpha compositing, resampling and luminance measurement. Preview resampling retains the fused linear-light interpolation and scRGB packing. |
+| `photo_frame/` | Composition, camera captions and logos, with output through the existing PNG and Ultra HDR paths. |
+| `metadata/` | EXIF payload parsing and preparation, plus source metadata status. Container-specific reads and writes stay with their codecs. |
+| `diagnostics/` and `infrastructure/` | Result JSON and checksums, file and revision helpers, worker scheduling, progress and cancellation primitives, and staged writes. |
+
+Operations dispatch through the canonical cache and call the codecs directly. The working-image type is independent of cache state, so a codec can fill a raster without depending on the cache or a public operation. Codecs share color, image and metadata helpers through small internal headers. The cached raster owns its RGB, optional alpha and metadata buffers. Readers share it as `shared_ptr<const DecodedImage>` and output paths that require a mutable or differently encoded raster allocate their own buffers.
+
 ## Core model
 
 `inspect` reads the encoded source representation and metadata. `convert` decodes or reconstructs HDR in linear light where needed, then caches a correctly oriented Rec.2020/PQ RGB16 image. Output adapters decode PQ to linear light when they need another gamut, transfer or linear output representation. `verify` reopens the result and checks its target representation.

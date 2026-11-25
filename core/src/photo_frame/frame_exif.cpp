@@ -1,0 +1,456 @@
+#include "photo_frame/frame_exif.h"
+
+// Small, bounds-checked TIFF/EXIF reader for frame captions.
+// Reuses the Apache-2.0 HDR Bridge local prototype reader; no upstream Yiyin source.
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cctype>
+#include <cstdint>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <utility>
+#include <stdexcept>
+
+namespace hdrbridge::frame_exif {
+namespace detail {
+
+class Reader {
+public:
+    explicit Reader(const std::vector<uint8_t>& data) : b(data), base(findBase(data)) {
+        if (base == npos || base + 8 > b.size()) return;
+        if (b[base] == 'I' && b[base + 1] == 'I') le = true;
+        else if (b[base] == 'M' && b[base + 1] == 'M') le = false;
+        else return;
+        if (u16(base + 2) != 42) return;
+        valid = true;
+        firstIfd = u32(base + 4);
+    }
+
+    nlohmann::json run() {
+        if (!valid) { result["readError"] = true; return result; }
+        visit(firstIfd, 0);
+        if (!error.empty()) result["readError"] = true;
+        return result;
+    }
+
+private:
+    static constexpr size_t npos = std::numeric_limits<size_t>::max();
+    const std::vector<uint8_t>& b;
+    size_t base = npos;
+    bool le = true, valid = false;
+    uint32_t firstIfd = 0;
+    std::string error;
+    std::vector<uint32_t> visited;
+    nlohmann::json result = nlohmann::json::object();
+
+    static size_t findBase(const std::vector<uint8_t>& x) {
+        auto isTiff = [&](size_t p) { return p + 4 <= x.size() && ((x[p]=='I'&&x[p+1]=='I'&&x[p+2]==42&&x[p+3]==0)||(x[p]=='M'&&x[p+1]=='M'&&x[p+2]==0&&x[p+3]==42)); };
+        if (isTiff(0)) return 0;
+        if (x.size() >= 6 && x[0]=='E'&&x[1]=='x'&&x[2]=='i'&&x[3]=='f'&&x[4]==0&&x[5]==0 && isTiff(6)) return 6;
+        if (x.size() >= 4) {
+            uint32_t off = (uint32_t(x[0])<<24)|(uint32_t(x[1])<<16)|(uint32_t(x[2])<<8)|x[3];
+            if (isTiff(off)) return off;
+            if (off <= x.size() && x.size()-off >= 6 && x[off]=='E'&&x[off+1]=='x'&&x[off+2]=='i'&&x[off+3]=='f'&&x[off+4]==0&&x[off+5]==0 && isTiff(off+6)) return off+6;
+            // Some containers store an offset relative to the bytes after the 4-byte field.
+            if (off <= x.size()-std::min<size_t>(4,x.size()) && isTiff(size_t(off)+4)) return size_t(off)+4;
+        }
+        return npos;
+    }
+    bool has(size_t p, size_t n) const { return p <= b.size() && n <= b.size()-p; }
+    uint16_t u16(size_t p) const { if(!has(p,2)) { const_cast<Reader*>(this)->error="truncated"; return 0; } return le ? uint16_t(b[p]|(uint16_t(b[p+1])<<8)) : uint16_t((uint16_t(b[p])<<8)|b[p+1]); }
+    uint32_t u32(size_t p) const { if(!has(p,4)) { const_cast<Reader*>(this)->error="truncated"; return 0; } return le ? uint32_t(b[p])|(uint32_t(b[p+1])<<8)|(uint32_t(b[p+2])<<16)|(uint32_t(b[p+3])<<24) : (uint32_t(b[p])<<24)|(uint32_t(b[p+1])<<16)|(uint32_t(b[p+2])<<8)|b[p+3]; }
+    std::string number(double d) const { std::ostringstream s; s << std::setprecision(8) << d; return s.str(); }
+    size_t typeSize(uint16_t t) const { switch(t) { case 1: case 2: case 6: case 7:return 1; case 3: case 8:return 2; case 4: case 9: case 11: case 13:return 4; case 5: case 10: case 12:return 8; default:return 0; } }
+    bool dataLoc(uint32_t off, uint32_t count, uint16_t type, size_t& p, size_t& total) {
+        size_t z=typeSize(type); if(!z || count > std::numeric_limits<size_t>::max()/z) { error="invalid type/count"; return false; }
+        total=z*size_t(count); p=total<=4 ? off : size_t(base)+off;
+        if(p<base || !has(p,total)) { error="out of bounds"; return false; } return true;
+    }
+    double scalar(size_t p,uint16_t type) {
+        switch(type) { case 1: case 6:return b[p]; case 3:return u16(p); case 4:return u32(p); case 8:return static_cast<int16_t>(u16(p)); case 9:return static_cast<int32_t>(u32(p)); case 5: case 10: {uint32_t n=u32(p),d=u32(p+4); if(!d){error="zero denominator";return 0;} return type==5?double(n)/d:double(static_cast<int32_t>(n))/static_cast<int32_t>(d);} default:return 0; }
+    }
+    std::string ascii(size_t p,size_t n) { size_t end=p; while(end<p+n && b[end]) ++end; return std::string(reinterpret_cast<const char*>(b.data()+p),end-p); }
+    std::string exposure(double v) { if(v>0 && v<1) { for(int d=2;d<=1000000;++d) { double n=v*d; if(std::abs(n-std::round(n))<1e-7) return number(std::round(n))+"/"+std::to_string(d); } } return number(v); }
+    double gpsCoord(size_t p) {
+        double d=scalar(p,5),m=scalar(p+8,5),s=scalar(p+16,5);
+        return d+m/60.0+s/3600.0;
+    }
+    void setText(const char* key,size_t entry,uint32_t n,uint16_t t) { size_t z=typeSize(t)*size_t(n); if(z>4) { size_t q; if(!dataLoc(u32(entry),n,t,q,z)) return; result[key]=ascii(q,z); } else if(has(entry,z)) result[key]=ascii(entry,z); }
+    void setScalar(const char* key,size_t entry,uint32_t n,uint16_t t,bool exp=false) { size_t q,z; if(!n) return; z=typeSize(t)*size_t(n); if(z>4) {if(!dataLoc(u32(entry),n,t,q,z))return;} else q=entry; double v=scalar(q,t); result[key]=exp?exposure(v):number(v); }
+    void visit(uint32_t off,int depth) {
+        if(!off || depth>8) return;
+        if(std::find(visited.begin(),visited.end(),off)!=visited.end()) return;
+        visited.push_back(off);
+        size_t p=base+size_t(off); if(p<base || !has(p,2)) {error="IFD out of bounds";return;}
+        uint16_t count=u16(p); if(count>4096 || !has(p+2,size_t(count)*12+4)) {error="invalid IFD";return;}
+        uint32_t exif=0,gps=0,next=0;
+        for(uint16_t i=0;i<count;++i) {
+            size_t e=p+2+size_t(i)*12; uint16_t tag=u16(e),type=u16(e+2); uint32_t n=u32(e+4),v=u32(e+8); size_t q,z;
+            bool known = tag==0x010F||tag==0x0110||tag==0x0132||tag==0x0112||tag==0x013B||tag==0x8298||tag==0x8769||tag==0x8825||tag==0x829D||tag==0x829A||tag==0x8827||tag==0x920A||tag==0xA405||tag==0x9204||tag==0x9003||tag==0xA434;
+            if(!known) continue;
+            if(!typeSize(type) || n>std::numeric_limits<size_t>::max()/std::max<size_t>(1,typeSize(type))) { error="invalid type/count"; continue; }
+            z=typeSize(type)*size_t(n); if(z>4 && !dataLoc(v,n,type,q,z)) continue;
+            switch(tag) {
+              case 0x010F:setText("Make",e+8,n,type);break; case 0x0110:setText("Model",e+8,n,type);break;
+              case 0x0132:setText("DateTime",e+8,n,type);break; case 0x0112:setScalar("Orientation",e+8,n,type);break;
+              case 0x013B:setText("Artist",e+8,n,type);break; case 0x8298:setText("Copyright",e+8,n,type);break;
+              case 0x8769:if(n&&type==4)exif=v;break; case 0x8825:if(n&&type==4)gps=v;break;
+              case 0x829D:setScalar("FNumber",e+8,n,type);break; case 0x829A:setScalar("ExposureTime",e+8,n,type,true);break;
+              case 0x8827:setScalar("ISO",e+8,n,type);break; case 0x920A:setScalar("FocalLength",e+8,n,type);break;
+              case 0xA405:setScalar("FocalLengthIn35mmFormat",e+8,n,type);break; case 0x9204:setScalar("ExposureBiasValue",e+8,n,type);break;
+              case 0x9003:setText("DateTimeOriginal",e+8,n,type);break; case 0xA434:setText("LensModel",e+8,n,type);break;
+              case 0x0001:case 0x0002:case 0x0003:case 0x0004: break;
+            }
+        }
+        next=u32(p+2+size_t(count)*12);
+        if(exif) visit(exif,depth+1);
+        if(gps) visitGps(gps);
+        if(next) visit(next,depth+1);
+    }
+    void visitGps(uint32_t off) {
+        size_t p=base+size_t(off); if(p<base||!has(p,2)){error="GPS IFD out of bounds";return;}
+        uint16_t count=u16(p); if(count>4096||!has(p+2,size_t(count)*12+4)){error="invalid GPS IFD";return;}
+        std::string latRef,lonRef; size_t lat=0,lon=0;
+        for(uint16_t i=0;i<count;++i) { size_t e=p+2+size_t(i)*12; uint16_t tag=u16(e),t=u16(e+2);uint32_t n=u32(e+4),v=u32(e+8);size_t q=0,z=0;
+            if(tag==1&&t==2&&n) { z=typeSize(t)*size_t(n); if(z<=4)latRef=ascii(e+8,z); else if(dataLoc(v,n,t,q,z))latRef=ascii(q,z); }
+            if(tag==3&&t==2&&n) { z=typeSize(t)*size_t(n); if(z<=4)lonRef=ascii(e+8,z); else if(dataLoc(v,n,t,q,z))lonRef=ascii(q,z); }
+            if((tag==2||tag==4)&&t==5&&n>=3&&dataLoc(v,n,t,q,z)) { if(tag==2)lat=q; else lon=q; }
+        }
+        if(lat&&lon) { double a=gpsCoord(lat),o=gpsCoord(lon);if(!latRef.empty()&&latRef[0]=='S')a=-a;if(!lonRef.empty()&&lonRef[0]=='W')o=-o;result["GPSLatitude"]=number(a);result["GPSLongitude"]=number(o); }
+    }
+};
+}
+
+nlohmann::json parse(const std::vector<uint8_t>& bytes) {
+    return detail::Reader(bytes).run();
+}
+namespace detail {
+
+inline bool starts_with_ci(std::string_view text, std::string_view prefix) {
+    if (text.size() < prefix.size()) return false;
+    for (size_t i = 0; i < prefix.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(text[i])) != std::tolower(static_cast<unsigned char>(prefix[i]))) return false;
+    return true;
+}
+
+inline bool contains_ci(std::string_view text, std::string_view needle) {
+    if (needle.empty() || text.size() < needle.size()) return false;
+    for (size_t i = 0; i + needle.size() <= text.size(); ++i)
+        if (starts_with_ci(text.substr(i), needle)) return true;
+    return false;
+}
+
+inline std::string normalize_words(std::string_view s) {
+    std::string out;
+    bool space = false;
+    for (unsigned char ch : s) {
+        if (std::isspace(ch) || ch == '.' || ch == ',' || ch == '_') {
+            space = !out.empty();
+            continue;
+        }
+        if (space) {
+            out.push_back(' ');
+            space = false;
+        }
+        out.push_back(char(std::tolower(ch)));
+    }
+    return out;
+}
+
+struct BrandAlias {
+    const char* prefix;
+    const char* key;
+};
+
+// Shared vendor aliases used by both logo lookup and model-prefix deduplication.
+inline constexpr BrandAlias kBrandAliases[] = {
+    {"fuji photo film", "fujifilm"},
+    {"fujifilm", "fujifilm"},
+    {"victor hasselblad", "hasselblad"},
+    {"hasselblad", "hasselblad"},
+    {"leica camera", "leica"},
+    {"leica", "leica"},
+    {"olympus imaging", "olympus"},
+    {"olympus optical", "olympus"},
+    {"olympus", "olympus"},
+    {"om digital solutions", "omsystem"},
+    {"om system", "omsystem"},
+    {"omsystem", "omsystem"},
+    {"pentax ricoh imaging", "pentax_ricoh"},
+    {"pentax ricoh", "pentax_ricoh"},
+    {"ricoh imaging", "ricoh"},
+    {"ricoh", "ricoh"},
+    {"asahi optical", "pentax"},
+    {"pentax", "pentax"},
+    {"phase one", "phaseone"},
+    {"phaseone", "phaseone"},
+    {"sz dji technology", "dji"},
+    {"dji", "dji"},
+    {"arashi vision", "insta360"},
+    {"insta360", "insta360"},
+    {"mamiya digital imaging", "mamiya"},
+    {"mamiya-op", "mamiya"},
+    {"mamiya", "mamiya"},
+    {"eastman kodak", "kodak"},
+    {"jk imaging", "jk_imaging"},
+    {"kodak", "kodak"},
+    {"carl zeiss", "zeiss"},
+    {"zeiss", "zeiss"},
+    {"konica minolta photo imaging", "minolta"},
+    {"konica minolta camera", "minolta"},
+    {"konica minolta", "minolta"},
+    {"minolta", "minolta"},
+    {"casio computer", "casio"},
+    {"casio", "casio"},
+    {"arnold & richter", "arri"},
+    {"arri", "arri"},
+    {"samsung electronics", "samsung"},
+    {"samsung techwin", "samsung"},
+    {"samsung optical", "samsung"},
+    {"samsung anycall", "samsung"},
+    {"samsung elec", "samsung"},
+    {"samsung", "samsung"},
+    {"canon", "canon"},
+    {"nikon", "nikon"},
+    {"sony", "sony"},
+    {"panasonic", "panasonic"},
+    {"lumix", "lumix"},
+    {"sigma", "sigma"},
+    {"gopro", "gopro"},
+    {"apple", "apple"},
+    {"xiaomi", "xiaomi"},
+    {"oppo", "oppo"},
+    {"vivo", "vivo"},
+    {"iqoo", "iqoo"},
+    {"honor", "honor"},
+    {"huawei", "huawei"},
+    {"oneplus", "oneplus"},
+    {"google", "google"}
+};
+
+inline constexpr const char* kLegalSuffixes[] = {
+    "a/s", "ag", "ab", "gmbh", "k k", "ltd", "corporation", "corp",
+    "company ltd", "company", "co ltd", "inc", "camera ag"
+};
+
+inline bool is_word_sep(unsigned char ch) {
+    return std::isspace(ch) || ch == '.' || ch == ',' || ch == '_';
+}
+
+inline bool is_model_sep(unsigned char ch) {
+    return std::isspace(ch) || ch == '-' || ch == '/';
+}
+
+// Matches a space-delimited lowercase alias at the beginning of `text` (treating
+// whitespace, '.', ',', '_' as separators), returning the end index in `text`
+// or npos if it does not match a full prefix token.
+inline size_t match_alias_tokens(std::string_view text, std::string_view alias) {
+    size_t ti = 0;
+    for (size_t ai = 0; ai < alias.size(); ++ai) {
+        if (alias[ai] == ' ') {
+            if (ti >= text.size() || !is_word_sep(static_cast<unsigned char>(text[ti]))) return std::string_view::npos;
+            while (ti < text.size() && is_word_sep(static_cast<unsigned char>(text[ti]))) ++ti;
+        } else {
+            if (ti >= text.size() ||
+                std::tolower(static_cast<unsigned char>(text[ti])) != static_cast<unsigned char>(alias[ai])) {
+                return std::string_view::npos;
+            }
+            ++ti;
+        }
+    }
+    return ti;
+}
+
+// Matches `alias` plus an optional trailing legal suffix at the start of `text`,
+// requiring end-of-string or a model separator (space, '-', '/') afterward.
+inline size_t match_prefix_with_boundary(std::string_view text, std::string_view alias) {
+    size_t pos = match_alias_tokens(text, alias);
+    if (pos == std::string_view::npos) return std::string_view::npos;
+
+    auto consume_legal_suffix = [&](size_t from) -> size_t {
+        size_t s = from;
+        while (s < text.size() && is_word_sep(static_cast<unsigned char>(text[s]))) ++s;
+        if (s == from) return std::string_view::npos;
+        size_t best = std::string_view::npos;
+        for (const char* suffix : kLegalSuffixes) {
+            const size_t end = match_alias_tokens(text.substr(s), suffix);
+            if (end != std::string_view::npos) {
+                const size_t abs_end = s + end;
+                if (abs_end == text.size() || is_model_sep(static_cast<unsigned char>(text[abs_end])) ||
+                    text[abs_end] == '.' || text[abs_end] == ',') {
+                    if (best == std::string_view::npos || abs_end > best) best = abs_end;
+                }
+            }
+        }
+        if (best != std::string_view::npos) {
+            while (best < text.size() && (text[best] == '.' || text[best] == ',')) ++best;
+        }
+        return best;
+    };
+
+    if (pos < text.size()) {
+        const size_t with_suffix = consume_legal_suffix(pos);
+        if (with_suffix != std::string_view::npos) pos = with_suffix;
+    }
+    if (pos == text.size()) return pos;
+    if (!is_model_sep(static_cast<unsigned char>(text[pos]))) return std::string_view::npos;
+    return pos;
+}
+
+inline std::string base_vendor_key(const std::string& make) {
+    const std::string normalized = normalize_words(make);
+    if (normalized.empty()) return {};
+    std::string best_key;
+    size_t best_len = 0;
+    for (const auto& brand : kBrandAliases) {
+        const std::string_view prefix(brand.prefix);
+        if (prefix.size() <= best_len) continue;
+        if (normalized == prefix) {
+            best_key = brand.key;
+            best_len = prefix.size();
+            continue;
+        }
+        if (normalized.size() > prefix.size() && normalized.compare(0, prefix.size(), prefix) == 0 &&
+            normalized[prefix.size()] == ' ') {
+            const std::string_view suffix = std::string_view(normalized).substr(prefix.size() + 1);
+            for (const char* allowed : kLegalSuffixes) {
+                if (suffix == allowed) {
+                    best_key = brand.key;
+                    best_len = prefix.size();
+                    break;
+                }
+            }
+        }
+    }
+    return best_key;
+}
+
+inline bool alias_belongs_to(const std::string& alias_key, const std::string& resolved_key,
+                             const std::string& base_key) {
+    if (alias_key == resolved_key || (!base_key.empty() && alias_key == base_key)) return true;
+    if (resolved_key == "lumix" && alias_key == "panasonic") return true;
+    if (resolved_key == "iqoo" && alias_key == "vivo") return true;
+    if (resolved_key == "pentax" && (alias_key == "ricoh" || alias_key == "pentax_ricoh")) return true;
+    if (resolved_key == "ricoh" && alias_key == "pentax_ricoh") return true;
+    if (resolved_key == "kodak" && alias_key == "jk_imaging") return true;
+    return false;
+}
+
+// Strips the longest leading vendor prefix matching `resolved_key` or `base_key`,
+// plus one separator (' ', '-', '/'), preserving the remainder verbatim.
+inline bool strip_one_vendor_prefix(std::string& model, const std::string& resolved_key,
+                                    const std::string& base_key) {
+    size_t best_match_end = std::string_view::npos;
+    size_t best_alias_len = 0;
+    for (const auto& brand : kBrandAliases) {
+        if (!alias_belongs_to(brand.key, resolved_key, base_key)) continue;
+        const std::string_view alias(brand.prefix);
+        if (alias.size() <= best_alias_len) continue;
+        const size_t end = match_prefix_with_boundary(model, alias);
+        if (end != std::string_view::npos) {
+            best_match_end = end;
+            best_alias_len = alias.size();
+        }
+    }
+    if (best_match_end == std::string_view::npos) return false;
+    size_t erase_end = best_match_end;
+    while (erase_end < model.size() && std::isspace(static_cast<unsigned char>(model[erase_end]))) ++erase_end;
+    if (erase_end < model.size() && (model[erase_end] == '-' || model[erase_end] == '/')) {
+        ++erase_end;
+        while (erase_end < model.size() && std::isspace(static_cast<unsigned char>(model[erase_end]))) ++erase_end;
+    }
+    model.erase(0, erase_end);
+    while (!model.empty() && std::isspace(static_cast<unsigned char>(model.back()))) model.pop_back();
+    return true;
+}
+
+}  // namespace detail
+
+// Returns the lowercase key used by the bundled camera logo assets, or an
+// empty string when the make has no logo. Handles common EXIF vendor suffixes
+// and sub-brand/model routing (Lumix, Pentax/Ricoh, iQOO, JK Imaging/Kodak).
+std::string camera_logo_key(const std::string& make, const std::string& model) {
+    const std::string base = detail::base_vendor_key(make);
+    if (base.empty()) return {};
+
+    auto trim_ws = [](std::string s) {
+        const auto first = s.find_first_not_of(" \t\r\n");
+        return first == std::string::npos ? std::string{} : s.substr(first, s.find_last_not_of(" \t\r\n") - first + 1);
+    };
+    std::string stripped_model = trim_ws(model);
+    while (detail::strip_one_vendor_prefix(stripped_model, base, base)) {}
+    const std::string norm_model = detail::normalize_words(stripped_model);
+
+    if (base == "jk_imaging") {
+        if (norm_model == "kodak pixpro" || detail::starts_with_ci(norm_model, "kodak pixpro ")) {
+            return "kodak";
+        }
+        return {};
+    }
+    if (base == "pentax_ricoh") {
+        if (norm_model == "pentax" || detail::starts_with_ci(norm_model, "pentax ")) {
+            return "pentax";
+        }
+        return "ricoh";
+    }
+    if (base == "ricoh") {
+        if (norm_model == "pentax" || detail::starts_with_ci(norm_model, "pentax ")) {
+            return "pentax";
+        }
+        return "ricoh";
+    }
+    if (base == "panasonic" && !stripped_model.empty()) {
+        if (detail::contains_ci(norm_model, "lumix") ||
+            detail::starts_with_ci(stripped_model, "dc-") ||
+            detail::starts_with_ci(stripped_model, "dmc-")) {
+            return "lumix";
+        }
+    }
+    if (base == "vivo" && (norm_model == "iqoo" || detail::starts_with_ci(norm_model, "iqoo "))) {
+        return "iqoo";
+    }
+    return base;
+}
+
+std::pair<std::string,std::string> captions(const nlohmann::json& fields) {
+    const auto value = [&](const char* key) -> std::string {
+        if (!fields.contains(key) || fields[key].is_null()) return {};
+        return fields[key].is_string() ? fields[key].get<std::string>() : fields[key].dump();
+    };
+    auto trim = [](std::string s) {
+        const auto first = s.find_first_not_of(" \t\r\n");
+        return first == std::string::npos ? std::string{} : s.substr(first, s.find_last_not_of(" \t\r\n") - first + 1);
+    };
+    std::string make = trim(value("Make"));
+    std::string model = trim(value("Model"));
+    const std::string baseKey = detail::base_vendor_key(make);
+    const std::string logoKey = camera_logo_key(make, model);
+    if (!model.empty() && !logoKey.empty()) {
+        while (detail::strip_one_vendor_prefix(model, logoKey, baseKey)) {}
+    }
+    std::string first;
+    if (model.empty()) {
+        first = logoKey.empty() ? make : std::string{};
+    } else if (logoKey.empty() && !make.empty() && !detail::starts_with_ci(model, make) &&
+               !(detail::starts_with_ci(make, "apple") &&
+                 (detail::starts_with_ci(model, "iphone") || detail::starts_with_ci(model, "ipad")))) {
+        first = make + " " + model;
+    } else {
+        first = model;
+    }
+    std::vector<std::string> parts;
+    auto focal=value("FocalLengthIn35mmFormat"); if(focal.empty()||focal=="0") focal=value("FocalLength");
+    if(!focal.empty()&&focal!="0") parts.push_back(focal+"mm");
+    auto aperture=value("FNumber"); if(!aperture.empty()) parts.push_back("f/"+aperture);
+    auto exposure=value("ExposureTime"); if(!exposure.empty())parts.push_back(exposure+"s");
+    auto iso=value("ISO"); if(!iso.empty())parts.push_back("ISO"+iso);
+    std::string second;for(const auto& part:parts){if(!second.empty())second+=' ';second+=part;}
+    return {first,second};
+}
+
+}  // namespace hdrbridge::frame_exif

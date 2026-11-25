@@ -1,4 +1,4 @@
-#include "../core/src/frame_xmp.h"
+#include "photo_frame/frame_exif.h"
 
 #include <iostream>
 #include <stdexcept>

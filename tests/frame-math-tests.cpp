@@ -1,5 +1,6 @@
-#include "frame_composite.h"
-#include "frame_exif.h"
+#include "photo_frame/frame_composite.h"
+#include "photo_frame/frame_exif.h"
+#include "metadata/exif_repack.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -76,7 +77,7 @@ static void exifTest(bool le) {
  t.entry(root,3,0x8769,4,1,uint32_t(ex));t.entry(root,4,0x8825,4,1,uint32_t(gps));t.entry(root,5,0x0111,4,1,123456);t.entry(root,6,0x0117,4,1,400);
  t.entry(ex,0,0x829d,5,1,ap);t.entry(ex,1,0x829a,5,1,exp);t.shortEntry(ex,2,0x8827,400);t.entry(ex,3,0x927c,7,8,0xfffffff0);
  t.entry(gps,0,1,2,2,0);t.b[gps+10]='N'; t.entry(gps,1,2,5,3,lat);t.entry(gps,2,3,2,2,0);t.b[gps+2+2*12+8]='E';t.entry(gps,3,4,5,3,lon);
- auto out=frame_exif::output(t.b,640,480);auto j=frame_exif::parse(out);
+ auto out=metadata::repack_exif(t.b,640,480);auto j=frame_exif::parse(out);
  require(!j.value("readError",false),"valid output EXIF");
  require(j.value("Make","")=="Canon" && j.value("Model","")=="Canon EOS R5","camera preserved");
  require(j.value("FNumber","")=="2.8" && j.value("ExposureTime","")=="1/125" && j.value("ISO","")=="400","exposure preserved");
@@ -100,7 +101,7 @@ static void tiffMetadataTest() {
  t.entry(root, 2, 0x0111, 4, 2, 0xfffffff0);
  t.entry(root, 3, 0x83bb, 4, 40, 0xfffffff0);
  t.entry(exif, 0, 0x829a, 5, 1, t.rationals({1, 160}));
- const auto result = frame_exif::detail::repack([&](size_t offset, size_t count) {
+ const auto result = metadata::repack([&](size_t offset, size_t count) {
    require(offset <= t.b.size() && count <= t.b.size() - offset, "TIFF metadata accessed a raster/private payload");
    return std::vector<uint8_t>(t.b.begin() + offset, t.b.begin() + offset + count);
  }, 640, 480, true);

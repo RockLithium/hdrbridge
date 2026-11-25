@@ -1,6 +1,6 @@
 #include "hdrbridge_core.h"
 #include "hdr_preview_tiles.h"
-#include "../core/src/gainmap_adapters.h"
+#include "../core/src/codecs/gainmap/raster.h"
 #include <png.h>
 #include <tiffio.h>
 #include <jpeglib.h>

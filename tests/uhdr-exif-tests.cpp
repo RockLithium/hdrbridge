@@ -1,4 +1,4 @@
-#include "exif_output.h"
+#include "metadata/exif_output.h"
 #include <cstdlib>
 #define CHECK(x)                                                               \
   do {                                                                         \

@@ -70,19 +70,13 @@ else()
   set(HDRBRIDGE_UHDR_ROOT "${libultrahdr_SOURCE_DIR}")
 endif()
 
-add_executable(hdrbridge-web
-  ../../core/src/output_transaction.cpp
-  hdrbridge_web_api.cpp
-  ../../core/src/hdrbridge_core.cpp
-  ../../core/src/hdr_transfer.cpp
-  ../../core/src/jpeg_probe.cpp
-  ../../core/src/gainmap_adapters.cpp
-  ../../core/src/orientation.cpp)
+add_executable(hdrbridge-web hdrbridge_web_api.cpp)
+include("../../cmake/HdrBridgeCoreSources.cmake")
+hdrbridge_add_core_sources(hdrbridge-web)
 
 target_include_directories(hdrbridge-web PRIVATE
   "${CMAKE_CURRENT_BINARY_DIR}/generated"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../core/include"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../core/src"
   "${JXL_INCLUDE_DIR}"
   "${JXR_INCLUDE_DIR}"
   "${HDRBRIDGE_UHDR_ROOT}")

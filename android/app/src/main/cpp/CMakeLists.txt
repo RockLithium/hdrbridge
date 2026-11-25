@@ -55,17 +55,11 @@ else()
     PATCH_COMMAND "${CMAKE_COMMAND}" "-DHDRBRIDGE_UHDR_SOURCE=<SOURCE_DIR>" -P "${HDRBRIDGE_ROOT}/cmake/PatchUltraHdr.cmake")
   FetchContent_MakeAvailable(libultrahdr)
 endif()
-add_library(hdrbridge_jni SHARED
-  bridge.cpp
-  hdr_preview.cpp
-  "${HDRBRIDGE_ROOT}/core/src/hdrbridge_core.cpp"
-  "${HDRBRIDGE_ROOT}/core/src/hdr_transfer.cpp"
-  "${HDRBRIDGE_ROOT}/core/src/gainmap_adapters.cpp"
-  "${HDRBRIDGE_ROOT}/core/src/jpeg_probe.cpp"
-  "${HDRBRIDGE_ROOT}/core/src/orientation.cpp"
-  "${HDRBRIDGE_ROOT}/core/src/output_transaction.cpp")
+add_library(hdrbridge_jni SHARED bridge.cpp hdr_preview.cpp)
+include("${HDRBRIDGE_ROOT}/cmake/HdrBridgeCoreSources.cmake")
+hdrbridge_add_core_sources(hdrbridge_jni)
 target_include_directories(hdrbridge_jni PRIVATE "${HDRBRIDGE_ROOT}/core/include"
-  "${HDRBRIDGE_ROOT}/core/src" "${CMAKE_CURRENT_BINARY_DIR}/generated" "${JXL_INCLUDE_DIR}" ${JXR_INCLUDE_DIRS})
+  "${CMAKE_CURRENT_BINARY_DIR}/generated" "${JXL_INCLUDE_DIR}" ${JXR_INCLUDE_DIRS})
 target_include_directories(hdrbridge_jni PRIVATE "${HDRBRIDGE_ROOT}/third_party/stb" "${HDRBRIDGE_ROOT}/third_party/nanosvg" "${HDRBRIDGE_UHDR_ROOT}/lib/include")
 target_compile_definitions(hdrbridge_jni PRIVATE __ANSI__)
 target_compile_options(hdrbridge_jni PRIVATE -O3 -fexceptions -frtti)
