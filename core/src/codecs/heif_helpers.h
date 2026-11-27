@@ -32,6 +32,8 @@ void require_heif(const heif_error& e, const char* operation);
 
 OpenedHeif open_heif(const std::filesystem::path& path);
 
+OpenedHeif open_heif_bytes(std::vector<uint8_t> bytes);
+
 SourceInfo inspect_opened(const std::filesystem::path& path, const OpenedHeif& opened);
 
 }  // namespace hdrbridge::detail

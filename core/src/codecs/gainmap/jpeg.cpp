@@ -1,6 +1,7 @@
 #include "codecs/gainmap/jpeg.h"
 #include "codecs/gainmap/decode_support.h"
 #include "codecs/gainmap/extract_support.h"
+#include "codecs/gainmap/icc_description.h"
 #include "codecs/gainmap/reconstruction_math.h"
 #include "codecs/jpeg_probe.h"
 #include "image/orientation.h"
@@ -372,6 +373,15 @@ ReconstructedHdr reconstruct_apple_jpeg_gainmap(
     info.exif_present = true;
   }
   info.original_orientation = orientation::read_exif_orientation(output.exif);
+  // iOS 27+ Adaptive HDR embeds an SMPTE ST 2094-50 HAGC tag whose reference
+  // white defaults to 203 nits or carries a custom value; legacy iOS 18 JPEG
+  // reconstruction anchors libultrahdr's linear output at 203 nits.
+  const double reference_white_nits =
+      jpeg_adaptive_hdr_icc_reference_white_nits(
+          static_cast<const uint8_t*>(base->data), base->data_sz,
+          static_cast<const uint8_t*>(gain->data), gain->data_sz,
+          /*allow_lumi=*/false)
+          .value_or(203.0);
   require_uhdr(uhdr_decode(decoder.get()), "reconstruct Apple HDR JPEG");
   uhdr_raw_image_t* image = uhdr_get_decoded_image(decoder.get());
   if (!image || image->fmt != UHDR_IMG_FMT_64bppRGBAHalfFloat ||
@@ -402,9 +412,9 @@ ReconstructedHdr reconstruct_apple_jpeg_gainmap(
         for (uint32_t x = 0; x < image->w; ++x) {
           const size_t pixel = static_cast<size_t>(y) * image->w + x;
           const std::array<double, 3> linear{
-              half_to_float_local(row[static_cast<size_t>(x) * 4u]) * 203.0,
-              half_to_float_local(row[static_cast<size_t>(x) * 4u + 1u]) * 203.0,
-              half_to_float_local(row[static_cast<size_t>(x) * 4u + 2u]) * 203.0};
+              half_to_float_local(row[static_cast<size_t>(x) * 4u]) * reference_white_nits,
+              half_to_float_local(row[static_cast<size_t>(x) * 4u + 1u]) * reference_white_nits,
+              half_to_float_local(row[static_cast<size_t>(x) * 4u + 2u]) * reference_white_nits};
           std::array<double, 3> rec2020{};
           if (image->cg == UHDR_CG_BT_2100) {
             rec2020 = linear;

@@ -190,8 +190,7 @@ double jxl_base_to_linear(double value, uint16_t transfer) {
   return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
 }
 
-SourceInfo describe_jxl_gainmap(const std::filesystem::path& path, const IsoGainMapMetadata& metadata,
-                                const JxlRaster& base, const JxlRaster& map) {
+void validate_jxl_hdr_base_color(const JxlRaster& base) {
   if (!base.color_valid || base.channels != 3 || base.color.color_space != JXL_COLOR_SPACE_RGB ||
       base.color.white_point != JXL_WHITE_POINT_D65 ||
       (base.color.transfer_function != JXL_TRANSFER_FUNCTION_SRGB &&
@@ -201,28 +200,70 @@ SourceInfo describe_jxl_gainmap(const std::filesystem::path& path, const IsoGain
        base.color.primaries != JXL_PRIMARIES_2100)) {
     throw std::runtime_error("unsupported jhgm SDR base color encoding");
   }
+}
+
+JxlRaster read_jxl_basic_info(const uint8_t* bytes, size_t size) {
+  auto decoder = JxlDecoderMake(nullptr);
+  if (!decoder || JxlDecoderSubscribeEvents(decoder.get(), JXL_DEC_BASIC_INFO) != JXL_DEC_SUCCESS ||
+      JxlDecoderSetInput(decoder.get(), bytes, size) != JXL_DEC_SUCCESS) {
+    throw std::runtime_error("cannot inspect JPEG XL basic info");
+  }
+  JxlDecoderCloseInput(decoder.get());
+  JxlBasicInfo basic{};
+  for (;;) {
+    const auto status = JxlDecoderProcessInput(decoder.get());
+    if (status == JXL_DEC_BASIC_INFO) {
+      if (JxlDecoderGetBasicInfo(decoder.get(), &basic) != JXL_DEC_SUCCESS) {
+        throw std::runtime_error("cannot read JPEG XL basic info");
+      }
+      break;
+    }
+    if (status == JXL_DEC_ERROR || status == JXL_DEC_NEED_MORE_INPUT || status == JXL_DEC_SUCCESS) {
+      throw std::runtime_error("JPEG XL basic info is missing");
+    }
+  }
+  JxlRaster output;
+  output.width = basic.xsize;
+  output.height = basic.ysize;
+  output.bits = basic.bits_per_sample;
+  output.channels = basic.num_color_channels == 1 ? 1u : 3u;
+  output.orientation = static_cast<uint8_t>(basic.orientation);
+  return output;
+}
+
+SourceInfo describe_jxl_gainmap(const std::filesystem::path& path, const IsoGainMapMetadata& metadata,
+                                const JxlRaster& base, const JxlRaster& map) {
   SourceInfo info;
   info.path = path; info.format = "JPEG XL"; info.container_brand = "JXL / jhgm";
   info.asset_kind = "gain-map-hdr"; info.gain_map_present = true;
   info.gain_map_family = "iso-jxl-jhgm";
   info.codec = "JPEG XL SDR base + JPEG XL gain map + jhgm";
   info.profile = "ISO 21496-1 gain-map HDR reconstruction";
-  info.color_signal_kind = "JPEG XL structured base color + jhgm ISO metadata";
+  info.color_signal_kind = base.color_valid
+      ? "JPEG XL structured base color + jhgm ISO metadata"
+      : "JPEG XL base + jhgm ISO metadata";
   info.width = info.base_width = base.width; info.height = info.base_height = base.height;
   info.bit_depth = info.base_bit_depth = base.bits; info.base_channels = base.channels;
   info.base_codec = "JPEG XL";
-  info.base_color_space = base.color.primaries == JXL_PRIMARIES_SRGB ? "Rec.709" :
-                          base.color.primaries == JXL_PRIMARIES_2100 ? "Rec.2020" : "Display P3";
-  info.native_color_present = true;
-  info.native_color_description = "JPEG XL structured base color (CICP equivalent)";
-  info.native_primaries = info.primaries = base.color.primaries == JXL_PRIMARIES_P3 ?
-      12 : static_cast<uint16_t>(base.color.primaries);
-  info.native_transfer = info.transfer = static_cast<uint16_t>(base.color.transfer_function);
-  info.native_matrix = info.matrix = 0;
-  info.native_full_range = info.full_range = true;
-  info.native_range_known = info.range_known = true;
-  info.resolved_signaling_source = "Native";
-  info.base_transfer = base.color.transfer_function == JXL_TRANSFER_FUNCTION_709 ? "BT.709" : "sRGB";
+  if (base.color_valid && base.color.color_space == JXL_COLOR_SPACE_RGB) {
+    info.base_color_space = base.color.primaries == JXL_PRIMARIES_SRGB ? "Rec.709" :
+                            base.color.primaries == JXL_PRIMARIES_2100 ? "Rec.2020" :
+                            base.color.primaries == JXL_PRIMARIES_P3 ? "Display P3" : "Custom ICC / RGB";
+    info.native_color_present = true;
+    info.native_color_description = "JPEG XL structured base color (CICP equivalent)";
+    info.native_primaries = info.primaries = base.color.primaries == JXL_PRIMARIES_P3 ?
+        12 : static_cast<uint16_t>(base.color.primaries);
+    info.native_transfer = info.transfer = static_cast<uint16_t>(base.color.transfer_function);
+    info.native_matrix = info.matrix = 0;
+    info.native_full_range = info.full_range = true;
+    info.native_range_known = info.range_known = true;
+    info.resolved_signaling_source = "Native";
+    info.base_transfer = base.color.transfer_function == JXL_TRANSFER_FUNCTION_709 ? "BT.709" :
+                         base.color.transfer_function == JXL_TRANSFER_FUNCTION_SRGB ? "sRGB" : "Custom transfer";
+  } else {
+    info.base_color_space = "ICC / unspecified";
+    info.base_transfer = "Unspecified";
+  }
   info.gain_map_width = map.width; info.gain_map_height = map.height;
   info.gain_map_channels = map.channels;
   info.gain_map_scale_x = map.width ? base.width / static_cast<double>(map.width) : 0.0;
@@ -272,6 +313,7 @@ ReconstructedHdr reconstruct_iso_gainmap_jxl(const std::filesystem::path& path,
   if (!bundle.gain_map) throw std::runtime_error("JPEG XL does not contain a jhgm gain map");
   const auto metadata = parse_iso_gain_map_metadata(bundle.metadata, bundle.metadata_size);
   auto base = decode_jxl_raster(file.data(), file.size(), true, true);
+  validate_jxl_hdr_base_color(base);
   const auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size, true);
   ReconstructedHdr output;
   output.info = describe_jxl_gainmap(path, metadata, base, map);
@@ -341,33 +383,15 @@ GainMapRaster extract_jxl_gainmap(const std::filesystem::path& path,
   const auto bundle = find_jhgm(file);
   if (!bundle.gain_map) throw std::runtime_error("JPEG XL does not contain a jhgm gain map");
   if (!decode_pixels) {
-    auto decoder = JxlDecoderMake(nullptr);
-    if (!decoder || JxlDecoderSubscribeEvents(decoder.get(), JXL_DEC_BASIC_INFO) != JXL_DEC_SUCCESS ||
-        JxlDecoderSetInput(decoder.get(), bundle.gain_map, bundle.gain_map_size) != JXL_DEC_SUCCESS) {
-      throw std::runtime_error("cannot inspect embedded JPEG XL gain map");
-    }
-    JxlDecoderCloseInput(decoder.get());
-    JxlBasicInfo basic{};
-    while (true) {
-      const auto status = JxlDecoderProcessInput(decoder.get());
-      if (status == JXL_DEC_BASIC_INFO) {
-        if (JxlDecoderGetBasicInfo(decoder.get(), &basic) != JXL_DEC_SUCCESS) {
-          throw std::runtime_error("cannot read embedded JPEG XL gain-map info");
-        }
-        break;
-      }
-      if (status == JXL_DEC_ERROR || status == JXL_DEC_NEED_MORE_INPUT || status == JXL_DEC_SUCCESS) {
-        throw std::runtime_error("embedded JPEG XL gain-map info is missing");
-      }
-    }
+    const auto basic = read_jxl_basic_info(bundle.gain_map, bundle.gain_map_size);
     GainMapRaster result;
     result.info.path = path;
     result.info.format = "JPEG XL";
     result.info.asset_kind = "gain-map-hdr";
-    result.width = basic.xsize;
-    result.height = basic.ysize;
-    result.channels = basic.num_color_channels == 1 ? 1u : 3u;
-    result.bit_depth = basic.bits_per_sample;
+    result.width = basic.width;
+    result.height = basic.height;
+    result.channels = basic.channels;
+    result.bit_depth = basic.bits;
     result.encoding = "JPEG XL jhgm gain-map codestream";
     result.original_bytes.assign(bundle.gain_map, bundle.gain_map + bundle.gain_map_size);
     result.original_extension = ".jxl";
@@ -375,7 +399,7 @@ GainMapRaster extract_jxl_gainmap(const std::filesystem::path& path,
     return result;
   }
   auto map = decode_jxl_raster(bundle.gain_map, bundle.gain_map_size, true);
-  const auto base = decode_jxl_raster(file.data(), file.size(), false, true);
+  const auto base = read_jxl_basic_info(file.data(), file.size());
   const auto metadata = parse_iso_gain_map_metadata(bundle.metadata, bundle.metadata_size);
   auto info = describe_jxl_gainmap(path, metadata, base, map);
   auto result = make_raster(std::move(info), map.width, map.height, map.channels,

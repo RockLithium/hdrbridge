@@ -73,8 +73,7 @@ static void inspect_container_bits(const std::vector<uint8_t>& bytes, SourceInfo
   }
 }
 
-OpenedHeif open_heif(const std::filesystem::path& path) {
-  auto bytes = read_file(path);
+OpenedHeif open_heif_bytes(std::vector<uint8_t> bytes) {
   ContextPtr context(heif_context_alloc());
   if (!context) throw std::bad_alloc();
   heif_context_set_max_decoding_threads(context.get(), codec_background_workers());
@@ -84,6 +83,10 @@ OpenedHeif open_heif(const std::filesystem::path& path) {
   heif_image_handle* raw = nullptr;
   require_heif(heif_context_get_primary_image_handle(context.get(), &raw), "get primary image");
   return {std::move(bytes), std::move(context), HandlePtr(raw)};
+}
+
+OpenedHeif open_heif(const std::filesystem::path& path) {
+  return open_heif_bytes(read_file(path));
 }
 
 static uint8_t heif_container_orientation(const OpenedHeif& opened) {
@@ -201,7 +204,7 @@ SourceInfo inspect_opened(const std::filesystem::path& path, const OpenedHeif& o
     std::swap(info.width, info.height);
   }
   info.orientation_normalized = true;
-  inspect_container_bits(read_file(path), info);
+  inspect_container_bits(opened.bytes, info);
   info.format = info.container_brand == "avif" ? "AVIF" : "HEIF/HIF";
   resolve_color_signaling(info, false);
   info.color_signal_kind = info.resolved_signaling_source;
@@ -214,12 +217,11 @@ SourceInfo inspect_opened(const std::filesystem::path& path, const OpenedHeif& o
   return info;
 }
 
-DecodedImage decode_direct_hdr(const std::filesystem::path& path,
-                               const ProgressCallback& progress,
-                               std::atomic_bool* cancel) {
+static DecodedImage decode_direct_hdr_opened(const std::filesystem::path& path,
+                                             OpenedHeif opened,
+                                             const ProgressCallback& progress,
+                                             std::atomic_bool* cancel) {
   const auto decode_start = Clock::now();
-  report(progress, 5, "Inspecting HEIF container");
-  auto opened = open_heif(path);
   DecodedImage result;
   result.info = inspect_opened(path, opened);
   if (result.info.gain_map_present) {
@@ -387,6 +389,28 @@ DecodedImage decode_direct_hdr(const std::filesystem::path& path,
       ? "BT.2100 HLG OETF/OOTF reconstructed to linear HDR (1000-nit reference)"
       : "High-precision Rec.2020/PQ RGB ready");
   return result;
+}
+
+DecodedImage decode_direct_hdr(const std::filesystem::path& path,
+                               const ProgressCallback& progress,
+                               std::atomic_bool* cancel) {
+  report(progress, 5, "Inspecting HEIF container");
+  return decode_direct_hdr_opened(path, open_heif(path), progress, cancel);
+}
+
+DecodedImage decode_direct_hdr_bytes(const std::filesystem::path& path,
+                                     std::vector<uint8_t> bytes,
+                                     const ProgressCallback& progress,
+                                     std::atomic_bool* cancel) {
+  report(progress, 5, "Inspecting HEIF container");
+  return decode_direct_hdr_opened(path, open_heif_bytes(std::move(bytes)), progress, cancel);
+}
+
+SourceInfo inspect_heif_bytes(const std::filesystem::path& path, std::vector<uint8_t> bytes) {
+  auto opened = open_heif_bytes(std::move(bytes));
+  auto info = inspect_opened(path, opened);
+  if (info.original_orientation >= 5) std::swap(info.width, info.height);
+  return info;
 }
 
 SourceInfo inspect_heif_input(const std::filesystem::path& path) {

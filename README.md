@@ -8,8 +8,8 @@ Files are processed on the device. HDR previews use native display paths on supp
 
 All platforms share the C++ core and support these principal HDR input families:
 
-- direct PQ or HLG HEIF/HIF, AVIF, PNG, TIFF and JPEG XL;
-- Apple Adaptive HDR HEIC and JPEG;
+- direct PQ or HLG HEIF/HIF, Panasonic HSP, AVIF, PNG, TIFF and JPEG XL;
+- Apple Adaptive HDR HEIC/JPEG and ISO `tmap` HEIF/HEIC;
 - ISO Ultra HDR JPEG, including mono and RGB gain maps;
 - gain-map AVIF and gain-map TIFF;
 - gain-map JPEG XL (`jhgm`);

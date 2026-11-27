@@ -10,6 +10,7 @@ vcpkg_from_github(
         gdk-pixbuf.patch
         symbol-exports.diff
         emscripten-grid-join.patch
+        emscripten-enable-hevc-filters.patch
 )
 
 vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS

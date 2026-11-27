@@ -13,6 +13,9 @@ $installRoot = Join-Path $cacheRoot "vcpkg_installed"
 $aomOverlay = Join-Path $repoRoot 'ports-overlay/aom'
 $aomPort = Get-Content -LiteralPath (Join-Path $aomOverlay 'vcpkg.json') -Raw | ConvertFrom-Json
 $aomVersion = "$($aomPort.'version-semver')#$($aomPort.'port-version')"
+$heifPort = Get-Content -LiteralPath (Join-Path $webRoot 'vcpkg-overlay/libheif/vcpkg.json') -Raw | ConvertFrom-Json
+$heifPortVersion = if ($null -ne $heifPort.'port-version') { $heifPort.'port-version' } else { 0 }
+$heifVersion = "$($heifPort.version)#$heifPortVersion"
 $prefix = Join-Path $installRoot "wasm32-emscripten"
 $outputRoot = Join-Path $webRoot "public\codecs\hdrbridge"
 $licenseRoot = Join-Path $webRoot "public\licenses"
@@ -34,17 +37,21 @@ $threaded = if ($variant -eq 'threaded') { 'ON' } else { 'OFF' }
 $prefix = Join-Path $installRoot $triplet
 $buildRoot = Join-Path $cacheRoot "build\hdrbridge-$variant"
 # Classic vcpkg installs do not replace an already installed overlay version.
-$aomPackage = "aom:$triplet"
-$installedAomJson = & $vcpkg list $aomPackage --classic "--x-install-root=$installRoot" --x-json
-if ($LASTEXITCODE -ne 0) { throw "WASM codec dependency lookup failed" }
-$installedAom = ($installedAomJson -join "`n") | ConvertFrom-Json
-$installedPortProperty = $installedAom.PSObject.Properties[$aomPackage]
-if ($installedPortProperty) {
-  $installedPort = $installedPortProperty.Value
-  if ("$($installedPort.version)#$($installedPort.port_version)" -ne $aomVersion) {
-    & $vcpkg remove $aomPackage --classic --recurse "--x-install-root=$installRoot" `
-      "--overlay-triplets=$(Join-Path $webRoot 'vcpkg-triplets')"
-    if ($LASTEXITCODE -ne 0) { throw "Could not replace outdated WASM AOM dependencies" }
+foreach ($overlayCheck in @(
+    @{ Package = "aom:$triplet"; Version = $aomVersion; Label = "AOM" },
+    @{ Package = "libheif:$triplet"; Version = $heifVersion; Label = "libheif" }
+)) {
+  $installedJson = & $vcpkg list $overlayCheck.Package --classic "--x-install-root=$installRoot" --x-json
+  if ($LASTEXITCODE -ne 0) { throw "WASM codec dependency lookup failed" }
+  $installed = ($installedJson -join "`n") | ConvertFrom-Json
+  $installedPortProperty = $installed.PSObject.Properties[$overlayCheck.Package]
+  if ($installedPortProperty) {
+    $installedPort = $installedPortProperty.Value
+    if ("$($installedPort.version)#$($installedPort.port_version)" -ne $overlayCheck.Version) {
+      & $vcpkg remove $overlayCheck.Package --classic --recurse "--x-install-root=$installRoot" `
+        "--overlay-triplets=$(Join-Path $webRoot 'vcpkg-triplets')"
+      if ($LASTEXITCODE -ne 0) { throw "Could not replace outdated WASM $($overlayCheck.Label) dependencies" }
+    }
   }
 }
 & $vcpkg install `

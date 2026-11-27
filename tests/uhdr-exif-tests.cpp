@@ -1,10 +1,12 @@
 #include "metadata/exif_output.h"
+#include "metadata/exif_payload.h"
 #include <cstdlib>
 #define CHECK(x)                                                               \
   do {                                                                         \
     if (!(x))                                                                  \
       std::abort();                                                            \
   } while (false)
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -105,4 +107,20 @@ int main() {
         CHECK(!hdrbridge::metadata::prepare_output_exif(bad));
         CHECK(bad == old);
       }
+  // Oversized HEIF EXIF (e.g. large MakerNote + padding > 64KB APP1 limit)
+  // must be repacked compactly for JPEG output while keeping Make/Model.
+  for (bool le : {false, true}) {
+    auto base = fixture(le, false, 6, true);
+    B heif_big(10, 0);
+    heif_big[3] = 6;
+    std::memcpy(heif_big.data() + 4, "Exif\0\0", 6);
+    heif_big.insert(heif_big.end(), base.begin(), base.end());
+    heif_big.resize(100000, 0xAA);
+    const auto jpeg_exif = hdrbridge::detail::jpeg_exif_from_heif(heif_big, 4000, 3000);
+    CHECK(jpeg_exif.size() > 6 && jpeg_exif.size() <= 65533);
+    CHECK(std::memcmp(jpeg_exif.data(), "Exif\0\0", 6) == 0);
+    CHECK(std::search(jpeg_exif.begin(), jpeg_exif.end(),
+                      reinterpret_cast<const uint8_t*>("Xiaomi"),
+                      reinterpret_cast<const uint8_t*>("Xiaomi") + 6) != jpeg_exif.end());
+  }
 }

@@ -19,6 +19,7 @@ function(hdrbridge_add_core_sources target)
     "${core_src}/codecs/gainmap/jxl.cpp"
     "${core_src}/codecs/gainmap/tiff.cpp"
     "${core_src}/codecs/heif.cpp"
+    "${core_src}/codecs/hsp.cpp"
     "${core_src}/codecs/jpeg_probe.cpp"
     "${core_src}/codecs/jxl.cpp"
     "${core_src}/codecs/jxr.cpp"

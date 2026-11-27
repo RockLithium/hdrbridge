@@ -37,6 +37,13 @@ const TIFFFieldInfo kGainMapFields[] = {
 struct TiffGainMapData {
   SourceInfo info;
   IsoGainMapMetadata metadata;
+  toff_t gain_map_offset = 0;
+  uint16_t base_bits = 0;
+  uint16_t base_samples = 0;
+  uint16_t base_format = SAMPLEFORMAT_UINT;
+  uint16_t base_photo = 0;
+  uint16_t base_planar = 0;
+  bool has_adaptive_or_hdr_cicp = false;
   std::vector<uint16_t> base;
   std::vector<uint16_t> map;
   std::vector<uint8_t> exif;
@@ -59,11 +66,63 @@ TiffPtr open_tiff_gain_map(const std::filesystem::path& path) {
   return tiff;
 }
 
-TiffGainMapData read_tiff_gain_map(const std::filesystem::path& path,
-                                   bool pixels,
-                                   std::atomic_bool* cancel) {
+void read_optional_tiff_base_icc(TIFF* tiff, TiffGainMapData& result) {
+  auto& info = result.info;
+  uint32_t icc_size = 0;
+  void* icc_data = nullptr;
+  if (TIFFGetField(tiff, TIFFTAG_ICCPROFILE, &icc_size, &icc_data) != 1 ||
+      !icc_data || !icc_size) {
+    info.base_color_space = "Unspecified";
+    info.base_transfer = "Unspecified";
+    info.icc_status = "absent";
+    info.color_signal_kind = "TIFF + ISO gain-map metadata";
+    return;
+  }
+  info.icc_present = true;
+  info.icc_status = "present";
+  result.base_profile.reset(cmsOpenProfileFromMem(icc_data, icc_size));
+  if (!result.base_profile) {
+    info.base_color_space = "Unreadable ICC";
+    info.base_transfer = "Unspecified";
+    return;
+  }
+  const auto profile = result.base_profile.get();
+  info.icc_description = profile_description(profile);
+  const auto version = cmsGetEncodedICCversion(profile);
+  info.icc_version = std::to_string(version >> 24) + "." +
+                     std::to_string((version >> 20) & 0x0f);
+  info.primaries = icc::identify_rgb_primaries(profile);
+  result.base_curves = {
+      static_cast<const cmsToneCurve*>(cmsReadTag(profile, cmsSigRedTRCTag)),
+      static_cast<const cmsToneCurve*>(cmsReadTag(profile, cmsSigGreenTRCTag)),
+      static_cast<const cmsToneCurve*>(cmsReadTag(profile, cmsSigBlueTRCTag))};
+  if (result.base_curves[0] && result.base_curves[1] && result.base_curves[2]) {
+    info.transfer = icc::identify_sdr_transfer(result.base_curves);
+  }
+  info.base_transfer = info.transfer == 13 ? "sRGB" :
+      info.transfer == 14 ? "BT.2020 SDR" :
+      (result.base_curves[0] ? "ICC RGB transfer curve" : "Unspecified");
+  info.base_color_space = info.primaries == 1 ? "BT.709 / sRGB primaries" :
+      info.primaries == 12 ? "Display P3" :
+      info.primaries == 9 ? "BT.2020" : "Custom / unsupported ICC";
+  info.profile = (info.icc_description.empty() ? info.base_color_space : info.icc_description) +
+                 " base + ISO 21496-1 gain map";
+  const auto* cicp = static_cast<const cmsVideoSignalType*>(cmsReadTag(profile, cmsSigcicpTag));
+  result.has_adaptive_or_hdr_cicp =
+      cicp && (cicp->TransferCharacteristics == 16 || cicp->TransferCharacteristics == 18);
+  info.icc_cicp_present = cicp != nullptr;
+  info.icc_primaries = cicp ? cicp->ColourPrimaries : info.primaries;
+  info.icc_transfer = cicp ? cicp->TransferCharacteristics : info.transfer;
+  info.icc_matrix = cicp ? cicp->MatrixCoefficients : 0;
+  info.icc_full_range = cicp ? cicp->VideoFullRangeFlag != 0 : true;
+  info.icc_transfer_interpretation = info.base_transfer;
+  info.resolved_signaling_source = "ICC";
+  info.color_signal_kind = "TIFF ICC + ISO gain-map metadata";
+}
+
+TiffPtr read_tiff_gainmap_container(const std::filesystem::path& path,
+                                    TiffGainMapData& result) {
   auto tiff = open_tiff_gain_map(path);
-  TiffGainMapData result;
   auto& info = result.info;
   info.path = path;
   info.format = "TIFF";
@@ -73,79 +132,31 @@ TiffGainMapData read_tiff_gain_map(const std::filesystem::path& path,
   info.gain_map_family = "adobe-iso-tiff";
   info.codec = "RGB16 base + RGB16 ISO gain map SubIFD";
   info.profile = "ISO 21496-1 gain-map HDR reconstruction";
-  info.bit_depth = 16;
   info.chroma = "4:4:4 RGB";
-  uint16_t base_bits = 0, base_samples = 0, base_format = SAMPLEFORMAT_UINT;
-  uint16_t base_photo = 0, base_planar = 0, base_orientation = ORIENTATION_TOPLEFT;
+  result.base_format = SAMPLEFORMAT_UINT;
+  uint16_t base_orientation = ORIENTATION_TOPLEFT;
   TIFFGetField(tiff.get(), TIFFTAG_IMAGEWIDTH, &info.width);
   TIFFGetField(tiff.get(), TIFFTAG_IMAGELENGTH, &info.height);
-  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_BITSPERSAMPLE, &base_bits);
-  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLESPERPIXEL, &base_samples);
-  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLEFORMAT, &base_format);
-  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PHOTOMETRIC, &base_photo);
-  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PLANARCONFIG, &base_planar);
+  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_BITSPERSAMPLE, &result.base_bits);
+  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLESPERPIXEL, &result.base_samples);
+  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLEFORMAT, &result.base_format);
+  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PHOTOMETRIC, &result.base_photo);
+  TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PLANARCONFIG, &result.base_planar);
   const bool has_orientation = TIFFGetField(tiff.get(), TIFFTAG_ORIENTATION,
                                              &base_orientation) == 1;
-  if (!info.width || !info.height || base_bits != 16 || base_samples != 3 ||
-      base_format != SAMPLEFORMAT_UINT || base_photo != PHOTOMETRIC_RGB ||
-      base_planar != PLANARCONFIG_CONTIG) {
-    throw std::runtime_error("Adobe gain-map TIFF base must be contiguous RGB16");
-  }
+  info.bit_depth = result.base_bits ? result.base_bits : 16;
   info.base_width = info.width;
   info.base_height = info.height;
-  info.base_bit_depth = base_bits;
-  info.base_channels = base_samples;
+  info.base_bit_depth = info.bit_depth;
+  info.base_channels = result.base_samples;
   info.base_codec = "TIFF RGB";
   info.matrix = 0;
   info.full_range = true;
   info.range_known = true;
   info.original_orientation = static_cast<uint8_t>(std::clamp<uint16_t>(base_orientation, 1, 8));
   info.orientation_status = has_orientation ? "present" : "absent";
-  uint32_t icc_size = 0;
-  void* icc_data = nullptr;
-  if (TIFFGetField(tiff.get(), TIFFTAG_ICCPROFILE, &icc_size, &icc_data) != 1 || !icc_data || !icc_size) {
-    throw std::runtime_error("Adobe gain-map TIFF SDR base ICC profile is missing");
-  }
-  result.base_profile.reset(cmsOpenProfileFromMem(icc_data, icc_size));
-  if (!result.base_profile) throw std::runtime_error("cannot parse Adobe gain-map TIFF base ICC");
-  const auto profile = result.base_profile.get();
-  info.primaries = icc::identify_rgb_primaries(profile);
-  if (!info.primaries) {
-    throw std::runtime_error("unsupported gain-map TIFF base ICC RGB primaries");
-  }
-  result.base_curves = {
-      static_cast<const cmsToneCurve*>(cmsReadTag(profile, cmsSigRedTRCTag)),
-      static_cast<const cmsToneCurve*>(cmsReadTag(profile, cmsSigGreenTRCTag)),
-      static_cast<const cmsToneCurve*>(cmsReadTag(profile, cmsSigBlueTRCTag))};
-  if (!result.base_curves[0] || !result.base_curves[1] || !result.base_curves[2]) {
-    throw std::runtime_error("Adobe gain-map TIFF base ICC has no RGB transfer curves");
-  }
-  info.transfer = icc::identify_sdr_transfer(result.base_curves);
-  info.base_transfer = info.transfer == 13 ? "sRGB" :
-      info.transfer == 14 ? "BT.2020 SDR" : "ICC RGB transfer curve";
-  info.base_color_space = info.primaries == 1 ? "BT.709 / sRGB primaries" :
-      info.primaries == 12 ? "Display P3" : "BT.2020";
-  info.icc_description = profile_description(profile);
-  const auto version = cmsGetEncodedICCversion(profile);
-  info.icc_version = std::to_string(version >> 24) + "." +
-                     std::to_string((version >> 20) & 0x0f);
-  info.profile = (info.icc_description.empty() ? info.base_color_space : info.icc_description) +
-                 " base + ISO 21496-1 gain map";
-  const auto* cicp = static_cast<const cmsVideoSignalType*>(cmsReadTag(profile, cmsSigcicpTag));
-  if (cicp && (cicp->TransferCharacteristics == 16 || cicp->TransferCharacteristics == 18)) {
-    throw std::runtime_error("HDR base ICC is unsupported for TIFF gain-map reconstruction");
-  }
-  info.icc_cicp_present = cicp != nullptr;
-  info.icc_primaries = cicp ? cicp->ColourPrimaries : info.primaries;
-  info.icc_transfer = cicp ? cicp->TransferCharacteristics : info.transfer;
-  info.icc_matrix = cicp ? cicp->MatrixCoefficients : 0;
-  info.icc_full_range = cicp ? cicp->VideoFullRangeFlag != 0 : true;
-  info.icc_transfer_interpretation = info.base_transfer;
-  info.icc_present = true;
-  info.icc_status = "present";
-  info.resolved_signaling_source = "ICC";
-  info.color_signal_kind = "TIFF ICC + ISO gain-map metadata";
-  info.pixel_format = "RGB16 integer base + RGB16 gain map";
+  info.pixel_format = "RGB" + std::to_string(info.bit_depth) + " integer base + RGB16 gain map";
+  read_optional_tiff_base_icc(tiff.get(), result);
 #ifdef TIFFTAG_XMLPACKET
   uint32_t xmp_size = 0;
   void* xmp_data = nullptr;
@@ -162,17 +173,8 @@ TiffGainMapData read_tiff_gain_map(const std::filesystem::path& path,
       subifd_count != 1 || !subifd_offsets) {
     throw std::runtime_error("Adobe gain-map TIFF requires exactly one gain-map SubIFD");
   }
-  const toff_t gain_map_offset = subifd_offsets[0];
-  if (pixels) {
-    result.base.resize(static_cast<size_t>(info.width) * info.height * 3u);
-    for (uint32_t y = 0; y < info.height; ++y) {
-      if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
-      if (TIFFReadScanline(tiff.get(), result.base.data() + static_cast<size_t>(y) * info.width * 3u, y, 0) < 0) {
-        throw std::runtime_error("Adobe gain-map TIFF base scanline decode failed");
-      }
-    }
-  }
-  if (!TIFFSetSubDirectory(tiff.get(), gain_map_offset)) {
+  result.gain_map_offset = subifd_offsets[0];
+  if (!TIFFSetSubDirectory(tiff.get(), result.gain_map_offset)) {
     throw std::runtime_error("cannot open Adobe gain-map TIFF SubIFD");
   }
   uint32_t map_width = 0, map_height = 0;
@@ -195,8 +197,8 @@ TiffGainMapData read_tiff_gain_map(const std::filesystem::path& path,
   info.gain_map_width = map_width;
   info.gain_map_height = map_height;
   info.gain_map_channels = map_samples;
-  info.gain_map_scale_x = info.base_width / static_cast<double>(map_width);
-  info.gain_map_scale_y = info.base_height / static_cast<double>(map_height);
+  info.gain_map_scale_x = map_width ? info.base_width / static_cast<double>(map_width) : 0.0;
+  info.gain_map_scale_y = map_height ? info.base_height / static_cast<double>(map_height) : 0.0;
   uint32_t metadata_size = 0;
   void* metadata_data = nullptr;
   if (TIFFGetField(tiff.get(), kTiffGainMapMetadataTag, &metadata_size, &metadata_data) != 1) {
@@ -213,18 +215,6 @@ TiffGainMapData read_tiff_gain_map(const std::filesystem::path& path,
   info.gain_map_gamma = result.metadata.gamma;
   info.base_offset = result.metadata.base_offset;
   info.alternate_offset = result.metadata.alternate_offset;
-  if (!result.metadata.use_base_color_space) {
-    throw std::runtime_error("TIFF gain map using alternate color space is not safely reconstructable without its profile");
-  }
-  if (pixels) {
-    result.map.resize(static_cast<size_t>(map_width) * map_height * 3u);
-    for (uint32_t y = 0; y < map_height; ++y) {
-      if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
-      if (TIFFReadScanline(tiff.get(), result.map.data() + static_cast<size_t>(y) * map_width * 3u, y, 0) < 0) {
-        throw std::runtime_error("Adobe gain-map TIFF SubIFD scanline decode failed");
-      }
-    }
-  }
   if (info.original_orientation >= 5) {
     std::swap(info.width, info.height);
     std::swap(info.base_width, info.base_height);
@@ -232,6 +222,71 @@ TiffGainMapData read_tiff_gain_map(const std::filesystem::path& path,
     info.gain_map_scale_y = info.base_height / static_cast<double>(map_height);
   }
   info.orientation_normalized = true;
+  return tiff;
+}
+
+void read_tiff_subifd_scanlines(TIFF* tiff, uint32_t map_width, uint32_t map_height,
+                                std::vector<uint16_t>& map, std::atomic_bool* cancel) {
+  map.resize(static_cast<size_t>(map_width) * map_height * 3u);
+  for (uint32_t y = 0; y < map_height; ++y) {
+    if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
+    if (TIFFReadScanline(tiff, map.data() + static_cast<size_t>(y) * map_width * 3u, y, 0) < 0) {
+      throw std::runtime_error("Adobe gain-map TIFF SubIFD scanline decode failed");
+    }
+  }
+}
+
+void validate_tiff_hdr_reconstruction(const TiffGainMapData& result) {
+  const auto& info = result.info;
+  const uint32_t storage_width = info.original_orientation >= 5 ? info.height : info.width;
+  const uint32_t storage_height = info.original_orientation >= 5 ? info.width : info.height;
+  if (!storage_width || !storage_height || result.base_bits != 16 || result.base_samples != 3 ||
+      result.base_format != SAMPLEFORMAT_UINT || result.base_photo != PHOTOMETRIC_RGB ||
+      result.base_planar != PLANARCONFIG_CONTIG) {
+    throw std::runtime_error("Adobe gain-map TIFF base must be contiguous RGB16");
+  }
+  if (!info.icc_present) {
+    throw std::runtime_error("Adobe gain-map TIFF SDR base ICC profile is missing");
+  }
+  if (!result.base_profile) {
+    throw std::runtime_error("cannot parse Adobe gain-map TIFF base ICC");
+  }
+  if (!info.primaries) {
+    throw std::runtime_error("unsupported gain-map TIFF base ICC RGB primaries");
+  }
+  if (!result.base_curves[0] || !result.base_curves[1] || !result.base_curves[2]) {
+    throw std::runtime_error("Adobe gain-map TIFF base ICC has no RGB transfer curves");
+  }
+  if (result.has_adaptive_or_hdr_cicp) {
+    throw std::runtime_error("HDR base ICC is unsupported for TIFF gain-map reconstruction");
+  }
+  if (!result.metadata.use_base_color_space) {
+    throw std::runtime_error(
+        "TIFF gain map using alternate color space is not safely reconstructable without its profile");
+  }
+}
+
+TiffGainMapData read_tiff_for_hdr_reconstruction(const std::filesystem::path& path,
+                                                 std::atomic_bool* cancel) {
+  TiffGainMapData result;
+  auto tiff = read_tiff_gainmap_container(path, result);
+  validate_tiff_hdr_reconstruction(result);
+  read_tiff_subifd_scanlines(
+      tiff.get(), result.info.gain_map_width, result.info.gain_map_height, result.map, cancel);
+  if (!TIFFSetDirectory(tiff.get(), 0)) {
+    throw std::runtime_error("cannot return to Adobe gain-map TIFF base directory");
+  }
+  const uint32_t width = result.info.original_orientation >= 5
+      ? result.info.height : result.info.width;
+  const uint32_t height = result.info.original_orientation >= 5
+      ? result.info.width : result.info.height;
+  result.base.resize(static_cast<size_t>(width) * height * 3u);
+  for (uint32_t y = 0; y < height; ++y) {
+    if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
+    if (TIFFReadScanline(tiff.get(), result.base.data() + static_cast<size_t>(y) * width * 3u, y, 0) < 0) {
+      throw std::runtime_error("Adobe gain-map TIFF base scanline decode failed");
+    }
+  }
   return result;
 }
 
@@ -261,7 +316,8 @@ double sample_map_bilinear(const std::vector<uint16_t>& map, uint32_t map_width,
 
 bool is_adobe_gainmap_tiff(const std::filesystem::path& path) {
   try {
-    (void)read_tiff_gain_map(path, false, nullptr);
+    TiffGainMapData data;
+    (void)read_tiff_gainmap_container(path, data);
     return true;
   } catch (...) {
     return false;
@@ -269,14 +325,16 @@ bool is_adobe_gainmap_tiff(const std::filesystem::path& path) {
 }
 
 SourceInfo inspect_adobe_gainmap_tiff(const std::filesystem::path& path) {
-  return read_tiff_gain_map(path, false, nullptr).info;
+  TiffGainMapData data;
+  (void)read_tiff_gainmap_container(path, data);
+  return data.info;
 }
 
 ReconstructedHdr reconstruct_adobe_gainmap_tiff(
     const std::filesystem::path& path, std::atomic_bool* cancel) {
   if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
   const auto decode_start = Clock::now();
-  TiffGainMapData tiff = read_tiff_gain_map(path, true, cancel);
+  TiffGainMapData tiff = read_tiff_for_hdr_reconstruction(path, cancel);
   ReconstructedHdr output;
   output.info = tiff.info;
   output.exif = std::move(tiff.exif);
@@ -355,11 +413,13 @@ ReconstructedHdr reconstruct_adobe_gainmap_tiff(
 GainMapRaster extract_tiff_gainmap(const std::filesystem::path& path,
                                    std::atomic_bool* cancel) {
   const auto begin = Clock::now();
-  auto tiff = read_tiff_gain_map(path, true, cancel);
+  TiffGainMapData tiff;
+  auto handle = read_tiff_gainmap_container(path, tiff);
   const uint32_t map_width = tiff.info.gain_map_width;
   const uint32_t map_height = tiff.info.gain_map_height;
   const uint32_t map_channels = tiff.info.gain_map_channels;
   const uint8_t orientation = tiff.info.original_orientation;
+  read_tiff_subifd_scanlines(handle.get(), map_width, map_height, tiff.map, cancel);
   auto result = make_raster(std::move(tiff.info), map_width, map_height,
                             map_channels, std::move(tiff.map),
                             "TIFF gain-map SubIFD", cancel);

@@ -26,7 +26,8 @@ fi
 git -C "${vcpkg_root}" fetch --quiet origin "${vcpkg_ref}"
 git -C "${vcpkg_root}" checkout --quiet "${vcpkg_ref}"
 "${vcpkg_root}/bootstrap-vcpkg.sh" -disableMetrics
-aom_version=$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1])); print(p["version-semver"] + "#" + str(p["port-version"]))' "${aom_overlay}/vcpkg.json")
+aom_version=$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1])); print(p["version-semver"] + "#" + str(p.get("port-version", 0)))' "${aom_overlay}/vcpkg.json")
+heif_version=$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1])); print(p["version"] + "#" + str(p.get("port-version", 0)))' "${web_root}/vcpkg-overlay/libheif/vcpkg.json")
 
 for variant in scalar threaded; do
   triplet=wasm32-emscripten
@@ -35,12 +36,16 @@ for variant in scalar threaded; do
   prefix="${install_root}/${triplet}"
   build_root="${cache_root}/build/hdrbridge-${variant}"
 # Classic vcpkg installs do not replace an already installed overlay version.
-installed_aom=$("${vcpkg_root}/vcpkg" list "aom:${triplet}" --classic "--x-install-root=${install_root}" --x-json |
-  python3 -c 'import json, sys; p = json.load(sys.stdin).get(sys.argv[1]); print(p["version"] + "#" + str(p["port_version"]) if p else "")' "aom:${triplet}")
-if [[ -n "$installed_aom" && "$installed_aom" != "$aom_version" ]]; then
-  "${vcpkg_root}/vcpkg" remove "aom:${triplet}" --classic --recurse "--x-install-root=${install_root}" \
-    "--overlay-triplets=${web_root}/vcpkg-triplets"
-fi
+for pkg_spec in "aom:${triplet}|${aom_version}" "libheif:${triplet}|${heif_version}"; do
+  pkg="${pkg_spec%%|*}"
+  expected_ver="${pkg_spec#*|}"
+  installed_ver=$("${vcpkg_root}/vcpkg" list "${pkg}" --classic "--x-install-root=${install_root}" --x-json |
+    python3 -c 'import json, sys; p = json.load(sys.stdin).get(sys.argv[1]); print(p["version"] + "#" + str(p.get("port_version", 0)) if p else "")' "${pkg}")
+  if [[ -n "$installed_ver" && "$installed_ver" != "$expected_ver" ]]; then
+    "${vcpkg_root}/vcpkg" remove "${pkg}" --classic --recurse "--x-install-root=${install_root}" \
+      "--overlay-triplets=${web_root}/vcpkg-triplets"
+  fi
+done
 for attempt in 1 2 3; do
   if VCPKG_DOWNLOADS="${downloads_root}" "${vcpkg_root}/vcpkg" install \
     "aom:${triplet}" "libheif[core,aom]:${triplet}" "libavif[core,aom]:${triplet}" \

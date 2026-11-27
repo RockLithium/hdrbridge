@@ -1,6 +1,7 @@
 #include "canonical/input.h"
 #include "canonical/cache.h"
 #include "codecs/heif.h"
+#include "codecs/hsp.h"
 #include "codecs/gainmap/avif.h"
 #include "codecs/gainmap/tiff.h"
 #include "codecs/gainmap/apple_heif.h"
@@ -79,6 +80,9 @@ DecodedImage decode_input_uncached(const std::filesystem::path& path,
     }
     return decode_direct_hdr(path, progress, cancel);
   }
+  if (extension == ".hsp") {
+    return decode_hsp_input(path, progress, cancel);
+  }
   report(progress, 8, "Inspecting high-dynamic-range input");
   check_cancel(cancel);
   DecodedImage decoded;
@@ -156,6 +160,9 @@ SourceInfo inspect_any(const std::filesystem::path& path) {
   }
   if (extension == ".hif" || extension == ".heic" || extension == ".heif" || extension == ".avif") {
     return inspect_heif_input(path);
+  }
+  if (extension == ".hsp") {
+    return inspect_hsp_input(path);
   }
   if (extension == ".tif" || extension == ".tiff") {
     auto info = inspect_tiff_metadata(path);

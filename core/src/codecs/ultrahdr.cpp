@@ -55,7 +55,9 @@ std::vector<uint8_t> encode_ultrahdr(const DecodedImage& decoded, const Conversi
                "set faithful Ultra HDR target peak brightness");
   require_uhdr(uhdr_enc_set_preset(encoder.get(), UHDR_USAGE_BEST_QUALITY), "set Ultra HDR preset");
   require_uhdr(uhdr_enc_set_output_format(encoder.get(), UHDR_CODEC_JPG), "set Ultra HDR JPEG output");
-  auto jpeg_exif = options.copy_exif ? jpeg_exif_from_heif(decoded.exif) : std::vector<uint8_t>{};
+  auto jpeg_exif = options.copy_exif
+      ? jpeg_exif_from_heif(decoded.exif, decoded.info.width, decoded.info.height)
+      : std::vector<uint8_t>{};
   if (!jpeg_exif.empty()) {
     uhdr_mem_block_t exif{jpeg_exif.data(), jpeg_exif.size(), jpeg_exif.size()};
     require_uhdr(uhdr_enc_set_exif_data(encoder.get(), &exif), "set Ultra HDR Exif");

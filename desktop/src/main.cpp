@@ -784,7 +784,9 @@ class PreviewRenderer {
   void show(bool visible) {
     if (!window_) return;
     if (visible) {
-      reset_layout();
+      if (!IsWindowVisible(window_)) {
+        reset_layout();
+      }
       ShowWindow(window_, SW_SHOW);
       render();
     } else {
@@ -3426,7 +3428,7 @@ void layout(AppState* s, int width, int height) {
 
 bool supported_source(const std::filesystem::path& path) {
   const auto extension = path.extension().wstring();
-  constexpr const wchar_t* extensions[] = {L".hif", L".heic", L".heif", L".avif", L".jxl", L".jxr", L".wdp", L".hdp", L".png", L".tif", L".tiff", L".jpg", L".jpeg", L".jpe"};
+  constexpr const wchar_t* extensions[] = {L".hif", L".heic", L".heif", L".hsp", L".avif", L".jxl", L".jxr", L".wdp", L".hdp", L".png", L".tif", L".tiff", L".jpg", L".jpeg", L".jpe"};
   return std::any_of(std::begin(extensions), std::end(extensions),
                      [&](const wchar_t* value) { return _wcsicmp(extension.c_str(), value) == 0; });
 }
@@ -3486,7 +3488,7 @@ void load_source(AppState* state, const std::filesystem::path& path) {
   ui::set_text(state->convert, HB_UI("Add to queue"));
   try {
     if (!supported_source(path)) {
-      throw std::runtime_error("Select a supported HDR HIF/HEIF, UHDR, PNG, TIFF, AVIF, JXL, or JXR asset.");
+      throw std::runtime_error("Select a supported HDR HIF/HEIF, UHDR, PNG, TIFF, AVIF, JXL, JXR, or HSP asset.");
     }
     ui::set_text(state->status, HB_UI("Inspecting source…"));
     hdrbridge::SourceInfo info;
@@ -3613,9 +3615,10 @@ void choose_source(AppState* state) {
     return;
   }
   const COMDLG_FILTERSPEC canonical_filters[] = {
-      {HB_UI("All supported HDR images"), L"*.avif;*.heif;*.heic;*.hif;*.jpg;*.jpeg;*.jpe;*.jxl;*.jxr;*.wdp;*.hdp;*.png;*.tif;*.tiff"},
+      {HB_UI("All supported HDR images"), L"*.avif;*.heif;*.heic;*.hif;*.hsp;*.jpg;*.jpeg;*.jpe;*.jxl;*.jxr;*.wdp;*.hdp;*.png;*.tif;*.tiff"},
       {L"AVIF (*.avif)", L"*.avif"},
       {L"HEIF (*.heif;*.heic;*.hif)", L"*.heif;*.heic;*.hif"},
+      {L"Panasonic HLG Photo (*.hsp)", L"*.hsp"},
       {L"JPEG (*.jpg;*.jpeg;*.jpe)", L"*.jpg;*.jpeg;*.jpe"},
       {L"JPEG XL (*.jxl)", L"*.jxl"},
       {L"JPEG XR (*.jxr;*.wdp;*.hdp)", L"*.jxr;*.wdp;*.hdp"},

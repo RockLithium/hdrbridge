@@ -13,12 +13,13 @@ Accepted HDR inputs become an oriented Rec.2020/PQ RGB16 working image. Linear-l
 | Input                            | Path to the working HDR image                                                                     | Characterization                                                                          |
 | -------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | Ultra HDR JPEG                   | SDR base plus ISO mono/RGB gain map reconstruction                                                | Preserves HDR intent within JPEG, map resolution and metadata precision; not lossless     |
-| Apple HDR HEIC/JPEG              | Apple auxiliary or MPF gain map and metadata reconstructed in the correct base gamut              | High-precision reconstruction, not a bit-exact recovery of an unavailable original master |
+| Apple Adaptive HDR HEIC/JPEG | Apple auxiliary or MPF gain map reconstructed using its color and gain-map metadata | High-precision reconstruction within source encoding limits |
+| ISO gain-map HEIF/HEIC (`tmap`) | ISO gain map reconstructed in its signaled base or alternate gamut | High-precision reconstruction within source encoding limits |
 | Gain-map AVIF                    | `tmap` item graph plus ISO metadata                                                               | High-precision metadata-defined reconstruction; source encoding limits remain             |
 | Gain-map JPEG XL (`jhgm`)        | SDR base plus `jhgm` gain-map box and ISO metadata                                                | Metadata-defined HDR reconstruction; base/map codec loss and resampling remain            |
 | Gain-map TIFF                    | TIFF SubIFD plus ISO metadata                                                                     | High-precision metadata-defined reconstruction; source encoding limits remain             |
 | Direct PQ HEIF/AVIF/PNG/TIFF/JXL | Rec.2020/PQ samples retained where possible; other gamuts transformed in linear light to PQ16   | Mathematically defined and high-fidelity; source codec losses cannot be recovered         |
-| Direct HLG HEIF/PNG/AVIF/JXL     | inverse HLG OETF and BT.2100 OOTF, then Rec.2020/PQ RGB16 using the reference display model       | High-fidelity for the same display model, not code-value lossless                         |
+| Direct HLG HEIF/HSP/PNG/AVIF/JXL | inverse HLG OETF and BT.2100 OOTF, then Rec.2020/PQ RGB16 using the reference display model       | High-fidelity for the same display model, not code-value lossless                         |
 | FP16 scRGB JXR                   | linear scRGB at 80 nit reference white, converted to Rec.2020/PQ RGB16                            | Negative or out-of-range Rec.2020 values are clipped; source FP16 is not retained         |
 
 An ordinary SDR file without gain-map, PQ or HLG data is rejected as an HDR source rather than silently promoted.

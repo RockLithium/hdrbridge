@@ -7,7 +7,9 @@ Inspector data is read from the source container. The canonical HDR working rast
 | Input | Representation and metadata read |
 |---|---|
 | HEIF/HIF direct HDR | HEVC bit depth/chroma, native NCLX CICP/range and embedded ICC as separate signals, resolved color, Exif/XMP items, `irot`/`imir` and Exif Orientation |
-| HEIC/AVIF gain map | SDR base and auxiliary/base-map-tmap graph, Exif/XMP/ICC/CICP, auxiliary type and ISO gain-map metadata |
+| Panasonic HSP | HSP container, HEVC bit depth/chroma, HEVC SPS VUI or HSP BT.2020 HLG default fallback, Exif/GPS, XMP and IFD0 Orientation |
+| HEIF/HEIC gain map | SDR base, auxiliary and `tmap` item relationships, Exif/XMP, base ICC/NCLX, `tmap` color profile, `HAGC` or legacy `lumi` reference white and ISO gain-map metadata |
+| AVIF gain map | Base, map and `tmap` item relationships, Exif/XMP, base and alternate color signaling and ISO gain-map metadata |
 | JPEG / Ultra HDR / Apple JPEG | base SOF and MPF/gain-map JPEG independently; APP1 Exif/XMP, APP2 ICC, Orientation and ISO gain-map metadata |
 | JPEG XL | integer representation, native structured color or actual embedded ICC, Exif and `xml ` boxes for direct and gain-map inputs, codestream Orientation; native color is labeled `CICP equivalent` |
 | PNG | RGB16, literal cICP and iCCP as separate signals, resolved color, eXIf and XMP iTXt |

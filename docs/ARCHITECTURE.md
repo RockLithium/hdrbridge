@@ -31,7 +31,7 @@ The public conversion API lives in [hdrbridge_core.h](../core/include/hdrbridge_
 | --- | --- |
 | `operations/` | Public Inspect, Convert, Preview and Verify entry points, plus Gain Map Extract orchestration. Owns output selection, progress, cancellation checkpoints and commit order. |
 | `canonical/` | Working raster type, input dispatch, orientation handoff and single-source cache. |
-| `codecs/` | Per-format input, encoding and readback checks. Gain-map container parsing, reconstruction and extraction live in `codecs/gainmap/`, with separate adapters for AVIF, TIFF, JPEG XL, Apple HEIF and JPEG. |
+| `codecs/` | Per-format input, encoding and readback checks. Gain-map container parsing, reconstruction and extraction live in `codecs/gainmap/`, with separate adapters for AVIF, TIFF, JPEG XL, HEIF/HEIC and JPEG. |
 | `color/` | Transfer functions, gamut transforms, ICC/CICP interpretation and profile generation, and linear FP16 scRGB packing. |
 | `image/` | Orientation, straight alpha compositing, resampling and luminance measurement. Preview resampling retains the fused linear-light interpolation and scRGB packing. |
 | `photo_frame/` | Composition, camera captions and logos, with output through the existing PNG and Ultra HDR paths. |
@@ -50,7 +50,7 @@ Worker budgets use the detected logical thread count, falling back to four when 
 
 Parallel execution preserves the per-pixel formulas, precision and quantization. Diagnostic floating-point sums can differ in their least-significant digits because of reduction order, and codec scheduling can change compressed bitstream bytes. Thread budgets apply where the codec exposes a control; PNG/TIFF Deflate and the Windows JPEG XR codec retain their existing threading behavior and compression settings. FP16 scRGB conversion reuses a double-precision PQ lookup table. Bounded preview resizing combines linear-light interpolation and alpha compositing directly into the FP16 display buffer, avoiding an intermediate PQ16 raster. Native Windows and Android previews retain full resolution with 1/2-stepped linear-light mipmap levels, fall back to the base level when extra mip allocation or upload fails, split images larger than a single GPU texture into tiles with one-texel seam overlaps, and blend adjacent levels in linear light for trilinear filtering.
 
-Direct PQ, direct HLG, ISO Ultra HDR, Apple Adaptive HDR, gain-map AVIF, gain-map TIFF and gain-map JPEG XL (`jhgm`) assets have separate input adapters. They share color and HDR mathematics only after reconstruction. Camera brand is not used as a transfer-function proxy.
+Direct PQ, direct HLG, Panasonic HSP, ISO Ultra HDR, Apple Adaptive HDR, ISO `tmap` HEIF/HEIC, gain-map AVIF, gain-map TIFF and gain-map JPEG XL (`jhgm`) assets have separate input adapters. They share color and HDR mathematics only after reconstruction. Camera brand is not used as a transfer-function proxy.
 
 For core filesystem outputs, each output reserves its own temporary sibling file, verifies it, then commits on the same filesystem. Overwriting replaces the existing file without deleting it first; no-overwrite commits refuse an existing target. Failed or cancelled operations before commit preserve the previous target and remove only their own temporary file. Cancellation is checked again immediately before commit.
 

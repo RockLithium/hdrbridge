@@ -71,11 +71,12 @@ uint8_t orientation_from_avif(const avifImage* image) {
 }
 
 AvifDecoderPtr parse_avif(const std::vector<uint8_t>& bytes,
-                          bool decode_pixels) {
+                          bool decode_pixels,
+                          avifImageContentTypeFlags content = AVIF_IMAGE_CONTENT_ALL) {
   AvifDecoderPtr decoder(avifDecoderCreate());
   if (!decoder) throw std::bad_alloc();
   decoder->maxThreads = static_cast<int>(codec_worker_count());
-  decoder->imageContentToDecode = AVIF_IMAGE_CONTENT_ALL;
+  decoder->imageContentToDecode = content;
   require_avif(avifDecoderSetIOMemory(decoder.get(), bytes.data(), bytes.size()),
                decoder->diag, "set AVIF input memory");
   require_avif(avifDecoderParse(decoder.get()), decoder->diag,
@@ -347,7 +348,7 @@ GainMapRaster extract_avif_gainmap(const std::filesystem::path& path,
                                    std::atomic_bool* cancel) {
   const auto begin = Clock::now();
   const auto bytes = read_file(path);
-  auto decoder = parse_avif(bytes, true);
+  auto decoder = parse_avif(bytes, true, AVIF_IMAGE_CONTENT_GAIN_MAP);
   const ItemGraph graph = read_item_graph(path);
   SourceInfo info = source_info(path, decoder->image, graph);
   const avifImage* image = decoder->image->gainMap->image;
@@ -362,16 +363,24 @@ GainMapRaster extract_avif_gainmap(const std::filesystem::path& path,
   struct RgbFree { avifRGBImage* value; ~RgbFree() { avifRGBImageFreePixels(value); } } free{&rgb};
   require_avif(avifImageYUVToRGB(image, &rgb), decoder->diag,
                "decode AVIF gain-map RGB raster");
-  std::vector<uint16_t> samples(static_cast<size_t>(image->width) * image->height * 3u);
+  const bool mono = image->yuvFormat == AVIF_PIXEL_FORMAT_YUV400;
+  const uint32_t channels = mono ? 1u : 3u;
+  std::vector<uint16_t> samples(static_cast<size_t>(image->width) * image->height * channels);
   for (uint32_t y = 0; y < image->height; ++y) {
     check_gainmap_cancel(cancel);
     const auto* row = reinterpret_cast<const uint16_t*>(
         rgb.pixels + static_cast<size_t>(y) * rgb.rowBytes);
-    std::copy_n(row, static_cast<size_t>(image->width) * 3u,
-                samples.data() + static_cast<size_t>(y) * image->width * 3u);
+    if (mono) {
+      uint16_t* dst = samples.data() + static_cast<size_t>(y) * image->width;
+      for (uint32_t x = 0; x < image->width; ++x) {
+        dst[x] = row[static_cast<size_t>(x) * 3u];
+      }
+    } else {
+      std::copy_n(row, static_cast<size_t>(image->width) * 3u,
+                  samples.data() + static_cast<size_t>(y) * image->width * 3u);
+    }
   }
-  auto result = make_raster(std::move(info), image->width, image->height,
-                            decoder->image->gainMap->image->yuvFormat == AVIF_PIXEL_FORMAT_YUV400 ? 1u : 3u,
+  auto result = make_raster(std::move(info), image->width, image->height, channels,
                             std::move(samples), "AVIF gain-map image", cancel);
   normalize_gainmap_orientation(result, result.info.original_orientation);
   result.decode_ms = elapsed_ms(begin);

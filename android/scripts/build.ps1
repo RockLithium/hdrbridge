@@ -102,7 +102,7 @@ try {
     foreach ($entry in $assetEntries) {
       $stream = $entry.Open()
       $sha = [Security.Cryptography.SHA256]::Create()
-      try { $actualHash = [Convert]::ToHexString($sha.ComputeHash($stream)) }
+      try { $actualHash = ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '') }
       finally { $sha.Dispose(); $stream.Dispose() }
       $expectedHash = (Get-FileHash -LiteralPath $expectedAssets[$entry.FullName] -Algorithm SHA256).Hash
       if ($actualHash -ne $expectedHash) { throw "APK asset does not match approved source: $($entry.FullName)" }

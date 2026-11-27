@@ -17,10 +17,10 @@ New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 if (-not (Test-Path -LiteralPath $OutputRoot)) { throw "Cannot create Web regression output directory: $OutputRoot" }
 
 $cases = @(
-  @{ Name = "canon-pq"; Input = "PQ_HIF.HIF"; Primaries = 9; Transfer = 16; Gamut = "rec2020"; TransferName = "pq" },
-  @{ Name = "canon-p3"; Input = "PQ_HIF.HIF"; Primaries = 12; Transfer = 16; Gamut = "p3"; TransferName = "pq" },
-  @{ Name = "nikon-pq"; Input = "HLG_HIF.HIF"; Primaries = 9; Transfer = 16; Gamut = "rec2020"; TransferName = "pq" },
-  @{ Name = "nikon-hlg"; Input = "HLG_HIF.HIF"; Primaries = 9; Transfer = 18; Gamut = "rec2020"; TransferName = "hlg" }
+  @{ Name = "canon-pq"; Input = "PQ_HIF_Canon.HIF"; Primaries = 9; Transfer = 16; Gamut = "rec2020"; TransferName = "pq" },
+  @{ Name = "canon-p3"; Input = "PQ_HIF_Canon.HIF"; Primaries = 12; Transfer = 16; Gamut = "p3"; TransferName = "pq" },
+  @{ Name = "nikon-pq"; Input = "HLG_HIF_Nikon.HIF"; Primaries = 9; Transfer = 16; Gamut = "rec2020"; TransferName = "pq" },
+  @{ Name = "nikon-hlg"; Input = "HLG_HIF_Nikon.HIF"; Primaries = 9; Transfer = 18; Gamut = "rec2020"; TransferName = "hlg" }
 )
 
 $created = [System.Collections.Generic.List[string]]::new()
