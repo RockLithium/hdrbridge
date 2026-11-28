@@ -4,7 +4,7 @@
 #include "codecs/hsp.h"
 #include "codecs/gainmap/avif.h"
 #include "codecs/gainmap/tiff.h"
-#include "codecs/gainmap/apple_heif.h"
+#include "codecs/gainmap/heif.h"
 #include "codecs/gainmap/jpeg.h"
 #include "codecs/gainmap/jxl.h"
 #include "codecs/jxl.h"
@@ -57,10 +57,12 @@ DecodedImage decode_input_uncached(const std::filesystem::path& path,
     return decoded;
   }
   if (extension == ".hif" || extension == ".heic" || extension == ".heif" || extension == ".avif") {
-    const auto apple = gainmap::probe_apple_heif(path);
-    if (apple.detected) {
-      report(progress, 6, "Parsing Apple HEIC base/auxiliary/tmap item graph and metadata");
-      auto reconstructed = gainmap::reconstruct_apple_heif_gainmap(path, cancel);
+    const auto gainmap = gainmap::probe_heif_gainmap(path);
+    if (gainmap.detected) {
+      report(progress, 6, gainmap.is_apple
+          ? "Parsing Apple HEIC base/auxiliary/tmap item graph and metadata"
+          : "Parsing HEIF/HEIC base/gain-map/tmap item graph and ISO metadata");
+      auto reconstructed = gainmap::reconstruct_heif_gainmap(path, cancel);
       DecodedImage decoded;
       decoded.info = std::move(reconstructed.info);
       decoded.rgb = std::move(reconstructed.rec2020_pq_rgb);
@@ -75,7 +77,9 @@ DecodedImage decode_input_uncached(const std::filesystem::path& path,
       decoded.timings.color_conversion_ms = reconstructed.color_conversion_ms;
       decoded.timings.gain_map_ms = reconstructed.reconstruction_ms;
       decoded.timings.orientation_ms = reconstructed.orientation_ms;
-      report(progress, 42, "Apple HEIC gain map reconstructed to canonical high-precision HDR master");
+      report(progress, 42, gainmap.is_apple
+          ? "Apple HEIC gain map reconstructed to canonical high-precision HDR master"
+          : "ISO tmap HEIF/HEIC gain map reconstructed to canonical high-precision HDR master");
       return decoded;
     }
     return decode_direct_hdr(path, progress, cancel);
@@ -103,26 +107,7 @@ DecodedImage decode_input_uncached(const std::filesystem::path& path,
   else if (extension == ".png") decoded = decode_png_input(path);
   else if (extension == ".tif" || extension == ".tiff") decoded = decode_tiff_input(path);
   else if (extension == ".jpg" || extension == ".jpeg" || extension == ".jpe") {
-    const auto apple = gainmap::probe_apple_jpeg(path);
-    if (apple.detected) {
-      report(progress, 10, "Parsing Apple JPEG base/MPF gain map and ISO metadata");
-      auto reconstructed = gainmap::reconstruct_apple_jpeg_gainmap(path, cancel);
-      decoded.info = std::move(reconstructed.info);
-      decoded.rgb = std::move(reconstructed.rec2020_pq_rgb);
-      decoded.exif = std::move(reconstructed.exif);
-      decoded.xmp = std::move(reconstructed.xmp);
-      decoded.timings.decode_ms = reconstructed.decode_ms;
-      decoded.timings.base_decode_ms = reconstructed.base_decode_ms;
-      decoded.timings.gain_map_decode_ms = reconstructed.gain_map_decode_ms;
-      decoded.timings.gain_map_upsample_ms = reconstructed.gain_map_upsample_ms;
-      decoded.timings.gain_apply_ms = reconstructed.gain_apply_ms;
-      decoded.timings.gain_map_color_conversion_ms = reconstructed.color_conversion_ms;
-      decoded.timings.color_conversion_ms = reconstructed.color_conversion_ms;
-      decoded.timings.gain_map_ms = reconstructed.reconstruction_ms;
-      decoded.timings.orientation_ms = reconstructed.orientation_ms;
-    } else {
-      decoded = decode_ultrahdr_input(path);
-    }
+    decoded = gainmap::decode_jpeg_asset(path, progress, cancel);
   }
   else throw std::runtime_error("unsupported input format: " + extension);
   check_cancel(cancel);
@@ -179,11 +164,7 @@ SourceInfo inspect_any(const std::filesystem::path& path) {
     return decode_input(path, {}, nullptr, timings)->info;
   }
   if (extension == ".jpg" || extension == ".jpeg" || extension == ".jpe") {
-    const auto apple = gainmap::probe_apple_jpeg(path);
-    if (apple.detected) {
-      return gainmap::inspect_apple_jpeg_gainmap(path);
-    }
-    return inspect_jpeg(path);
+    return gainmap::inspect_jpeg_asset(path);
   }
   throw std::runtime_error("unsupported input format: " + extension);
 }

@@ -1,6 +1,6 @@
 #include "codecs/heif.h"
 #include "codecs/heif_helpers.h"
-#include "codecs/gainmap/apple_heif.h"
+#include "codecs/gainmap/heif.h"
 #include "color/gamut.h"
 #include "color/pq.h"
 #include "color/signaling.h"
@@ -414,12 +414,12 @@ SourceInfo inspect_heif_bytes(const std::filesystem::path& path, std::vector<uin
 }
 
 SourceInfo inspect_heif_input(const std::filesystem::path& path) {
+  const auto gainmap = gainmap::probe_heif_gainmap(path);
+  if (gainmap.detected) {
+    return gainmap::inspect_heif_gainmap(path);
+  }
   auto opened = open_heif(path);
   auto info = inspect_opened(path, opened);
-  const auto apple = gainmap::probe_apple_heif(path);
-  if (apple.detected) {
-    return gainmap::inspect_apple_heif_gainmap(path);
-  }
   if (info.original_orientation >= 5) std::swap(info.width, info.height);
   return info;
 }

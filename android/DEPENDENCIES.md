@@ -13,6 +13,7 @@ The triplet builds static, position-independent libraries for Android API 26 and
 | libpng + zlib | PNG |
 | libtiff + liblzma | TIFF |
 | Little CMS | ICC interpretation and generation |
+| Expat | XMP parsing |
 | jxrlib | FP16 scRGB JPEG XR |
 | nlohmann/json | JNI data exchange |
 

@@ -75,6 +75,7 @@ The root `VERSION` supplies the CMake project versions, desktop label and file r
 | libpng + zlib | PNG |
 | libtiff + liblzma | TIFF |
 | Little CMS | ICC handling |
+| Expat | XMP parsing across Windows, Android and Web |
 | WIC / jxrlib | JPEG XR, depending on platform |
 | stb_truetype + NanoSVG | Photo Frame font and SVG rasterization |
 

@@ -23,7 +23,7 @@ Primary dependencies:
 | Roboto | Photo Frame typography | Apache-2.0; license text retained with bundled assets |
 | stb | Photo Frame font rasterization | MIT; license text retained with bundled assets |
 | NanoSVG | Photo Frame SVG support | zlib; license text retained with bundled assets |
-| Expat | Photo Frame XMP parsing on Windows and Android | MIT; exact installed text bundled |
+| Expat | XMP parsing across Windows, Android and Web | MIT; exact installed text bundled |
 
 ## Linking
 

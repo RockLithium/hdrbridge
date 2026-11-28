@@ -2,7 +2,7 @@
 
 HDR Bridge Web is the static, one-file-at-a-time browser edition of HDR Bridge. Selected images and converted results stay on the device; the page has no upload or server-side conversion path.
 
-The WebAssembly module compiles the desktop project's HDR core and portable codec libraries. It supports direct PQ/HLG HEIF/HIF, Panasonic HSP, Apple Adaptive HDR HEIC/JPEG, ISO `tmap` HEIF/HEIC, Ultra HDR JPEG, gain-map AVIF, gain-map TIFF, direct HDR AVIF/PNG/TIFF, JPEG XL and FP16 scRGB JPEG XR input, including ISO gain-map JPEG XL. Outputs are Ultra HDR JPEG, HDR PNG, direct HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and HDR AVIF. JPEG XL and AVIF can be written as direct PQ/HLG or ISO gain-map HDR. Their gain-map outputs use RGB maps only and default to full resolution; Ultra HDR JPEG also defaults to a full-resolution RGB map while retaining its Mono/RGB choice.
+The WebAssembly module compiles the desktop project's HDR core and portable codec libraries. It supports direct PQ/HLG HEIF/HIF, Panasonic HSP, Apple Adaptive HDR HEIC/JPEG, ISO `tmap` HEIF/HEIC, Ultra HDR JPEG, Adobe HDR Gain Map XMP JPEG, gain-map AVIF, gain-map TIFF, direct HDR AVIF/PNG/TIFF, JPEG XL and FP16 scRGB JPEG XR input, including ISO gain-map JPEG XL. Outputs are Ultra HDR JPEG, HDR PNG, direct HDR TIFF, JPEG XL, FP16 scRGB JPEG XR and HDR AVIF. JPEG XL and AVIF can be written as direct PQ/HLG or ISO gain-map HDR. Their gain-map outputs use RGB maps only and default to full resolution; Ultra HDR JPEG also defaults to a full-resolution RGB map while retaining its Mono/RGB choice.
 
 Direct HDR TIFF uses the same HDR-aware CICP ICC and large-strip layout as the Windows application. Deflate compression is the default; uncompressed output is available from the format controls.
 

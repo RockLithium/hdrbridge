@@ -160,6 +160,36 @@ public class OptionsTest {
     assertEquals("pq", pngCopy.json().getString("output_transfer"));
     pngCopy.setFrameFormat("png");
     assertEquals(7, pngCopy.quality);
+    assertEquals("p3", pngCopy.gamut);
+
+    pngCopy.setFrameFormat("avif");
+    assertEquals("photo_frame.avif", pngCopy.filename("photo.png"));
+    assertEquals("p3", pngCopy.gamut);
+    assertEquals(95, pngCopy.quality);
+    pngCopy.quality = 82;
+    pngCopy.setGamut("rec2020");
+    pngCopy.applyTransfer(1);
+    Options avifSaved = Options.from(pngCopy.save());
+    assertEquals("avif", avifSaved.frameFormat);
+    assertEquals(82, avifSaved.quality);
+    assertEquals("rec2020", avifSaved.gamut);
+    assertEquals("hlg", avifSaved.json().getString("output_transfer"));
+    assertFalse(avifSaved.json().getBoolean("lossless"));
+    avifSaved.setFrameFormat("png");
+    assertEquals(7, avifSaved.quality);
+    avifSaved.setFrameFormat("avif");
+    assertEquals(82, avifSaved.quality);
+    assertEquals("rec2020", avifSaved.gamut);
+
+    Options avif = Options.defaults(5);
+    avif.setGamut("p3");
+    avif.applyTransfer(2);
+    assertEquals("p3", avif.gamut);
+    avif.setGamut("rec2020");
+    avif.applyTransfer(0);
+    assertEquals("p3", avif.gamut);
+    avif.applyTransfer(2);
+    assertEquals("rec2020", avif.gamut);
   }
 
 }

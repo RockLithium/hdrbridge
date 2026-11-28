@@ -175,6 +175,8 @@ final class UiStrings {
     add("Adobe TIFF gain map reconstructed to canonical high-precision HDR master", "已将 Adobe TIFF Gain Map 重建为高精度 HDR 母版");
     add("Parsing Apple HEIC base/auxiliary/tmap item graph and metadata", "正在解析 Apple HEIC Base/辅助图/tmap 结构与元数据");
     add("Apple HEIC gain map reconstructed to canonical high-precision HDR master", "已将 Apple HEIC Gain Map 重建为高精度 HDR 母版");
+    add("Parsing HEIF/HEIC base/gain-map/tmap item graph and ISO metadata", "正在解析 HEIF/HEIC Base/Gain Map/tmap 结构与 ISO 元数据");
+    add("ISO tmap HEIF/HEIC gain map reconstructed to canonical high-precision HDR master", "已将 ISO tmap HEIF/HEIC Gain Map 重建为高精度 HDR 母版");
     add("Inspecting high-dynamic-range input", "正在检查 HDR 输入");
     add("Parsing JPEG XL jhgm base, gain-map codestream, and ISO metadata", "正在解析 JPEG XL jhgm Base、Gain Map 码流与 ISO 元数据");
     add("JPEG XL jhgm reconstructed to canonical high-precision HDR master", "已将 JPEG XL jhgm 重建为高精度 HDR 母版");

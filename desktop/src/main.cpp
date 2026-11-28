@@ -34,6 +34,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -406,17 +407,36 @@ struct AppState {
   int right_panel_width = 620;
   int activity_panel_height = 230;
   int files_panel_height = 270;
-  int last_format_index = -1;
-  int last_transfer_index = -1;
-  int last_representation_index = -1;
-  int last_frame_export_index = -1;
-  int last_encoding_slot = -1;
-  int uhdr_gainmap_channels = 1;
-  int normal_gainmap_resolution = 2, frame_gainmap_resolution = 2, frame_gainmap_channels = 1;
-  bool normal_copy_exif = true, normal_copy_xmp = true;
-  bool lossless_setting = true;
-  bool tiff_compressed = true;
-  std::array<int, 9> encoding_values{95, 4, 6, 90, 95, 95, 95, 95, 4};
+  int active_format = 0;
+  int last_encoding_format = -1;
+  int last_encoding_frame_export = -1;
+  bool use_suffix_enabled = true;
+  bool updating_suffix_ui = false;
+  struct DesktopFormatOptions {
+    int quality = 95;
+    int frame_png_compression = 4;
+    int frame_avif_quality = 95;
+    int transfer = 0;
+    int scale_index = 2;
+    int channels = 1;
+    int extraction = 0;
+    bool lossless = true;
+    bool compressed = true;
+    bool exif = true;
+    bool xmp = true;
+    std::string direct_gamut = "rec2020";
+    std::string gainmap_gamut = "p3";
+    std::string frame_format = "jpeg";
+    std::wstring suffix;
+  };
+  std::array<DesktopFormatOptions, 8> format_options{};
+  bool has_main_backup = false;
+  int backup_active_format = 0;
+  bool backup_use_suffix = true;
+  bool backup_use_source_folder = true;
+  std::filesystem::path backup_selected_folder;
+  int backup_collision = 0;
+  std::array<DesktopFormatOptions, 8> backup_format_options{};
   std::unique_ptr<PreviewRenderer> preview_renderer;
   PreviewWorker preview_worker;
   std::shared_ptr<std::atomic_bool> preview_cancel;
@@ -1752,6 +1772,7 @@ std::string narrow(const std::wstring& input) {
 void layout(AppState* state, int width, int height);
 void update_mode_ui(AppState* state, bool restore_saved_gamut = true);
 void set_rich_editable_text(AppState* state, HWND rich, const std::wstring& text);
+void cancel_task_edit(AppState* state);
 
 void open_folder_for(HWND owner, const std::filesystem::path& path, bool select_file) {
   if (path.empty()) return;
@@ -2065,96 +2086,275 @@ int saved_index(const wchar_t* name, int fallback, int maximum) {
   return fallback;
 }
 
-bool is_frame_png(const AppState* state, int format_index) {
-  return format_index == 7 &&
-      SendMessageW(state->frame_export_format, CB_GETCURSEL, 0, 0) == 1;
+std::wstring control_text(HWND control);
+
+int frame_export_index_for(const std::string& format) {
+  if (format == "png") return 1;
+  if (format == "avif") return 2;
+  return 0;
 }
 
-int encoding_slot_for(const AppState* state, int format_index) {
-  return is_frame_png(state, format_index) ? 8 : std::clamp(format_index, 0, 7);
+std::string frame_export_name_for(int index) {
+  if (index == 1) return "png";
+  if (index == 2) return "avif";
+  return "jpeg";
 }
 
-bool is_compression_slot(int slot) {
-  return slot == 1 || slot == 2 || slot == 8;
+std::wstring default_suffix_for_format(int format_index, int transfer_index) {
+  switch (format_index) {
+    case 0: return L"_ultrahdr";
+    case 1: return transfer_index == 1 ? L"_hdr-hlg" : L"_hdr-pq16";
+    case 2: return L"_hdr-pq16";
+    case 3: return transfer_index == 2 ? L"_gainmap" :
+        transfer_index == 1 ? L"_hlg16" : L"_pq16";
+    case 4: return L"_scrgb-fp16";
+    case 5: return transfer_index == 2 ? L"_gainmap" :
+        transfer_index == 1 ? L"_direct-hlg10" : L"_direct-pq10";
+    case 6: return L"_gainmap";
+    case 7: return L"_frame";
+    default: return L"_ultrahdr";
+  }
+}
+
+AppState::DesktopFormatOptions default_format_options(int format) {
+  AppState::DesktopFormatOptions opt;
+  constexpr int kDefaultQuality[] = {95, 4, 6, 90, 95, 95, 95, 95};
+  const int idx = std::clamp(format, 0, 7);
+  opt.quality = kDefaultQuality[idx];
+  opt.frame_png_compression = 4;
+  opt.frame_avif_quality = 95;
+  opt.transfer = 0;
+  opt.scale_index = 2;
+  opt.channels = 1;
+  opt.extraction = 0;
+  opt.lossless = idx == 1 || idx == 2 || idx == 3 || idx == 4;
+  opt.compressed = true;
+  opt.exif = true;
+  opt.xmp = true;
+  opt.direct_gamut = "rec2020";
+  opt.gainmap_gamut = "p3";
+  opt.frame_format = "jpeg";
+  opt.suffix = default_suffix_for_format(idx, opt.transfer);
+  return opt;
+}
+
+bool is_gainmap_options(int format, const AppState::DesktopFormatOptions& opt) {
+  return format == 0 || ((format == 3 || format == 5) && opt.transfer == 2) ||
+      (format == 7 && opt.frame_format == "jpeg");
+}
+
+bool has_selectable_gamut(int format, const AppState::DesktopFormatOptions& opt) {
+  return format == 1 || format == 2 || format == 3 || format == 5 ||
+      (format == 7 && opt.frame_format != "jpeg");
+}
+
+std::string active_gamut_for(int format, const AppState::DesktopFormatOptions& opt) {
+  if (format == 0 || (format == 7 && opt.frame_format == "jpeg")) return "p3";
+  return is_gainmap_options(format, opt) ? opt.gainmap_gamut : opt.direct_gamut;
+}
+
+void set_active_gamut(int format, AppState::DesktopFormatOptions& opt,
+                      const std::string& gamut) {
+  if (format == 0 || (format == 7 && opt.frame_format == "jpeg")) return;
+  if (is_gainmap_options(format, opt)) opt.gainmap_gamut = gamut;
+  else opt.direct_gamut = gamut;
+}
+
+bool is_effective_lossless(int format, const AppState::DesktopFormatOptions& opt) {
+  return format == 1 || format == 2 || ((format == 3 || format == 4) && opt.lossless) ||
+      (format == 7 && opt.frame_format == "png");
+}
+
+bool is_compression_slider(int format, const AppState::DesktopFormatOptions& opt) {
+  return format == 1 || format == 2 || (format == 7 && opt.frame_format == "png");
+}
+
+int& active_encoding_value(int format, AppState::DesktopFormatOptions& opt) {
+  if (format == 7) {
+    if (opt.frame_format == "png") return opt.frame_png_compression;
+    if (opt.frame_format == "avif") return opt.frame_avif_quality;
+  }
+  return opt.quality;
+}
+
+int active_encoding_value(int format, const AppState::DesktopFormatOptions& opt) {
+  if (format == 7) {
+    if (opt.frame_format == "png") return opt.frame_png_compression;
+    if (opt.frame_format == "avif") return opt.frame_avif_quality;
+  }
+  return opt.quality;
+}
+
+void carry_custom_suffix(int previous_format, const AppState::DesktopFormatOptions& previous,
+                         int target_format, AppState::DesktopFormatOptions& target) {
+  if (previous_format != target_format &&
+      previous.suffix != default_suffix_for_format(previous_format, previous.transfer)) {
+    target.suffix = previous.suffix;
+  }
 }
 
 void load_conversion_settings(AppState* state) {
-  const bool legacy_order = saved_index(L"SettingsSchemaVersion", 0, 2) < 2;
-  int saved_format = saved_index(L"OutputFormat", 0, 7);
-  if (legacy_order && saved_format < 7) {
-    constexpr int migrated_format[] = {0, 1, 3, 4, 5, 2, 6};
-    saved_format = migrated_format[saved_format];
+  for (int i = 0; i < 8; ++i) {
+    state->format_options[static_cast<size_t>(i)] = default_format_options(i);
   }
-  SendMessageW(state->format, CB_SETCURSEL, saved_format, 0);
-  SendMessageW(state->representation, CB_SETCURSEL,
-               saved_index(L"OutputRepresentation", 0, 1), 0);
-  SendMessageW(state->transfer, CB_SETCURSEL,
-               saved_index(L"OutputTransfer", 0, 2), 0);
-  SendMessageW(state->gainmap_resolution, CB_SETCURSEL,
-               saved_index(L"GainMapResolution", 2, 2), 0);
-  SendMessageW(state->gainmap_channels, CB_SETCURSEL,
-               saved_index(L"GainMapChannels", 1, 1), 0);
-  state->uhdr_gainmap_channels = static_cast<int>(
-      SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0));
-  state->normal_gainmap_resolution = saved_index(L"GainMapResolution", 2, 2);
-  state->frame_gainmap_resolution = saved_index(L"FrameGainMapResolution", 2, 2);
-  state->frame_gainmap_channels = saved_index(L"FrameGainMapChannels", 1, 1);
-  state->normal_copy_exif = saved_index(L"CopyExif", 1, 1) != 0;
-  state->normal_copy_xmp = saved_index(L"CopyXmp", 1, 1) != 0;
-  state->lossless_setting = saved_index(L"Lossless", 1, 1) != 0;
-  state->tiff_compressed = saved_index(L"TiffCompressed", 1, 1) != 0;
-  SendMessageW(state->tiff_compression, CB_SETCURSEL,
-               state->tiff_compressed ? 0 : 1, 0);
-  SendMessageW(state->gainmap_export_format, CB_SETCURSEL,
-               saved_index(L"GainMapExportFormat", 0, 3), 0);
-  SendMessageW(state->frame_export_format, CB_SETCURSEL,
-               saved_index(L"FrameExportFormat", 0, 1), 0);
-  SendMessageW(state->lossless, BM_SETCHECK,
-               state->lossless_setting ? BST_CHECKED : BST_UNCHECKED, 0);
-  SendMessageW(state->copy_exif, BM_SETCHECK,
-               saved_index(L"CopyExif", 1, 1) ? BST_CHECKED : BST_UNCHECKED, 0);
-  SendMessageW(state->copy_xmp, BM_SETCHECK,
-               saved_index(L"CopyXmp", 1, 1) ? BST_CHECKED : BST_UNCHECKED, 0);
-  SendMessageW(state->use_suffix, BM_SETCHECK,
-               saved_index(L"UseSuffix", 1, 1) ? BST_CHECKED : BST_UNCHECKED, 0);
-  constexpr size_t legacy_index_for_new[] = {0, 1, 5, 2, 3, 4, 6};
-  for (size_t index = 0; index < state->encoding_values.size(); ++index) {
-    const size_t stored_index = legacy_order && index < 7 ? legacy_index_for_new[index] : index;
-    const std::wstring name = L"EncodingValue" + std::to_wstring(stored_index);
-    if (const auto value = read_layout_value(name.c_str())) {
-      const bool compression = is_compression_slot(static_cast<int>(index));
-      state->encoding_values[index] = std::clamp(
-          static_cast<int>(*value), 1, compression ? 9 : 100);
+  state->active_format = 0;
+  state->use_suffix_enabled = true;
+
+  auto json_int = [](const nlohmann::json& obj, const char* key, int fallback) {
+    const auto it = obj.find(key);
+    if (it != obj.end() && it->is_number_integer()) {
+      const auto raw_val = it->get<std::int64_t>();
+      return static_cast<int>(std::clamp<std::int64_t>(
+          raw_val, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()));
+    }
+    return fallback;
+  };
+  auto json_bool = [](const nlohmann::json& obj, const char* key, bool fallback) {
+    const auto it = obj.find(key);
+    return (it != obj.end() && it->is_boolean()) ? it->get<bool>() : fallback;
+  };
+  auto json_string = [](const nlohmann::json& obj, const char* key,
+                        const std::string& fallback) {
+    const auto it = obj.find(key);
+    return (it != obj.end() && it->is_string()) ? it->get<std::string>() : fallback;
+  };
+
+  const int schema = saved_index(L"SettingsSchemaVersion", 0, 10);
+  bool loaded_v3 = false;
+  if (schema >= 3) {
+    const std::string raw = read_layout_utf8(L"FormatSettingsJson");
+    if (!raw.empty()) {
+      try {
+        const auto parsed = nlohmann::json::parse(raw, nullptr, false);
+        if (parsed.is_object()) {
+          loaded_v3 = true;
+          state->active_format = std::clamp(json_int(parsed, "activeFormat", 0), 0, 7);
+          state->use_suffix_enabled = json_bool(parsed, "useSuffix", true);
+          const auto formats_it = parsed.find("formats");
+          if (formats_it != parsed.end() && formats_it->is_array()) {
+            const auto& formats = *formats_it;
+            for (size_t i = 0; i < formats.size() && i < 8; ++i) {
+              if (!formats[i].is_object()) continue;
+              const auto& entry = formats[i];
+              auto& opt = state->format_options[i];
+              const std::string frame_fmt = json_string(entry, "frameFormat", opt.frame_format);
+              opt.frame_format = (frame_fmt == "png" || frame_fmt == "avif") ? frame_fmt : "jpeg";
+              const int max_transfer = (i == 3 || i == 5) ? 2 : (i == 1 || i == 7 ? 1 : 0);
+              opt.transfer = std::clamp(json_int(entry, "transfer", opt.transfer), 0, max_transfer);
+              opt.quality = std::clamp(json_int(entry, "quality", opt.quality), 1,
+                                       (i == 1 || i == 2) ? 9 : 100);
+              opt.frame_png_compression = std::clamp(
+                  json_int(entry, "framePngCompression", opt.frame_png_compression), 1, 9);
+              opt.frame_avif_quality = std::clamp(
+                  json_int(entry, "frameAvifQuality", opt.frame_avif_quality), 1, 100);
+              opt.scale_index = std::clamp(json_int(entry, "scaleIndex", opt.scale_index), 0, 2);
+              opt.channels = std::clamp(json_int(entry, "channels", opt.channels), 0, 1);
+              opt.extraction = std::clamp(json_int(entry, "extraction", opt.extraction), 0, 3);
+              opt.lossless = json_bool(entry, "lossless", opt.lossless);
+              opt.compressed = json_bool(entry, "compressed", opt.compressed);
+              opt.exif = json_bool(entry, "exif", opt.exif);
+              opt.xmp = json_bool(entry, "xmp", opt.xmp);
+              const std::string dg = json_string(entry, "directGamut", opt.direct_gamut);
+              if (dg == "rec2020" || dg == "p3") opt.direct_gamut = dg;
+              const std::string gg = json_string(entry, "gainmapGamut", opt.gainmap_gamut);
+              if (gg == "rec2020" || gg == "p3") opt.gainmap_gamut = gg;
+              const auto suffix_it = entry.find("suffix");
+              if (suffix_it != entry.end() && suffix_it->is_string()) {
+                opt.suffix = widen(suffix_it->get<std::string>());
+              } else {
+                opt.suffix = default_suffix_for_format(static_cast<int>(i), opt.transfer);
+              }
+            }
+          }
+        }
+      } catch (...) {
+        for (int i = 0; i < 8; ++i) {
+          state->format_options[static_cast<size_t>(i)] = default_format_options(i);
+        }
+        state->active_format = 0;
+        state->use_suffix_enabled = true;
+        loaded_v3 = false;
+      }
     }
   }
+  if (!loaded_v3) {
+    const bool legacy_order = schema < 2;
+    int saved_format = saved_index(L"OutputFormat", 0, 7);
+    if (legacy_order && saved_format < 7) {
+      constexpr int migrated_format[] = {0, 1, 3, 4, 5, 2, 6};
+      saved_format = migrated_format[saved_format];
+    }
+    state->active_format = saved_format;
+    state->use_suffix_enabled = saved_index(L"UseSuffix", 1, 1) != 0;
+    const int legacy_transfer = saved_index(L"OutputTransfer", 0, 2);
+    const int legacy_gamut_cicp = saved_index(L"OutputGamutCicp", 9, 12);
+    const int normal_scale = saved_index(L"GainMapResolution", 2, 2);
+    const int uhdr_channels = saved_index(L"GainMapChannels", 1, 1);
+    const int frame_scale = saved_index(L"FrameGainMapResolution", 2, 2);
+    const int frame_channels = saved_index(L"FrameGainMapChannels", 1, 1);
+    const bool copy_exif = saved_index(L"CopyExif", 1, 1) != 0;
+    const bool copy_xmp = saved_index(L"CopyXmp", 1, 1) != 0;
+    const bool lossless = saved_index(L"Lossless", 1, 1) != 0;
+    const bool tiff_compressed = saved_index(L"TiffCompressed", 1, 1) != 0;
+    const int gm_export = saved_index(L"GainMapExportFormat", 0, 3);
+    const int frame_export = saved_index(L"FrameExportFormat", 0, 2);
+    constexpr size_t legacy_index_for_new[] = {0, 1, 5, 2, 3, 4, 6};
+    std::array<int, 9> legacy_enc{95, 4, 6, 90, 95, 95, 95, 95, 4};
+    for (size_t index = 0; index < legacy_enc.size(); ++index) {
+      const size_t stored_index = legacy_order && index < 7 ? legacy_index_for_new[index] : index;
+      const std::wstring name = L"EncodingValue" + std::to_wstring(stored_index);
+      if (const auto value = read_layout_value(name.c_str())) {
+        const bool compression = index == 1 || index == 2 || index == 8;
+        legacy_enc[index] = std::clamp(static_cast<int>(*value), 1, compression ? 9 : 100);
+      }
+    }
+    for (int i = 0; i < 8; ++i) {
+      auto& opt = state->format_options[static_cast<size_t>(i)];
+      opt.quality = legacy_enc[static_cast<size_t>(i)];
+      opt.frame_png_compression = legacy_enc[8];
+      opt.scale_index = i == 7 ? frame_scale : normal_scale;
+      opt.channels = i == 7 ? frame_channels : (i == 0 ? uhdr_channels : 1);
+      opt.exif = copy_exif;
+      opt.xmp = copy_xmp;
+      opt.compressed = tiff_compressed;
+      opt.extraction = gm_export;
+      opt.frame_format = frame_export_name_for(frame_export);
+      if (i == 3 || i == 4) opt.lossless = lossless;
+      if (i == saved_format) {
+        const int max_transfer = (i == 3 || i == 5) ? 2 :
+            (i == 1 || (i == 7 && opt.frame_format != "jpeg") ? 1 : 0);
+        opt.transfer = std::clamp(legacy_transfer, 0, max_transfer);
+        if (legacy_gamut_cicp == 12 || legacy_gamut_cicp == 9) {
+          if (is_gainmap_options(i, opt)) opt.gainmap_gamut = legacy_gamut_cicp == 12 ? "p3" : "rec2020";
+          else opt.direct_gamut = legacy_gamut_cicp == 12 ? "p3" : "rec2020";
+        }
+      }
+      opt.suffix = default_suffix_for_format(i, opt.transfer);
+    }
+  }
+  SendMessageW(state->format, CB_SETCURSEL, state->active_format, 0);
+  SendMessageW(state->use_suffix, BM_SETCHECK,
+               state->use_suffix_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  state->last_encoding_format = -1;
+  state->last_encoding_frame_export = -1;
 }
 
 void reset_conversion_settings(AppState* state) {
-  state->encoding_values = {95, 4, 6, 90, 95, 95, 95, 95, 4};
-  state->lossless_setting = true;
-  state->tiff_compressed = true;
-  SendMessageW(state->tiff_compression, CB_SETCURSEL, 0, 0);
-  SendMessageW(state->gainmap_export_format, CB_SETCURSEL, 0, 0);
-  SendMessageW(state->frame_export_format, CB_SETCURSEL, 0, 0);
+  cancel_task_edit(state);
+  state->editing_task = -1;
+  state->has_main_backup = false;
+  for (int i = 0; i < 8; ++i) {
+    state->format_options[static_cast<size_t>(i)] = default_format_options(i);
+  }
+  state->active_format = 0;
+  state->use_suffix_enabled = true;
+  state->last_encoding_format = -1;
+  state->last_encoding_frame_export = -1;
   SendMessageW(state->format, CB_SETCURSEL, 0, 0);
-  SendMessageW(state->representation, CB_SETCURSEL, 0, 0);
-  SendMessageW(state->transfer, CB_SETCURSEL, 0, 0);
-  SendMessageW(state->gainmap_resolution, CB_SETCURSEL, 2, 0);
-  SendMessageW(state->gainmap_channels, CB_SETCURSEL, 1, 0);
-  state->uhdr_gainmap_channels = 1;
-  state->normal_gainmap_resolution = 2; state->frame_gainmap_resolution = 2;
-  state->frame_gainmap_channels = 1;
-  state->normal_copy_exif = true; state->normal_copy_xmp = true;
-  SendMessageW(state->lossless, BM_SETCHECK, BST_CHECKED, 0);
-  SendMessageW(state->copy_exif, BM_SETCHECK, BST_CHECKED, 0);
-  SendMessageW(state->copy_xmp, BM_SETCHECK, BST_CHECKED, 0);
   SendMessageW(state->use_suffix, BM_SETCHECK, BST_CHECKED, 0);
+  state->updating_suffix_ui = true;
   set_rich_editable_text(state, state->name_suffix, L"_ultrahdr");
-  state->last_format_index = -1;
-  state->last_transfer_index = -1;
-  state->last_representation_index = -1;
-  state->last_frame_export_index = -1;
-  state->last_encoding_slot = -1;
+  state->updating_suffix_ui = false;
   update_mode_ui(state, false);
 }
 
@@ -2167,54 +2367,57 @@ void save_layout(AppState* state) {
   write_layout_value(key, L"RightPanelWidth", static_cast<DWORD>(state->right_panel_width));
   write_layout_value(key, L"ActivityPanelHeight", static_cast<DWORD>(state->activity_panel_height));
   write_layout_value(key, L"FilesPanelHeight", static_cast<DWORD>(state->files_panel_height));
-  const int format_index = static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0));
-  const bool frame_png = is_frame_png(state, format_index);
-  const bool checked = SendMessageW(state->lossless, BM_GETCHECK, 0, 0) == BST_CHECKED;
-  if (format_index != 1 && format_index != 2 && format_index != 7) state->lossless_setting = checked;
-  state->tiff_compressed = SendMessageW(state->tiff_compression, CB_GETCURSEL, 0, 0) != 1;
-  if (format_index >= 0) {
-    const int slot = encoding_slot_for(state, format_index);
-    state->encoding_values[static_cast<size_t>(slot)] =
-        static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0));
+  // If closing mid-task-edit, persist the main page's backed-up defaults rather than the task draft.
+  auto saved_options = state->has_main_backup ? state->backup_format_options : state->format_options;
+  const int format_index = state->has_main_backup
+      ? state->backup_active_format
+      : std::clamp(static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0)), 0, 7);
+  const bool use_suffix_to_save = state->has_main_backup
+      ? state->backup_use_suffix
+      : (SendMessageW(state->use_suffix, BM_GETCHECK, 0, 0) == BST_CHECKED);
+  if (!state->has_main_backup) {
+    state->active_format = format_index;
+    auto& active = state->format_options[static_cast<size_t>(format_index)];
+    active.suffix = control_text(state->name_suffix);
+    state->use_suffix_enabled = use_suffix_to_save;
+    if (state->last_encoding_format == format_index &&
+        (format_index != 7 || state->last_encoding_frame_export == frame_export_index_for(active.frame_format))) {
+      const bool compression = is_compression_slider(format_index, active);
+      active_encoding_value(format_index, active) = std::clamp(
+          static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0)),
+          1, compression ? 9 : 100);
+    }
+    saved_options = state->format_options;
   }
-  write_layout_value(key, L"OutputFormat", static_cast<DWORD>(std::max(format_index, 0)));
-  write_layout_value(key, L"SettingsSchemaVersion", 2);
-  const int gamut_index = static_cast<int>(SendMessageW(state->gamut, CB_GETCURSEL, 0, 0));
-  const DWORD gamut_cicp = gamut_index == CB_ERR ? 9u : static_cast<DWORD>(
-      SendMessageW(state->gamut, CB_GETITEMDATA, gamut_index, 0));
-  if (format_index != 7 || frame_png) write_layout_value(key, L"OutputGamutCicp", gamut_cicp);
-  write_layout_value(key, L"OutputRepresentation", static_cast<DWORD>(
-      std::max(0, static_cast<int>(SendMessageW(state->representation, CB_GETCURSEL, 0, 0)))));
-  write_layout_value(key, L"OutputTransfer", static_cast<DWORD>(SendMessageW(state->transfer, CB_GETCURSEL, 0, 0)));
-  if (format_index == 7) {
-    state->frame_gainmap_resolution = static_cast<int>(SendMessageW(state->gainmap_resolution, CB_GETCURSEL, 0, 0));
-    state->frame_gainmap_channels = static_cast<int>(SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0));
-  } else {
-    state->normal_gainmap_resolution = static_cast<int>(SendMessageW(state->gainmap_resolution, CB_GETCURSEL, 0, 0));
-    state->normal_copy_exif = SendMessageW(state->copy_exif, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    state->normal_copy_xmp = SendMessageW(state->copy_xmp, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  nlohmann::json payload;
+  payload["activeFormat"] = format_index;
+  payload["useSuffix"] = use_suffix_to_save;
+  nlohmann::json formats = nlohmann::json::array();
+  for (size_t i = 0; i < 8; ++i) {
+    const auto& opt = saved_options[i];
+    formats.push_back({
+        {"quality", opt.quality},
+        {"framePngCompression", opt.frame_png_compression},
+        {"frameAvifQuality", opt.frame_avif_quality},
+        {"transfer", opt.transfer},
+        {"scaleIndex", opt.scale_index},
+        {"channels", opt.channels},
+        {"extraction", opt.extraction},
+        {"lossless", opt.lossless},
+        {"compressed", opt.compressed},
+        {"exif", opt.exif},
+        {"xmp", opt.xmp},
+        {"directGamut", opt.direct_gamut},
+        {"gainmapGamut", opt.gainmap_gamut},
+        {"frameFormat", opt.frame_format},
+        {"suffix", narrow(opt.suffix)},
+    });
   }
-  write_layout_value(key, L"GainMapResolution", static_cast<DWORD>(state->normal_gainmap_resolution));
-  write_layout_value(key, L"FrameGainMapResolution", static_cast<DWORD>(state->frame_gainmap_resolution));
-  write_layout_value(key, L"FrameGainMapChannels", static_cast<DWORD>(state->frame_gainmap_channels));
-  write_layout_value(key, L"GainMapChannels",
-                     static_cast<DWORD>(state->uhdr_gainmap_channels));
-  write_layout_value(key, L"Lossless", state->lossless_setting);
-  write_layout_value(key, L"TiffCompressed", state->tiff_compressed);
-  write_layout_value(key, L"GainMapExportFormat", static_cast<DWORD>(
-      std::max(0, static_cast<int>(SendMessageW(
-          state->gainmap_export_format, CB_GETCURSEL, 0, 0)))));
-  write_layout_value(key, L"FrameExportFormat", static_cast<DWORD>(
-      std::max(0, static_cast<int>(SendMessageW(
-          state->frame_export_format, CB_GETCURSEL, 0, 0)))));
-  write_layout_value(key, L"CopyExif", state->normal_copy_exif);
-  write_layout_value(key, L"CopyXmp", state->normal_copy_xmp);
-  write_layout_value(key, L"UseSuffix", SendMessageW(state->use_suffix, BM_GETCHECK, 0, 0) == BST_CHECKED);
-  for (size_t index = 0; index < state->encoding_values.size(); ++index) {
-    const std::wstring name = L"EncodingValue" + std::to_wstring(index);
-    write_layout_value(key, name.c_str(),
-                       static_cast<DWORD>(state->encoding_values[index]));
-  }
+  payload["formats"] = std::move(formats);
+  write_layout_value(key, L"SettingsSchemaVersion", 3);
+  write_layout_utf8(L"FormatSettingsJson", payload.dump());
+  write_layout_value(key, L"OutputFormat", static_cast<DWORD>(format_index));
+  write_layout_value(key, L"UseSuffix", use_suffix_to_save ? 1 : 0);
   WINDOWPLACEMENT placement{sizeof(placement)};
   if (GetWindowPlacement(state->window, &placement)) {
     const RECT& rect = placement.rcNormalPosition;
@@ -2892,7 +3095,8 @@ void update_output_preview(AppState* state) {
     request.gainmap_export_format = gainmap_format == 1 ? L"png" :
         gainmap_format == 2 ? L"tiff" : gainmap_format == 3 ? L"jpeg" : L"original";
     if (request.mode == L"photo-frame") {
-      request.gainmap_export_format = is_frame_png(state, format_index) ? L"png" : L"jpeg";
+      request.gainmap_export_format = widen(frame_export_name_for(std::clamp(static_cast<int>(
+          SendMessageW(state->frame_export_format, CB_GETCURSEL, 0, 0)), 0, 2)));
     }
     request.collision = SendMessageW(state->collision, CB_GETCURSEL, 0, 0) == 1
         ? hdrbridge::desktop::CollisionPolicy::overwrite
@@ -2906,46 +3110,41 @@ void update_output_preview(AppState* state) {
 
 TaskOptions capture_task_options(AppState* state) {
   TaskOptions captured;
-  const int index = static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0));
+  const int index = std::clamp(
+      static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0)), 0, 7);
+  const auto& opt = state->format_options[static_cast<size_t>(index)];
   captured.mode = mode_for_index(index);
   auto& options = captured.conversion;
   options.mode = narrow(captured.mode);
-  options.lossless = index == 1 || index == 2 ||
-      SendMessageW(state->lossless, BM_GETCHECK, 0, 0) == BST_CHECKED;
-  options.copy_exif = SendMessageW(state->copy_exif, BM_GETCHECK, 0, 0) == BST_CHECKED;
-  options.copy_xmp = SendMessageW(state->copy_xmp, BM_GETCHECK, 0, 0) == BST_CHECKED;
-  const bool frame_png = is_frame_png(state, index);
-  const int quality = static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0));
+  options.lossless = is_effective_lossless(index, opt);
+  options.copy_exif = index != 7 && opt.exif;
+  options.copy_xmp = index != 7 && opt.xmp;
+  const int frame_export_index = frame_export_index_for(opt.frame_format);
+  const bool frame_png = index == 7 && frame_export_index == 1;
+  const bool frame_avif = index == 7 && frame_export_index == 2;
+  const int quality = active_encoding_value(index, opt);
   options.image_quality = quality / 100.0f;
   options.base_quality = quality;
   options.gainmap_quality = quality;
   if (index == 1 || frame_png) options.png_compression_level = quality;
   if (index == 2) {
     options.tiff_compression_level = quality;
-    options.tiff_compressed = SendMessageW(state->tiff_compression, CB_GETCURSEL, 0, 0) != 1;
+    options.tiff_compressed = opt.compressed;
   }
   constexpr int scales[] = {4, 2, 1};
-  options.gainmap_scale = scales[std::clamp(static_cast<int>(
-      SendMessageW(state->gainmap_resolution, CB_GETCURSEL, 0, 0)), 0, 2)];
-  const int transfer = static_cast<int>(SendMessageW(state->transfer, CB_GETCURSEL, 0, 0));
-  const bool non_jpeg_gainmap = (index == 3 || index == 5) && transfer == 2;
-  options.multi_channel_gainmap = non_jpeg_gainmap ||
-      SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0) == 1;
-  const int gamut_index = static_cast<int>(SendMessageW(state->gamut, CB_GETCURSEL, 0, 0));
-  const int gamut = gamut_index == CB_ERR ? 9 : static_cast<int>(
-      SendMessageW(state->gamut, CB_GETITEMDATA, gamut_index, 0));
-  options.output_gamut = (index == 0 || (index == 7 && !frame_png) || gamut == 12) ? "p3" : "rec2020";
-  options.output_representation = (index == 3 || index == 5) && transfer == 2
-      ? "gainmap" : "direct";
+  options.gainmap_scale = scales[std::clamp(opt.scale_index, 0, 2)];
+  const bool non_jpeg_gainmap = (index == 3 || index == 5) && opt.transfer == 2;
+  options.multi_channel_gainmap = non_jpeg_gainmap || opt.channels == 1;
+  options.output_gamut = active_gamut_for(index, opt);
+  options.output_representation = non_jpeg_gainmap ? "gainmap" : "direct";
   options.output_transfer =
-      (index == 1 || index == 3 || index == 5 || frame_png) && transfer == 1 ? "hlg" : "pq";
+      (index == 1 || index == 3 || index == 5 || frame_png || frame_avif) &&
+      opt.transfer == 1 ? "hlg" : "pq";
   options.overwrite = SendMessageW(state->collision, CB_GETCURSEL, 0, 0) == 1;
-  const int gainmap_format = static_cast<int>(SendMessageW(
-      state->gainmap_export_format, CB_GETCURSEL, 0, 0));
-  options.gainmap_export_format = gainmap_format == 1 ? "png" :
-      gainmap_format == 2 ? "tiff" : gainmap_format == 3 ? "jpeg" : "original";
+  options.gainmap_export_format = opt.extraction == 1 ? "png" :
+      opt.extraction == 2 ? "tiff" : opt.extraction == 3 ? "jpeg" : "original";
   if (index == 7) {
-    options.frame_format = frame_png ? "png" : "jpeg";
+    options.frame_format = opt.frame_format;
     options.lossless = frame_png; options.copy_exif = false; options.copy_xmp = false;
     wchar_t executable[MAX_PATH]{};
     GetModuleFileNameW(nullptr, executable, MAX_PATH);
@@ -3065,9 +3264,37 @@ void restore_queue_add_ui(AppState* state) {
   }
 }
 
+void restore_main_options_after_edit(AppState* state) {
+  if (!state->has_main_backup) return;
+  state->format_options = state->backup_format_options;
+  state->active_format = state->backup_active_format;
+  state->use_suffix_enabled = state->backup_use_suffix;
+  state->use_source_folder = state->backup_use_source_folder;
+  state->selected_folder = state->backup_selected_folder;
+  state->has_main_backup = false;
+  state->last_encoding_format = -1;
+  state->last_encoding_frame_export = -1;
+  SendMessageW(state->format, CB_SETCURSEL, state->active_format, 0);
+  SendMessageW(state->source_folder, BM_SETCHECK,
+               state->use_source_folder ? BST_CHECKED : BST_UNCHECKED, 0);
+  SendMessageW(state->collision, CB_SETCURSEL, std::clamp(state->backup_collision, 0, 1), 0);
+  if (state->use_source_folder) {
+    if (!state->inputs.empty()) {
+      ui::set_text(state->folder_path,
+                   state->inputs[selected_source_index(state)].parent_path().c_str());
+    } else {
+      ui::set_text(state->folder_path, HB_UI("Source folder"));
+    }
+  } else if (!state->selected_folder.empty()) {
+    ui::set_text(state->folder_path, state->selected_folder.c_str());
+  }
+  update_mode_ui(state, false);
+}
+
 void cancel_task_edit(AppState* state) {
-  if (state->editing_task >= 0) {
+  if (state->editing_task >= 0 || state->has_main_backup) {
     state->editing_task = -1;
+    restore_main_options_after_edit(state);
     restore_queue_add_ui(state);
   }
 }
@@ -3086,6 +3313,7 @@ void add_or_update_task(AppState* state) {
       task.status = QueueStatus::pending;
       existing = std::move(task);
       state->editing_task = -1;
+      restore_main_options_after_edit(state);
       restore_queue_add_ui(state);
     } else {
       const int selected_count = static_cast<int>(SendMessageW(state->queue, LB_GETSELCOUNT, 0, 0));
@@ -3116,37 +3344,26 @@ void add_or_update_task(AppState* state) {
   }
 }
 
-void update_mode_ui(AppState* state, bool restore_saved_gamut) {
-  const int index = static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0));
-  if (state->last_format_index >= 0 && state->last_format_index != 1 &&
-      state->last_format_index != 2 && state->last_format_index != 7) {
-    const bool checked = SendMessageW(state->lossless, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    state->lossless_setting = checked;
-  }
-  if (state->last_format_index == 0) {
-    const int channels = static_cast<int>(
-        SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0));
-    if (channels != CB_ERR) state->uhdr_gainmap_channels = std::clamp(channels, 0, 1);
-  }
-  if (state->last_format_index != index) {
-    if (state->last_format_index == 7) {
-      state->frame_gainmap_resolution = static_cast<int>(SendMessageW(state->gainmap_resolution, CB_GETCURSEL, 0, 0));
-      state->frame_gainmap_channels = static_cast<int>(SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0));
-    } else if (state->last_format_index >= 0) {
-      state->normal_gainmap_resolution = static_cast<int>(SendMessageW(state->gainmap_resolution, CB_GETCURSEL, 0, 0));
-      state->normal_copy_exif = SendMessageW(state->copy_exif, BM_GETCHECK, 0, 0) == BST_CHECKED;
-      state->normal_copy_xmp = SendMessageW(state->copy_xmp, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    }
-    SendMessageW(state->gainmap_resolution, CB_SETCURSEL, index == 7 ? state->frame_gainmap_resolution : state->normal_gainmap_resolution, 0);
-    SendMessageW(state->copy_exif, BM_SETCHECK, index != 7 && state->normal_copy_exif ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(state->copy_xmp, BM_SETCHECK, index != 7 && state->normal_copy_xmp ? BST_CHECKED : BST_UNCHECKED, 0);
-  }
+void update_mode_ui(AppState* state, bool /*restore_saved_gamut*/) {
+  const int index = std::clamp(
+      static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0)), 0, 7);
+  state->active_format = index;
+  auto& opt = state->format_options[static_cast<size_t>(index)];
+
+  SendMessageW(state->gainmap_resolution, CB_SETCURSEL, opt.scale_index, 0);
+  SendMessageW(state->tiff_compression, CB_SETCURSEL, opt.compressed ? 0 : 1, 0);
+  SendMessageW(state->gainmap_export_format, CB_SETCURSEL, opt.extraction, 0);
+  const int frame_export_index = frame_export_index_for(opt.frame_format);
+  SendMessageW(state->frame_export_format, CB_SETCURSEL, frame_export_index, 0);
+  SendMessageW(state->copy_exif, BM_SETCHECK,
+               index != 7 && opt.exif ? BST_CHECKED : BST_UNCHECKED, 0);
+  SendMessageW(state->copy_xmp, BM_SETCHECK,
+               index != 7 && opt.xmp ? BST_CHECKED : BST_UNCHECKED, 0);
   EnableWindow(state->copy_exif, index != 7);
   EnableWindow(state->copy_xmp, index != 7);
-  int transfer_index = static_cast<int>(SendMessageW(state->transfer, CB_GETCURSEL, 0, 0));
-  if (transfer_index == CB_ERR) transfer_index = saved_index(L"OutputTransfer", 0, 2);
+
   const bool representation_output = index == 3 || index == 5;
-  if (!representation_output && transfer_index == 2) transfer_index = 0;
+  const int transfer_index = std::clamp(opt.transfer, 0, representation_output ? 2 : 1);
   ui::send(state->transfer, CB_RESETCONTENT, 0, 0);
   ui::send(state->transfer, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("PQ / ST2084 — default")));
   ui::send(state->transfer, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"HLG"));
@@ -3154,20 +3371,18 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
     ui::send(state->transfer, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(HB_UI("Gain Map")));
   }
   SendMessageW(state->transfer, CB_SETCURSEL, transfer_index, 0);
-  const int representation_index = (index == 3 || index == 5) && transfer_index == 2 ? 1 : 0;
+
+  const int representation_index = representation_output && transfer_index == 2 ? 1 : 0;
   const bool frame_mode = index == 7;
-  const int frame_export_index = std::clamp(static_cast<int>(
-      SendMessageW(state->frame_export_format, CB_GETCURSEL, 0, 0)), 0, 1);
   const bool frame_png = frame_mode && frame_export_index == 1;
-  const bool frame_jpeg = frame_mode && !frame_png;
+  const bool frame_avif = frame_mode && frame_export_index == 2;
+  const bool frame_jpeg = frame_mode && frame_export_index == 0;
+  const bool frame_direct = frame_png || frame_avif;
   const bool ultrahdr_output = index == 0 || frame_jpeg;
   const bool gainmap_output = ultrahdr_output ||
       (representation_output && representation_index == 1);
   const bool transfer_output =
-      (index == 1 || index == 3 || index == 5 || frame_png) && !gainmap_output;
-  const int previous_index = static_cast<int>(SendMessageW(state->gamut, CB_GETCURSEL, 0, 0));
-  const int previous_gamut = previous_index == CB_ERR ? -1 : static_cast<int>(
-      SendMessageW(state->gamut, CB_GETITEMDATA, previous_index, 0));
+      (index == 1 || index == 3 || index == 5 || frame_direct) && !gainmap_output;
   ShowWindow(state->transfer, (transfer_output || representation_output) ? SW_SHOW : SW_HIDE);
   ShowWindow(state->representation, SW_HIDE);
   ShowWindow(state->lossless, SW_SHOW);
@@ -3178,7 +3393,7 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
   ShowWindow(state->tiff_compression, index == 2 ? SW_SHOW : SW_HIDE);
   ShowWindow(state->gainmap_export_format, index == 6 ? SW_SHOW : SW_HIDE);
   ShowWindow(state->frame_export_format, frame_mode ? SW_SHOW : SW_HIDE);
-  const bool selectable_gamut = index == 1 || index == 2 || representation_output || frame_png;
+  const bool selectable_gamut = has_selectable_gamut(index, opt);
   ShowWindow(state->gamut, (ultrahdr_output || selectable_gamut) ? SW_SHOW : SW_HIDE);
   ui::send(state->gamut, CB_RESETCONTENT, 0, 0);
   const auto add_gamut = [&](const wchar_t* label, int cicp) {
@@ -3195,19 +3410,7 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
     add_gamut(HB_UI("Rec.2020 — default"), 9);
     add_gamut(L"Display P3", 12);
   }
-  int saved_gamut = -1;
-  if (restore_saved_gamut && state->last_format_index < 0) {
-    if (const auto value = read_layout_value(L"OutputGamutCicp")) {
-      saved_gamut = static_cast<int>(*value);
-    }
-  }
-  const bool representation_changed = state->last_representation_index != representation_index;
-  const bool frame_export_changed = frame_mode && state->last_frame_export_index != frame_export_index;
-  const int default_gamut = gainmap_output ? 12 : 9;
-  const int desired_gamut = saved_gamut > 0 ? saved_gamut :
-      (state->last_format_index != index || representation_changed ||
-       frame_export_changed || previous_gamut < 0)
-      ? default_gamut : previous_gamut;
+  const int desired_gamut = active_gamut_for(index, opt) == "p3" ? 12 : 9;
   int selected_gamut = 0;
   const int gamut_count = static_cast<int>(SendMessageW(state->gamut, CB_GETCOUNT, 0, 0));
   for (int item = 0; item < gamut_count; ++item) {
@@ -3223,57 +3426,44 @@ void update_mode_ui(AppState* state, bool restore_saved_gamut) {
   if (gainmap_output && !ultrahdr_output) {
     SendMessageW(state->gainmap_channels, CB_SETCURSEL, 1, 0);
   } else if (ultrahdr_output) {
-    SendMessageW(state->gainmap_channels, CB_SETCURSEL,
-                 index == 7 ? state->frame_gainmap_channels : state->uhdr_gainmap_channels, 0);
+    SendMessageW(state->gainmap_channels, CB_SETCURSEL, opt.channels, 0);
   }
   EnableWindow(state->gainmap_channels, ultrahdr_output);
   ui::set_text(state->lossless, HB_UI("Lossless"));
+  const bool lossless_checked = is_effective_lossless(index, opt);
   SendMessageW(state->lossless, BM_SETCHECK,
-               ((index != 7 && (index == 1 || index == 2 || state->lossless_setting)) || frame_png)
-                   ? BST_CHECKED : BST_UNCHECKED, 0);
+               lossless_checked ? BST_CHECKED : BST_UNCHECKED, 0);
   EnableWindow(state->lossless, index == 3 || index == 4);
-  const int slot = encoding_slot_for(state, index);
-  const bool compression = is_compression_slot(slot);
-  if (state->last_encoding_slot != slot) {
-    if (state->last_encoding_slot >= 0 && state->last_encoding_slot <
-        static_cast<int>(state->encoding_values.size())) {
-      state->encoding_values[static_cast<size_t>(state->last_encoding_slot)] =
-          static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0));
-    }
+
+  const bool compression = is_compression_slider(index, opt);
+  const int value = std::clamp(active_encoding_value(index, opt), 1, compression ? 9 : 100);
+  if (state->last_encoding_format != index ||
+      (index == 7 && state->last_encoding_frame_export != frame_export_index) ||
+      SendMessageW(state->quality, TBM_GETPOS, 0, 0) != value) {
     SendMessageW(state->quality, TBM_SETRANGE, TRUE,
                  compression ? MAKELPARAM(1, 9) : MAKELPARAM(1, 100));
     SendMessageW(state->quality, TBM_SETPAGESIZE, 0, compression ? 1 : 5);
-    const int value = state->encoding_values[static_cast<size_t>(slot)];
     SendMessageW(state->quality, TBM_SETPOS, TRUE, value);
     ui::set_text(state->quality_value,
                    (std::to_wstring(value) + (compression ? L"" : L"%")).c_str());
-    state->last_encoding_slot = slot;
+    state->last_encoding_format = index;
+    state->last_encoding_frame_export = frame_export_index;
   }
-  const bool lossy = index == 0 || index == 5 || frame_jpeg ||
-                     SendMessageW(state->lossless, BM_GETCHECK, 0, 0) != BST_CHECKED;
-  const bool compression_level_enabled = index != 2 || state->tiff_compressed;
-  const bool gainmap_jpeg = index == 6 &&
-      SendMessageW(state->gainmap_export_format, CB_GETCURSEL, 0, 0) == 3;
+  const bool lossy = index == 0 || index == 5 || frame_jpeg || frame_avif || !lossless_checked;
+  const bool compression_level_enabled = index != 2 || opt.compressed;
+  const bool gainmap_jpeg = index == 6 && opt.extraction == 3;
   EnableWindow(state->quality, ((lossy || compression) && index != 6 || gainmap_jpeg) &&
                                compression_level_enabled);
   EnableWindow(state->quality_value, ((lossy || compression) && index != 6 || gainmap_jpeg) &&
                                      compression_level_enabled);
-  if (state->last_format_index != index || state->last_transfer_index != transfer_index ||
-      frame_export_changed) {
-    const auto current_suffix = control_text(state->name_suffix);
-    const bool should_update_suffix = state->last_format_index < 0
-        ? is_known_default_suffix(current_suffix)
-        : current_suffix == default_suffix_for_ui(
-              state->last_format_index, std::max(0, state->last_transfer_index));
-    if (should_update_suffix) {
-      set_rich_editable_text(state, state->name_suffix,
-                             default_suffix_for_ui(index, transfer_index));
-    }
-    state->last_format_index = index;
-    state->last_transfer_index = transfer_index;
+
+  SendMessageW(state->use_suffix, BM_SETCHECK,
+               state->use_suffix_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  if (control_text(state->name_suffix) != opt.suffix) {
+    state->updating_suffix_ui = true;
+    set_rich_editable_text(state, state->name_suffix, opt.suffix);
+    state->updating_suffix_ui = false;
   }
-  state->last_representation_index = representation_index;
-  state->last_frame_export_index = frame_export_index;
   update_output_preview(state);
   RECT client{};
   GetClientRect(state->window, &client);
@@ -4128,7 +4318,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         window, WC_COMBOBOXW, L"", kComboStyle,
         IDC_FRAME_EXPORT_FORMAT);
     for (const wchar_t* item : {HB_UI("Format: Ultra HDR JPEG"),
-                                HB_UI("Format: PNG")}) {
+                                HB_UI("Format: PNG"),
+                                HB_UI("Format: AVIF")}) {
       ui::send(owned->frame_export_format, CB_ADDSTRING, 0,
                    reinterpret_cast<LPARAM>(item));
     }
@@ -4750,13 +4941,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     }
     case WM_HSCROLL:
       if (reinterpret_cast<HWND>(lparam) == state->quality) {
-        const int value = static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0));
-        const int format_index = static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0));
-        const int slot = encoding_slot_for(state, format_index);
-        if (format_index >= 0) {
-          state->encoding_values[static_cast<size_t>(slot)] = value;
-        }
-        const bool compression = is_compression_slot(slot);
+        const int format_index = std::clamp(
+            static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0)), 0, 7);
+        auto& opt = state->format_options[static_cast<size_t>(format_index)];
+        const bool compression = is_compression_slider(format_index, opt);
+        const int value = std::clamp(
+            static_cast<int>(SendMessageW(state->quality, TBM_GETPOS, 0, 0)),
+            1, compression ? 9 : 100);
+        active_encoding_value(format_index, opt) = value;
         ui::set_text(state->quality_value,
                        (std::to_wstring(value) + (compression ? L"" : L"%")).c_str());
       }
@@ -4852,49 +5044,69 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           if (state->running) break;
           const int selected = static_cast<int>(SendMessageW(state->tasks, LB_GETCURSEL, 0, 0));
           if (selected != LB_ERR && static_cast<size_t>(selected) < state->conversion_tasks.size()) {
+            if (!state->has_main_backup) {
+              state->format_options[static_cast<size_t>(state->active_format)].suffix =
+                  control_text(state->name_suffix);
+              state->backup_format_options = state->format_options;
+              state->backup_active_format = state->active_format;
+              state->backup_use_suffix = state->use_suffix_enabled;
+              state->backup_use_source_folder = state->use_source_folder;
+              state->backup_selected_folder = state->selected_folder;
+              state->backup_collision = std::clamp(static_cast<int>(
+                  SendMessageW(state->collision, CB_GETCURSEL, 0, 0)), 0, 1);
+              state->has_main_backup = true;
+            }
             const auto& task = state->conversion_tasks[static_cast<size_t>(selected)];
             state->editing_task = selected;
             state->input = task.source;
             const std::wstring task_source_text = task.source.wstring();
             ui::send(state->source_path, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(task_source_text.c_str()));
-            const int format_index = index_for_mode(task.options.mode);
-            const bool task_frame_png =
-                format_index == 7 && task.options.conversion.frame_format == "png";
-            SendMessageW(state->format, CB_SETCURSEL, format_index, 0);
+            const int format_index = std::clamp(index_for_mode(task.options.mode), 0, 7);
+            state->active_format = format_index;
+            auto& opt = state->format_options[static_cast<size_t>(format_index)];
             if (format_index == 7) {
-              SendMessageW(state->frame_export_format, CB_SETCURSEL,
-                           task_frame_png ? 1 : 0, 0);
+              opt.frame_format = task.options.conversion.frame_format == "png" ? "png" :
+                  task.options.conversion.frame_format == "avif" ? "avif" : "jpeg";
             }
-            SendMessageW(state->lossless, BM_SETCHECK,
-                         task.options.conversion.lossless ? BST_CHECKED : BST_UNCHECKED, 0);
-            SendMessageW(state->copy_exif, BM_SETCHECK,
-                         task.options.conversion.copy_exif ? BST_CHECKED : BST_UNCHECKED, 0);
-            SendMessageW(state->copy_xmp, BM_SETCHECK,
-                         task.options.conversion.copy_xmp ? BST_CHECKED : BST_UNCHECKED, 0);
+            const bool task_frame_png = format_index == 7 && opt.frame_format == "png";
+            const bool task_frame_avif = format_index == 7 && opt.frame_format == "avif";
             const int quality = (format_index == 1 || task_frame_png)
                 ? task.options.conversion.png_compression_level
                 : format_index == 2 ? task.options.conversion.tiff_compression_level
                 : task.options.conversion.base_quality;
+            if (task_frame_png) opt.frame_png_compression = std::clamp(quality, 1, 9);
+            else if (task_frame_avif) opt.frame_avif_quality = std::clamp(quality, 1, 100);
+            else opt.quality = std::clamp(quality, 1, (format_index == 1 || format_index == 2) ? 9 : 100);
             if (format_index == 2) {
-              state->tiff_compressed = task.options.conversion.tiff_compressed;
-              SendMessageW(state->tiff_compression, CB_SETCURSEL,
-                           state->tiff_compressed ? 0 : 1, 0);
+              opt.compressed = task.options.conversion.tiff_compressed;
+            } else if (format_index == 3 || format_index == 4) {
+              opt.lossless = task.options.conversion.lossless;
             }
-            else if (format_index != 7) state->lossless_setting = task.options.conversion.lossless;
-            state->encoding_values[static_cast<size_t>(task_frame_png ? 8 : format_index)] = quality;
-            state->last_encoding_slot = -1;
-            const int desired_transfer =
-                task.options.conversion.output_representation == "gainmap" ? 2 :
-                task.options.conversion.output_transfer == "hlg" ? 1 : 0;
-            const int scale_index = task.options.conversion.gainmap_scale == 1 ? 2 :
-                                    task.options.conversion.gainmap_scale == 4 ? 0 : 1;
-            SendMessageW(state->gainmap_resolution, CB_SETCURSEL, scale_index, 0);
-            SendMessageW(state->gainmap_channels, CB_SETCURSEL,
-                         task.options.conversion.multi_channel_gainmap ? 1 : 0, 0);
+            if (format_index != 7) {
+              opt.exif = task.options.conversion.copy_exif;
+              opt.xmp = task.options.conversion.copy_xmp;
+            }
+            opt.scale_index = task.options.conversion.gainmap_scale == 1 ? 2 :
+                              task.options.conversion.gainmap_scale == 4 ? 0 : 1;
+            opt.channels = task.options.conversion.multi_channel_gainmap ? 1 : 0;
             const auto& gm_format = task.options.conversion.gainmap_export_format;
-            SendMessageW(state->gainmap_export_format, CB_SETCURSEL,
-                         gm_format == "png" ? 1 : gm_format == "tiff" ? 2 :
-                         gm_format == "jpeg" ? 3 : 0, 0);
+            opt.extraction = gm_format == "png" ? 1 : gm_format == "tiff" ? 2 :
+                             gm_format == "jpeg" ? 3 : 0;
+            if (format_index != 7 || opt.frame_format != "jpeg") {
+              opt.transfer = task.options.conversion.output_representation == "gainmap" ? 2 :
+                             task.options.conversion.output_transfer == "hlg" ? 1 : 0;
+            }
+            if (task.options.conversion.output_gamut == "p3" ||
+                task.options.conversion.output_gamut == "rec2020") {
+              set_active_gamut(format_index, opt, task.options.conversion.output_gamut);
+            }
+            opt.suffix = task.options.suffix;
+            state->use_suffix_enabled = task.options.use_suffix;
+            state->last_encoding_format = -1;
+            state->last_encoding_frame_export = -1;
+            SendMessageW(state->format, CB_SETCURSEL, format_index, 0);
+            SendMessageW(state->collision, CB_SETCURSEL,
+                         task.options.collision == hdrbridge::desktop::CollisionPolicy::overwrite ? 1 : 0, 0);
             state->use_source_folder = task.options.use_source_folder;
             state->selected_folder = task.options.selected_folder;
             SendMessageW(state->source_folder, BM_SETCHECK,
@@ -4903,34 +5115,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                            (state->use_source_folder ? task.source.parent_path()
                                                      : state->selected_folder).c_str());
             ui::set_text(state->convert, HB_UI("Update task"));
-            if (format_index == 7) {
-              state->frame_gainmap_resolution = scale_index;
-              state->frame_gainmap_channels = task.options.conversion.multi_channel_gainmap ? 1 : 0;
-            } else {
-              state->normal_gainmap_resolution = scale_index;
-              state->uhdr_gainmap_channels = task.options.conversion.multi_channel_gainmap ? 1 : 0;
-              state->normal_copy_exif = task.options.conversion.copy_exif;
-              state->normal_copy_xmp = task.options.conversion.copy_xmp;
-            }
-            state->last_format_index = -1;
-            state->last_representation_index = -1;
-            state->last_frame_export_index = -1;
             update_mode_ui(state, false);
-            SendMessageW(state->transfer, CB_SETCURSEL, desired_transfer, 0);
-            update_mode_ui(state, false);
-            const auto& gamut = task.options.conversion.output_gamut;
-            const int desired_cicp = gamut == "p3" ? 12 : gamut == "rec2020" ? 9 : -1;
-            const int gamut_count = static_cast<int>(SendMessageW(state->gamut, CB_GETCOUNT, 0, 0));
-            for (int item = 0; item < gamut_count; ++item) {
-              if (static_cast<int>(SendMessageW(state->gamut, CB_GETITEMDATA, item, 0)) == desired_cicp) {
-                SendMessageW(state->gamut, CB_SETCURSEL, item, 0);
-                break;
-              }
-            }
             set_rich_editable_text(state, state->base_name, task.options.base_name);
             set_base_name_cue(state, HB_UI("Base name"));
-            set_rich_editable_text(state, state->name_suffix, task.options.suffix);
-            SendMessageW(state->use_suffix, BM_SETCHECK, task.options.use_suffix ? BST_CHECKED : BST_UNCHECKED, 0);
             EnableWindow(state->convert, TRUE);
             update_output_preview(state);
           }
@@ -4953,40 +5140,113 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
           reset_conversion_settings(state);
           save_layout(state);
           break;
-        case IDC_FORMAT: if (HIWORD(wparam) == CBN_SELCHANGE) update_mode_ui(state); break;
+        case IDC_FORMAT:
+          if (HIWORD(wparam) == CBN_SELCHANGE) {
+            const int prev_format = state->active_format;
+            const int next_format = std::clamp(
+                static_cast<int>(SendMessageW(state->format, CB_GETCURSEL, 0, 0)), 0, 7);
+            if (prev_format >= 0 && prev_format < 8 && prev_format != next_format) {
+              state->format_options[static_cast<size_t>(prev_format)].suffix =
+                  control_text(state->name_suffix);
+              carry_custom_suffix(
+                  prev_format,
+                  state->format_options[static_cast<size_t>(prev_format)],
+                  next_format,
+                  state->format_options[static_cast<size_t>(next_format)]);
+            }
+            state->active_format = next_format;
+            update_mode_ui(state);
+          }
+          break;
         case IDC_TRANSFER:
+          if (HIWORD(wparam) == CBN_SELCHANGE) {
+            auto& opt = state->format_options[static_cast<size_t>(state->active_format)];
+            const auto old_default =
+                default_suffix_for_format(state->active_format, opt.transfer);
+            const int max_transfer =
+                (state->active_format == 3 || state->active_format == 5) ? 2 : 1;
+            opt.transfer = std::clamp(
+                static_cast<int>(SendMessageW(state->transfer, CB_GETCURSEL, 0, 0)),
+                0, max_transfer);
+            if (control_text(state->name_suffix) == old_default) {
+              opt.suffix = default_suffix_for_format(state->active_format, opt.transfer);
+            }
+            update_mode_ui(state);
+          }
+          break;
         case IDC_GAMUT:
-          if (HIWORD(wparam) == CBN_SELCHANGE) update_mode_ui(state);
+          if (HIWORD(wparam) == CBN_SELCHANGE) {
+            const int sel = static_cast<int>(SendMessageW(state->gamut, CB_GETCURSEL, 0, 0));
+            const int cicp = sel == CB_ERR ? 9 : static_cast<int>(
+                SendMessageW(state->gamut, CB_GETITEMDATA, sel, 0));
+            set_active_gamut(state->active_format,
+                             state->format_options[static_cast<size_t>(state->active_format)],
+                             cicp == 12 ? "p3" : "rec2020");
+            update_mode_ui(state);
+          }
           break;
         case IDC_REPRESENTATION:
           if (HIWORD(wparam) == CBN_SELCHANGE) update_mode_ui(state);
           break;
-        case IDC_GAINMAP_CHANNELS:
-          if (HIWORD(wparam) == CBN_SELCHANGE &&
-              (SendMessageW(state->format, CB_GETCURSEL, 0, 0) == 0 ||
-               SendMessageW(state->format, CB_GETCURSEL, 0, 0) == 7)) {
-            const int selected_channels = std::clamp(static_cast<int>(
-                SendMessageW(state->gainmap_channels, CB_GETCURSEL, 0, 0)), 0, 1);
-            if (SendMessageW(state->format, CB_GETCURSEL, 0, 0) == 7) state->frame_gainmap_channels = selected_channels;
-            else state->uhdr_gainmap_channels = selected_channels;
+        case IDC_GAINMAP_RESOLUTION:
+          if (HIWORD(wparam) == CBN_SELCHANGE) {
+            state->format_options[static_cast<size_t>(state->active_format)].scale_index =
+                std::clamp(static_cast<int>(SendMessageW(
+                    state->gainmap_resolution, CB_GETCURSEL, 0, 0)), 0, 2);
           }
           break;
-        case IDC_LOSSLESS: update_mode_ui(state); break;
+        case IDC_GAINMAP_CHANNELS:
+          if (HIWORD(wparam) == CBN_SELCHANGE &&
+              (state->active_format == 0 ||
+               (state->active_format == 7 &&
+                state->format_options[7].frame_format == "jpeg"))) {
+            state->format_options[static_cast<size_t>(state->active_format)].channels =
+                std::clamp(static_cast<int>(SendMessageW(
+                    state->gainmap_channels, CB_GETCURSEL, 0, 0)), 0, 1);
+          }
+          break;
+        case IDC_LOSSLESS:
+          if (state->active_format == 3 || state->active_format == 4) {
+            state->format_options[static_cast<size_t>(state->active_format)].lossless =
+                SendMessageW(state->lossless, BM_GETCHECK, 0, 0) == BST_CHECKED;
+          }
+          update_mode_ui(state);
+          break;
+        case IDC_COPY_EXIF:
+          if (state->active_format != 7) {
+            state->format_options[static_cast<size_t>(state->active_format)].exif =
+                SendMessageW(state->copy_exif, BM_GETCHECK, 0, 0) == BST_CHECKED;
+          }
+          break;
+        case IDC_COPY_XMP:
+          if (state->active_format != 7) {
+            state->format_options[static_cast<size_t>(state->active_format)].xmp =
+                SendMessageW(state->copy_xmp, BM_GETCHECK, 0, 0) == BST_CHECKED;
+          }
+          break;
         case IDC_TIFF_COMPRESSION:
           if (HIWORD(wparam) == CBN_SELCHANGE) {
-            state->tiff_compressed = SendMessageW(state->tiff_compression,
-                                                   CB_GETCURSEL, 0, 0) != 1;
+            state->format_options[static_cast<size_t>(state->active_format)].compressed =
+                SendMessageW(state->tiff_compression, CB_GETCURSEL, 0, 0) != 1;
             update_mode_ui(state);
           }
           break;
         case IDC_GAINMAP_EXPORT_FORMAT:
           if (HIWORD(wparam) == CBN_SELCHANGE) {
-            state->last_format_index = -1;
+            state->format_options[static_cast<size_t>(state->active_format)].extraction =
+                std::clamp(static_cast<int>(SendMessageW(
+                    state->gainmap_export_format, CB_GETCURSEL, 0, 0)), 0, 3);
             update_mode_ui(state);
           }
           break;
         case IDC_FRAME_EXPORT_FORMAT:
-          if (HIWORD(wparam) == CBN_SELCHANGE) update_mode_ui(state);
+          if (HIWORD(wparam) == CBN_SELCHANGE) {
+            const int sel = std::clamp(static_cast<int>(
+                SendMessageW(state->frame_export_format, CB_GETCURSEL, 0, 0)), 0, 2);
+            state->format_options[static_cast<size_t>(state->active_format)].frame_format =
+                frame_export_name_for(sel);
+            update_mode_ui(state);
+          }
           break;
         case IDC_SOURCE_FOLDER: {
           state->use_source_folder =
@@ -5005,13 +5265,21 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         case IDC_CHOOSE_FOLDER: choose_output_folder(state); break;
         case IDC_BASE_NAME:
-        case IDC_NAME_SUFFIX:
           if (HIWORD(wparam) == EN_CHANGE) update_output_preview(state);
+          break;
+        case IDC_NAME_SUFFIX:
+          if (HIWORD(wparam) == EN_CHANGE && !state->updating_suffix_ui) {
+            state->format_options[static_cast<size_t>(state->active_format)].suffix =
+                control_text(state->name_suffix);
+            update_output_preview(state);
+          }
           break;
         case IDC_COLLISION:
           if (HIWORD(wparam) == CBN_SELCHANGE) update_output_preview(state);
           break;
         case IDC_USE_SUFFIX:
+          state->use_suffix_enabled =
+              SendMessageW(state->use_suffix, BM_GETCHECK, 0, 0) == BST_CHECKED;
           update_output_preview(state);
           break;
         case IDC_CONVERT: add_or_update_task(state); break;

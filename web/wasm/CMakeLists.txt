@@ -25,6 +25,7 @@ find_package(libheif CONFIG REQUIRED)
 find_package(libavif CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(PNG REQUIRED)
+find_package(expat CONFIG REQUIRED)
 find_package(TIFF REQUIRED)
 find_package(lcms2 CONFIG REQUIRED)
 
@@ -98,6 +99,7 @@ target_link_libraries(hdrbridge-web PRIVATE
   uhdr
   nlohmann_json::nlohmann_json
   PNG::PNG
+  expat::expat
   TIFF::TIFF
   "${LZMA_LIBRARY}"
   lcms2::lcms2)

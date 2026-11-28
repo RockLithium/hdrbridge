@@ -500,7 +500,7 @@ public class MainActivity extends Activity {
     boolean gamut = f == 0 || f == 1 || f == 2 || f == 3 || f == 5 || f == 7;
     boolean transfer = f == 1 || f == 3 || f == 5;
     if (gamut) {
-      boolean jpegOnlyGamut = f == 0 || (f == 7 && !current.framePng());
+      boolean jpegOnlyGamut = f == 0 || (f == 7 && !current.frameDirect());
       String[] labels = jpegOnlyGamut ? new String[]{"Display P3"}
           : current.gainmap() ? GAIN_MAP_GAMUT_LABELS : DIRECT_GAMUT_LABELS;
       String[] codes = jpegOnlyGamut ? new String[]{"p3"}
@@ -508,38 +508,33 @@ public class MainActivity extends Activity {
       if (f == 0) {
         inlineChoice(optionsPanel, false, "Color gamut", labels,
             Math.max(0, Arrays.asList(codes).indexOf(current.gamut)), "output_gamut",
-            n -> current.gamut = codes[n]);
+            n -> current.setGamut(codes[n]));
       } else if (f == 7) {
         LinearLayout pair = row(optionsPanel);
-        inlineChoice(pair, true, "Format", new String[]{"Ultra HDR JPEG", "PNG"},
-            current.framePng() ? 1 : 0, "output_frame_format",
-            n -> current.setFrameFormat(n == 1 ? "png" : "jpeg"));
+        int frameIndex = current.framePng() ? 1 : current.frameAvif() ? 2 : 0;
+        inlineChoice(pair, true, "Format", new String[]{"Ultra HDR JPEG", "PNG", "HDR AVIF"},
+            frameIndex, "output_frame_format",
+            n -> current.setFrameFormat(n == 1 ? "png" : n == 2 ? "avif" : "jpeg"));
         inlineChoice(pair, true, "Color gamut", labels,
             Math.max(0, Arrays.asList(codes).indexOf(current.gamut)), "output_gamut",
-            n -> current.gamut = codes[n]);
+            n -> current.setGamut(codes[n]));
       } else {
         LinearLayout pair = row(optionsPanel);
         inlineChoice(pair, true, "Color gamut", labels,
             Math.max(0, Arrays.asList(codes).indexOf(current.gamut)), "output_gamut",
-            n -> current.gamut = codes[n]);
+            n -> current.setGamut(codes[n]));
         if (transfer) {
           String[] choices = f == 1 ? new String[]{"PQ", "HLG"}
               : new String[]{"PQ", "HLG", "Gain map"};
           inlineChoice(pair, true, "HDR representation", choices, current.transfer,
-              "output_transfer", n -> {
-                boolean wasGainmap = current.gainmap();
-                current.applyTransfer(n);
-                if (wasGainmap != current.gainmap()) {
-                  current.gamut = current.gainmap() ? "p3" : "rec2020";
-                }
-              });
+              "output_transfer", n -> current.applyTransfer(n));
         } else if (f == 2) {
           inlineChoice(pair, true, "TIFF compression", new String[]{"Compressed", "Uncompressed"},
               current.compressed ? 0 : 1, "output_compression", n -> current.compressed = n == 0);
         }
       }
     }
-    if (current.framePng()) {
+    if (current.frameDirect()) {
       inlineChoice(optionsPanel, false, "HDR Presentation", new String[]{"PQ / ST2084", "HLG"},
           current.transfer, "output_transfer", n -> current.transfer = n);
     }
@@ -1296,18 +1291,19 @@ public class MainActivity extends Activity {
       int f = value.format;
       caption1Control = caption2Control = null;
       if (f == 7) {
+        int frameIndex = value.framePng() ? 1 : value.frameAvif() ? 2 : 0;
         frameFormatControl = spinner(
-            "Format", new String[] {"Ultra HDR JPEG", "PNG"}, value.framePng() ? 1 : 0);
+            "Format", new String[] {"Ultra HDR JPEG", "PNG", "HDR AVIF"}, frameIndex);
         frameFormatControl.setOnItemSelectedListener(
             new android.widget.AdapterView.OnItemSelectedListener() {
               public void onNothingSelected(android.widget.AdapterView<?> p) {}
               public void onItemSelected(android.widget.AdapterView<?> p, View v, int n, long id) {
-                int currentFrame = value.framePng() ? 1 : 0;
+                int currentFrame = value.framePng() ? 1 : value.frameAvif() ? 2 : 0;
                 if (rebuilding || n == currentFrame)
                   return;
                 try {
                   read();
-                  value.setFrameFormat(n == 1 ? "png" : "jpeg");
+                  value.setFrameFormat(n == 1 ? "png" : n == 2 ? "avif" : "jpeg");
                   render();
                 } catch (Exception e) {
                   frameFormatControl.setSelection(currentFrame);
@@ -1319,11 +1315,11 @@ public class MainActivity extends Activity {
         caption2Control = input("Caption 2 (empty: exposure from EXIF)", value.caption2, false);
       }
       boolean gm = value.gainmap();
-      if (f == 1 || f == 3 || f == 5 || value.framePng()) {
+      if (f == 1 || f == 3 || f == 5 || value.frameDirect()) {
         String[] choices = (f == 3 || f == 5) ? new String[] {"PQ / ST2084", "HLG", "Gain Map"}
                                               : new String[] {"PQ / ST2084", "HLG"};
         transferControl = spinner(
-            value.framePng() ? "HDR Presentation" : "Transfer / representation",
+            value.frameDirect() ? "HDR Presentation" : "Transfer / representation",
             choices, value.transfer);
         transferControl.setOnItemSelectedListener(
             new android.widget.AdapterView.OnItemSelectedListener() {
@@ -1333,13 +1329,9 @@ public class MainActivity extends Activity {
                   return;
                 try {
                   int previousTransfer = value.transfer;
-                  boolean wasGainmap = value.gainmap();
                   read();
                   value.transfer = previousTransfer;
                   value.applyTransfer(n);
-                  if (wasGainmap != value.gainmap()) {
-                    value.gamut = value.gainmap() ? "p3" : "rec2020";
-                  }
                   render();
                 } catch (Exception e) {
                   transferControl.setSelection(value.transfer);
@@ -1349,7 +1341,7 @@ public class MainActivity extends Activity {
             });
       }
       if (f == 0 || f == 1 || f == 2 || f == 3 || f == 5 || f == 7) {
-        boolean jpegOnlyGamut = f == 0 || (f == 7 && !value.framePng());
+        boolean jpegOnlyGamut = f == 0 || (f == 7 && !value.frameDirect());
         String[] labels = jpegOnlyGamut ? new String[] {"Display P3"}
             : gm ? GAIN_MAP_GAMUT_LABELS : DIRECT_GAMUT_LABELS;
         String[] codes = jpegOnlyGamut ? new String[] {"p3"}
@@ -1471,10 +1463,10 @@ public class MainActivity extends Activity {
         next.caption2 = caption2Control.getText().toString();
       }
       if (gamutControl != null) {
-        boolean jpegOnlyGamut = f == 0 || (f == 7 && !value.framePng());
+        boolean jpegOnlyGamut = f == 0 || (f == 7 && !value.frameDirect());
         String[] codes = jpegOnlyGamut ? new String[] {"p3"}
             : value.gainmap() ? GAIN_MAP_GAMUT_CODES : DIRECT_GAMUT_CODES;
-        next.gamut = codes[gamutControl.getSelectedItemPosition()];
+        next.setGamut(codes[gamutControl.getSelectedItemPosition()]);
       }
       if (transferControl != null)
         next.transfer = transferControl.getSelectedItemPosition();

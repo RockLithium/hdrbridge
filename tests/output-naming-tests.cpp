@@ -28,7 +28,8 @@ int main() {
       hdrbridge::desktop::extension_for_mode(L"gainmap-extract", L"original", L"map.heic") != L".png" ||
       hdrbridge::desktop::extension_for_mode(L"gainmap-extract", L"tiff", L"map.avif") != L".tif" ||
       hdrbridge::desktop::extension_for_mode(L"photo-frame") != L".jpg" ||
-      hdrbridge::desktop::extension_for_mode(L"photo-frame", L"png") != L".png") {
+      hdrbridge::desktop::extension_for_mode(L"photo-frame", L"png") != L".png" ||
+      hdrbridge::desktop::extension_for_mode(L"photo-frame", L"avif") != L".avif") {
     std::cerr << "mode extension mismatch\n";
     return 1;
   }

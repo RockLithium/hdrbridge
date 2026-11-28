@@ -11,7 +11,7 @@ android/       native Android UI, JNI and platform adapters
 
 The desktop UI calls the C++ core directly without an intermediate 8-bit UI buffer. The developer CLI exposes the same inspection and conversion operations as JSON for regression tests.
 
-Photo Frame uses the canonical HDR raster to compose a border, camera logo and caption, then encodes Ultra HDR JPEG or 16-bit HDR PNG. Desktop and Android share the compositor, font rasterizer and SVG renderer. Fonts and logo sources are packaged as runtime assets.
+Photo Frame uses the canonical HDR raster to compose a border, camera logo and caption, then encodes Ultra HDR JPEG, 16-bit HDR PNG or 10-bit 4:4:4 HDR AVIF. Desktop and Android share the compositor, font rasterizer and SVG renderer. Fonts and logo sources are packaged as runtime assets.
 
 The Web UI calls the portable core through a C/WASM boundary:
 
@@ -34,7 +34,7 @@ The public conversion API lives in [hdrbridge_core.h](../core/include/hdrbridge_
 | `codecs/` | Per-format input, encoding and readback checks. Gain-map container parsing, reconstruction and extraction live in `codecs/gainmap/`, with separate adapters for AVIF, TIFF, JPEG XL, HEIF/HEIC and JPEG. |
 | `color/` | Transfer functions, gamut transforms, ICC/CICP interpretation and profile generation, and linear FP16 scRGB packing. |
 | `image/` | Orientation, straight alpha compositing, resampling and luminance measurement. Preview resampling retains the fused linear-light interpolation and scRGB packing. |
-| `photo_frame/` | Composition, camera captions and logos, with output through the existing PNG and Ultra HDR paths. |
+| `photo_frame/` | Composition, camera captions and logos, with output through the existing PNG, Ultra HDR and AVIF paths. |
 | `metadata/` | EXIF payload parsing and preparation, plus source metadata status. Container-specific reads and writes stay with their codecs. |
 | `diagnostics/` and `infrastructure/` | Result JSON and checksums, file and revision helpers, worker scheduling, progress and cancellation primitives, and staged writes. |
 

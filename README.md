@@ -10,7 +10,7 @@ All platforms share the C++ core and support these principal HDR input families:
 
 - direct PQ or HLG HEIF/HIF, Panasonic HSP, AVIF, PNG, TIFF and JPEG XL;
 - Apple Adaptive HDR HEIC/JPEG and ISO `tmap` HEIF/HEIC;
-- ISO Ultra HDR JPEG, including mono and RGB gain maps;
+- ISO Ultra HDR JPEG and Adobe HDR Gain Map XMP JPEG, including mono and RGB gain maps;
 - gain-map AVIF and gain-map TIFF;
 - gain-map JPEG XL (`jhgm`);
 - FP16 scRGB JPEG XR.
@@ -28,7 +28,7 @@ Available outputs:
 - 10-bit 4:4:4 HDR AVIF in PQ or HLG;
 - RGB gain-map AVIF;
 - embedded gain-map extraction to the original payload where possible, or PNG, TIFF and JPEG images;
-- Photo Frame: Ultra HDR JPEG or 16-bit PQ/HLG HDR PNG with a blurred border, camera logo and caption.
+- Photo Frame: Ultra HDR JPEG, 16-bit PQ/HLG HDR PNG or 10-bit 4:4:4 PQ/HLG HDR AVIF with a blurred border, camera logo and caption.
 
 See [output formats](docs/OUTPUT_FORMATS.md) for controls and defaults, and the [compatibility matrix](docs/COMPATIBILITY_MATRIX.md) for application support.
 

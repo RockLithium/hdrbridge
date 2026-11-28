@@ -67,6 +67,19 @@ int main(){try{
   auto encoded=read(temp.dir/"frame.png");require(chunk(encoded,"eXIf").empty(),"source EXIF must not be copied");
   require(chunk(encoded,"cICP")==std::vector<uint8_t>{12,18,0,1},"frame PNG signals Display P3/HLG");
 
+  o.frame_format="avif";o.output_gamut="rec2020";o.output_transfer="pq";
+  const auto avifPqPath=temp.dir/"frame-pq.avif";
+  const auto avifPq=convert(src,avifPqPath,o);pairChecks(avifPq);
+  require(avifPq.timings.canonical_cache_hit,"paired frame cache reused for AVIF PQ");
+  const auto avifPqInfo=inspect(avifPqPath);
+  require(avifPqInfo.format=="AVIF"&&avifPqInfo.asset_kind=="direct-hdr"&&avifPqInfo.primaries==9&&avifPqInfo.transfer==16&&!avifPqInfo.exif_present&&!avifPqInfo.xmp_present,"frame AVIF PQ signals Rec.2020/PQ without metadata");
+
+  o.frame_format="avif";o.output_gamut="p3";o.output_transfer="hlg";
+  const auto avifHlgPath=temp.dir/"frame-hlg.avif";
+  const auto avifHlg=convert(src,avifHlgPath,o);pairChecks(avifHlg);
+  const auto avifHlgInfo=inspect(avifHlgPath);
+  require(avifHlgInfo.format=="AVIF"&&avifHlgInfo.asset_kind=="direct-hdr"&&avifHlgInfo.primaries==12&&avifHlgInfo.transfer==18&&!avifHlgInfo.exif_present&&!avifHlgInfo.xmp_present,"frame AVIF HLG signals Display P3/HLG without metadata");
+
   o.frame_format="jpeg";o.output_gamut="rec2020";o.output_transfer="pq";
   const auto jpeg2020Path=temp.dir/"frame-2020.jpg";
   const auto jpeg2020=convert(src,jpeg2020Path,o);

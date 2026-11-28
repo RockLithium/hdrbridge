@@ -10,7 +10,7 @@ Inspector data is read from the source container. The canonical HDR working rast
 | Panasonic HSP | HSP container, HEVC bit depth/chroma, HEVC SPS VUI or HSP BT.2020 HLG default fallback, Exif/GPS, XMP and IFD0 Orientation |
 | HEIF/HEIC gain map | SDR base, auxiliary and `tmap` item relationships, Exif/XMP, base ICC/NCLX, `tmap` color profile, `HAGC` or legacy `lumi` reference white and ISO gain-map metadata |
 | AVIF gain map | Base, map and `tmap` item relationships, Exif/XMP, base and alternate color signaling and ISO gain-map metadata |
-| JPEG / Ultra HDR / Apple JPEG | base SOF and MPF/gain-map JPEG independently; APP1 Exif/XMP, APP2 ICC, Orientation and ISO gain-map metadata |
+| JPEG / Ultra HDR / Adobe XMP / Apple JPEG | base SOF and MPF/gain-map JPEG independently; APP1 Exif/XMP, APP2 ICC, Orientation, Adobe gain-map XMP and ISO gain-map metadata |
 | JPEG XL | integer representation, native structured color or actual embedded ICC, Exif and `xml ` boxes for direct and gain-map inputs, codestream Orientation; native color is labeled `CICP equivalent` |
 | PNG | RGB16, literal cICP and iCCP as separate signals, resolved color, eXIf and XMP iTXt |
 | TIFF | sample format/bit depth, ICC interpretation, Orientation, XMP and camera Exif from the primary IFD and Exif IFD |
@@ -33,6 +33,7 @@ Direct HDR classification does not require native CICP/NCLX. The resolver may ob
 | FP16 scRGB JPEG XR          | WIC pixel format and codec properties                                             | current WIC encoder does not clone Exif/XMP/ICC payloads                                |
 | Photo Frame UHDR JPEG | generated UHDR gain-map metadata; captions use source EXIF and fill missing camera fields from XMP | source EXIF/XMP are not copied; Lossless, EXIF and XMP are fixed off |
 | Photo Frame HDR PNG   | cICP and (for PQ) target ICC; captions use source EXIF and fill missing camera fields from XMP      | source EXIF/XMP are not copied; HLG omits ICC; EXIF/XMP are fixed off and Lossless is fixed on |
+| Photo Frame HDR AVIF  | target NCLX; captions use source EXIF and fill missing camera fields from XMP                      | source EXIF/XMP are not copied; EXIF/XMP and Lossless are fixed off                            |
 
 Apple, gain-map-container and Ultra HDR relationship metadata is input reconstruction data. It is removed after reconstruction when it would misdescribe a new direct-HDR output. Camera Exif is retained where the destination encoder supports it.
 

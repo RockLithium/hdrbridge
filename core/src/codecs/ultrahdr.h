@@ -13,8 +13,4 @@ Verification decode_ultrahdr(const std::vector<uint8_t>& bytes,
                              const HdrStats* expected_stats = nullptr,
                              const ConversionOptions* expected_options = nullptr);
 
-SourceInfo inspect_jpeg(const std::filesystem::path& path);
-
-DecodedImage decode_ultrahdr_input(const std::filesystem::path& path);
-
 }  // namespace hdrbridge::detail

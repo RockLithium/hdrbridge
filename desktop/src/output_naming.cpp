@@ -26,7 +26,9 @@ std::wstring extension_for_mode(const std::wstring& mode,
                                 const std::wstring& gainmap_export_format,
                                 const std::filesystem::path& source) {
   if (mode == L"photo-frame") {
-    return gainmap_export_format == L"png" ? L".png" : L".jpg";
+    if (gainmap_export_format == L"png") return L".png";
+    if (gainmap_export_format == L"avif") return L".avif";
+    return L".jpg";
   }
   if (mode == L"ultrahdr") return L".jpg";
   if (mode == L"png-pq16") return L".png";

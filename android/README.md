@@ -14,7 +14,7 @@ Non-HDR files are skipped. A decode or conversion error affects only that task. 
 
 Output representations and controls are listed in [Output formats](../docs/OUTPUT_FORMATS.md); supported inputs are shared with the core library. Output controls include gamut, PQ/HLG or gain-map representation, gain-map size/channels, quality/compression, EXIF/XMP and filename suffix where applicable.
 
-Photo Frame adds a blurred border, camera logo and caption to an HDR image and exports Ultra HDR JPEG or lossless 16-bit HDR PNG. Captions use source EXIF and fill missing camera fields from XMP, without copying source EXIF or XMP to the output; EXIF and XMP are fixed off, while Lossless is fixed off for JPEG and fixed on for PNG.
+Photo Frame adds a blurred border, camera logo and caption to an HDR image and exports Ultra HDR JPEG, lossless 16-bit HDR PNG or 10-bit 4:4:4 HDR AVIF. Captions use source EXIF and fill missing camera fields from XMP, without copying source EXIF or XMP to the output; EXIF and XMP are fixed off, while Lossless is fixed off for JPEG and AVIF and fixed on for PNG.
 
 Tap the output path to select a folder. The folder grant, per-format parameters and suffixes are saved. Default suffixes update automatically when switching options, while manually edited suffixes are preserved until **Reset settings** or **Reset format** restores defaults. On **FILES**, **Reset settings** restores output parameters without clearing the selected folder or queued tasks. Tap **HDR Bridge** in the header to switch between English and Simplified Chinese.
 

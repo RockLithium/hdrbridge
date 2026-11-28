@@ -3,6 +3,7 @@
 #include "photo_frame/frame_exif.h"
 #include "canonical/cache.h"
 #include "canonical/input.h"
+#include "codecs/avif.h"
 #include "codecs/png.h"
 #include "codecs/ultrahdr.h"
 #include "codecs/uhdr_helpers.h"
@@ -290,7 +291,7 @@ static std::vector<uint8_t> frame_encode_uhdr(const FramePair& pair,const std::v
 ConversionResult convert_photo_frame(const std::filesystem::path& input,const std::filesystem::path& output,
                                      const ConversionOptions& options,const ProgressCallback& progress,std::atomic_bool* cancel) {
   auto start=Clock::now();
-  if(options.frame_format!="jpeg"&&options.frame_format!="png")throw std::runtime_error("frame format must be jpeg or png");
+  if(options.frame_format!="jpeg"&&options.frame_format!="png"&&options.frame_format!="avif")throw std::runtime_error("frame format must be jpeg, png, or avif");
   if(options.output_gamut!="rec2020"&&options.output_gamut!="p3")throw std::runtime_error("output gamut must be rec2020 or p3");
   if(options.output_transfer!="pq"&&options.output_transfer!="hlg")throw std::runtime_error("output transfer must be pq or hlg");
   if(options.frame_format=="jpeg"&&options.output_transfer!="pq")throw std::runtime_error("frame JPEG output only supports pq transfer");
@@ -331,30 +332,34 @@ ConversionResult convert_photo_frame(const std::filesystem::path& input,const st
   }
   const FramePair& pair=*cached;
   check_cancel(cancel);report(progress,75,"Encoding framed image");
-  std::vector<uint16_t> pixels;
-  if(options.frame_format=="jpeg") pixels=frame_output_pixels(pair,options.output_gamut);
+  if(!output.parent_path().empty())std::filesystem::create_directories(output.parent_path());OutputTransaction tx(output);std::string error;if(!tx.create(error))throw std::runtime_error(error);
   std::vector<uint8_t> bytes;
-  std::vector<uint16_t> converted_png;
-  const std::vector<uint16_t>* png_pixels=&pair.hdr.rgb;
-  bool expect_png_icc=false;
-  if(options.frame_format=="png") {
-    ConversionOptions pngopts=options;pngopts.copy_exif=false;pngopts.copy_xmp=false;
-    converted_png=options.output_transfer=="hlg"
+  Verification verification;
+  if(options.frame_format=="png"||options.frame_format=="avif") {
+    ConversionOptions direct_opts=options;direct_opts.copy_exif=false;direct_opts.copy_xmp=false;
+    std::vector<uint16_t> converted_direct=options.output_transfer=="hlg"
         ? convert_rec2020_pq_to_hlg(pair.hdr,options.output_gamut)
         : options.output_gamut=="p3" ? convert_rec2020_pq_to_p3_pq(pair.hdr)
                                      : std::vector<uint16_t>{};
-    if(!converted_png.empty()) png_pixels=&converted_png;
-    expect_png_icc=pngopts.output_transfer=="pq"&&pngopts.embed_hdr_icc;
-    bytes=encode_png(pair.hdr,pngopts,*png_pixels);
+    const std::vector<uint16_t>* direct_pixels=converted_direct.empty() ? &pair.hdr.rgb : &converted_direct;
+    if(options.frame_format=="png") {
+      const bool expect_png_icc=direct_opts.output_transfer=="pq"&&direct_opts.embed_hdr_icc;
+      bytes=encode_png(pair.hdr,direct_opts,*direct_pixels);
+      write_file(tx.stage_path(),bytes);check_cancel(cancel);
+      verification=decode_png(bytes,direct_pixels,expect_png_icc,false,nullptr);
+    }else{
+      encode_avif(tx.stage_path(),pair.hdr,direct_opts,*direct_pixels);
+      check_cancel(cancel);
+      bytes=read_file(tx.stage_path());
+      verification=decode_avif(tx.stage_path(),direct_pixels,direct_opts.diagnostic_icc_only);
+    }
   }else{
+    std::vector<uint16_t> pixels=frame_output_pixels(pair,options.output_gamut);
     auto jpeg=frame_encode_jpeg(pair.hdr,pixels,options);
     auto stats=measure_hdr(source);bytes=frame_encode_uhdr(pair,pixels,jpeg,stats,options);
+    write_file(tx.stage_path(),bytes);check_cancel(cancel);
+    verification=decode_ultrahdr(bytes);
   }
-  if(!output.parent_path().empty())std::filesystem::create_directories(output.parent_path());OutputTransaction tx(output);std::string error;if(!tx.create(error))throw std::runtime_error(error);
-  write_file(tx.stage_path(),bytes);check_cancel(cancel);
-  Verification verification;
-  if(options.frame_format=="png")verification=decode_png(bytes,png_pixels,expect_png_icc,false,nullptr);
-  else verification=decode_ultrahdr(bytes);
   verification.checks.push_back("frame main image origin="+std::to_string(pair.origin_x)+","+std::to_string(pair.origin_y)+" size="+std::to_string(pair.source_w)+"x"+std::to_string(pair.source_h));
   verification.checks.push_back("frame source interior maximum PQ16 code error="+std::to_string(pair.interior_error));
   verification.checks.push_back("frame decoration maximum paired PQ16 code error="+std::to_string(pair.decoration_error));

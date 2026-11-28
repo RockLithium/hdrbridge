@@ -10,9 +10,9 @@ final class Options {
   static final String[] LABELS = {"Ultra HDR JPEG", "HDR PNG", "HDR TIFF", "JPEG XL",
       "JPEG XR FP16", "HDR AVIF", "Extract Gain Map", "Photo Frame"};
   int format, quality, transfer, scale, channels, extraction;
-  int frameJpegQuality = 95, framePngCompression = 4;
+  int frameJpegQuality = 95, framePngCompression = 4, frameAvifQuality = 95;
   boolean lossless, compressed, exif, xmp, useSuffix;
-  String gamut, suffix;
+  String gamut, directGamut, gainmapGamut, suffix;
   String frameFormat = "jpeg";
   String caption1 = "", caption2 = "";
   static Options defaults(int f) {
@@ -25,7 +25,9 @@ final class Options {
     o.useSuffix = true;
     o.scale = 1;
     o.channels = (f == 0 || f == 7) ? 1 : 0;
-    o.gamut = (f == 0 || f == 7) ? "p3" : "rec2020";
+    o.directGamut = "rec2020";
+    o.gainmapGamut = "p3";
+    o.gamut = (f == 0 || f == 7) ? o.gainmapGamut : o.directGamut;
     o.suffix = defaultSuffix(f, 0);
     return o;
   }
@@ -52,12 +54,31 @@ final class Options {
   boolean framePng() {
     return format == 7 && "png".equals(frameFormat);
   }
+  boolean frameAvif() {
+    return format == 7 && "avif".equals(frameFormat);
+  }
+  boolean frameDirect() {
+    return framePng() || frameAvif();
+  }
   boolean compressionFormat() {
     return format == 1 || format == 2 || framePng();
   }
+  void setGamut(String next) {
+    String normalized = "p3".equals(next) ? "p3" : "rec2020";
+    if (format == 0 || (format == 7 && !frameDirect())) normalized = "p3";
+    gamut = normalized;
+    if (gainmap()) {
+      if (format != 0 && format != 7) gainmapGamut = normalized;
+    } else {
+      directGamut = normalized;
+    }
+  }
   void applyTransfer(int nextTransfer) {
+    if (gainmap()) gainmapGamut = effectiveGamut();
+    else directGamut = effectiveGamut();
     String oldDefault = defaultSuffix(format, transfer);
     transfer = nextTransfer;
+    gamut = gainmap() ? gainmapGamut : directGamut;
     if (suffix.equals(oldDefault)) {
       suffix = defaultSuffix(format, nextTransfer);
     }
@@ -68,35 +89,45 @@ final class Options {
     }
   }
   void setFrameFormat(String next) {
-    String normalized = "png".equals(next) ? "png" : "jpeg";
+    String normalized = "png".equals(next) ? "png" : "avif".equals(next) ? "avif" : "jpeg";
     if (normalized.equals(frameFormat)) return;
-    if ("png".equals(normalized)) {
-      frameJpegQuality = Math.max(1, Math.min(100, quality));
-      frameFormat = "png";
-      quality = framePngCompression;
-      gamut = "rec2020";
-      lossless = true;
-    } else {
+    if (framePng()) {
+      directGamut = "p3".equals(gamut) ? "p3" : "rec2020";
       framePngCompression = Math.max(1, Math.min(9, quality));
-      frameFormat = "jpeg";
+    } else if (frameAvif()) {
+      directGamut = "p3".equals(gamut) ? "p3" : "rec2020";
+      frameAvifQuality = Math.max(1, Math.min(100, quality));
+    } else {
+      frameJpegQuality = Math.max(1, Math.min(100, quality));
+    }
+    frameFormat = normalized;
+    if ("png".equals(normalized)) {
+      quality = framePngCompression;
+      gamut = "p3".equals(directGamut) ? "p3" : "rec2020";
+      lossless = true;
+    } else if ("avif".equals(normalized)) {
+      quality = frameAvifQuality;
+      gamut = "p3".equals(directGamut) ? "p3" : "rec2020";
+      lossless = false;
+    } else {
       quality = frameJpegQuality;
       gamut = "p3";
       lossless = false;
     }
   }
   boolean gainmap() {
-    return format == 0 || (format == 7 && !framePng())
+    return format == 0 || (format == 7 && !frameDirect())
         || ((format == 3 || format == 5) && transfer == 2);
   }
   private String effectiveGamut() {
-    if (format == 0 || (format == 7 && !framePng()) || "p3".equals(gamut)) return "p3";
+    if (format == 0 || (format == 7 && !frameDirect()) || "p3".equals(gamut)) return "p3";
     if ("rec2020".equals(gamut)) return "rec2020";
     return gainmap() ? "p3" : "rec2020";
   }
   JSONObject json() throws JSONException {
     JSONObject j = new JSONObject();
     j.put("mode", MODES[format]);
-    j.put("frame_format", framePng() ? "png" : "jpeg");
+    j.put("frame_format", framePng() ? "png" : frameAvif() ? "avif" : "jpeg");
     j.put("frame_caption1", caption1);
     j.put("frame_caption2", caption2);
     j.put("lossless", framePng() || (format != 7 && (lossless || format == 1 || format == 2)));
@@ -109,9 +140,9 @@ final class Options {
     j.put("tiff_compression_level", quality);
     j.put("tiff_compressed", compressed);
     j.put("gainmap_scale", scale);
-    j.put("multi_channel_gainmap", (format == 0 || (format == 7 && !framePng())) ? channels == 1 : gainmap());
+    j.put("multi_channel_gainmap", (format == 0 || (format == 7 && !frameDirect())) ? channels == 1 : gainmap());
     j.put("output_gamut", effectiveGamut());
-    j.put("output_transfer", (format == 7 && !framePng()) ? "pq" : (transfer == 1 ? "hlg" : "pq"));
+    j.put("output_transfer", (format == 7 && !frameDirect()) ? "pq" : (transfer == 1 ? "hlg" : "pq"));
     j.put("output_representation", transfer == 2 ? "gainmap" : "direct");
     j.put("gainmap_export_format", new String[] {"original", "png", "tiff", "jpeg"}[extraction]);
     j.put("copy_exif", format != 7 && exif);
@@ -122,8 +153,11 @@ final class Options {
     JSONObject j = json();
     j.put("format", format);
     j.put("quality", quality);
-    j.put("frameJpegQuality", framePng() ? frameJpegQuality : quality);
+    j.put("frameJpegQuality", ("jpeg".equals(frameFormat) && format == 7) ? quality : frameJpegQuality);
     j.put("framePngCompression", framePng() ? quality : framePngCompression);
+    j.put("frameAvifQuality", frameAvif() ? quality : frameAvifQuality);
+    j.put("directGamut", directGamut);
+    j.put("gainmapGamut", gainmapGamut);
     j.put("transferIndex", transfer);
     j.put("scaleIndex", scale);
     j.put("channelsIndex", channels);
@@ -135,7 +169,8 @@ final class Options {
   static Options from(JSONObject j) {
     int f = Math.max(0, Math.min(7, j.optInt("format", 0)));
     Options o = defaults(f);
-    o.frameFormat = "png".equals(j.optString("frame_format", "jpeg")) ? "png" : "jpeg";
+    String ff = j.optString("frame_format", "jpeg");
+    o.frameFormat = "png".equals(ff) ? "png" : "avif".equals(ff) ? "avif" : "jpeg";
     o.caption1 = j.optString("frame_caption1", "");
     o.caption2 = j.optString("frame_caption2", "");
     o.quality = j.optInt("quality", o.quality);
@@ -154,12 +189,18 @@ final class Options {
       o.quality = Math.max(1, Math.min(maxQuality,
           j.optInt("quality", o.framePng() ? 4 : 95)));
       o.frameJpegQuality = Math.max(1, Math.min(100,
-          j.optInt("frameJpegQuality", o.framePng() ? 95 : o.quality)));
+          j.optInt("frameJpegQuality", (!o.framePng() && !o.frameAvif()) ? o.quality : 95)));
       o.framePngCompression = Math.max(1, Math.min(9,
           j.optInt("framePngCompression", o.framePng() ? o.quality : 4)));
+      o.frameAvifQuality = Math.max(1, Math.min(100,
+          j.optInt("frameAvifQuality", o.frameAvif() ? o.quality : 95)));
     }
     o.gamut = j.optString("output_gamut", o.gamut);
     o.gamut = o.effectiveGamut();
+    String fallbackDirect = !o.gainmap() ? o.gamut : "rec2020";
+    String fallbackGainmap = o.gainmap() ? o.gamut : "p3";
+    o.directGamut = "p3".equals(j.optString("directGamut", fallbackDirect)) ? "p3" : "rec2020";
+    o.gainmapGamut = "rec2020".equals(j.optString("gainmapGamut", fallbackGainmap)) ? "rec2020" : "p3";
     o.useSuffix = j.optBoolean("useSuffix", true);
     o.suffix = j.optString("suffix", o.suffix);
     return o;
@@ -183,7 +224,7 @@ final class Options {
     String base = d > 0 ? source.substring(0, d) : source;
     String ext = new String[] {".jpg", ".png", ".tif", ".jxl", ".jxr", ".avif", ".png", ".jpg"}[format];
     if (format == 7) {
-      ext = framePng() ? ".png" : ".jpg";
+      ext = framePng() ? ".png" : frameAvif() ? ".avif" : ".jpg";
     }
     if (format == 6) {
       if (extraction == 1)

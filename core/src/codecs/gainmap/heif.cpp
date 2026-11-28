@@ -1,4 +1,4 @@
-#include "codecs/gainmap/apple_heif.h"
+#include "codecs/gainmap/heif.h"
 #include "codecs/gainmap/bmff_items.h"
 #include "codecs/gainmap/icc_description.h"
 #include "codecs/gainmap/iso_metadata.h"
@@ -6,6 +6,7 @@
 #include "codecs/gainmap/extract_support.h"
 #include "codecs/gainmap/reconstruction_math.h"
 #include "color/icc_rgb_primaries.h"
+#include "color/signaling.h"
 #include "image/orientation.h"
 #include <libheif/heif_items.h>
 #include <libheif/heif_properties.h>
@@ -44,11 +45,20 @@ struct GainMapAsset {
 };
 
 struct ResolvedHeifBaseColor {
-  uint16_t primaries = 12;
-  uint16_t transfer = 13;
-  std::string description = "Display P3";
-  std::string transfer_name = "SDR gamma";
-  std::string signal_kind = "HEIF ICC / tmap metadata";
+  uint16_t primaries = 0;
+  uint16_t transfer = 0;
+  uint16_t matrix = 0;
+  bool full_range = false;
+  bool range_known = false;
+  bool native_present = false;
+  uint16_t native_primaries = 0;
+  uint16_t native_transfer = 0;
+  uint16_t native_matrix = 0;
+  bool native_full_range = false;
+  bool native_range_known = false;
+  std::string description = "Unspecified";
+  std::string transfer_name = "Unspecified";
+  std::string signal_kind = "Absent / Unspecified";
   bool icc_present = false;
   std::vector<uint8_t> icc;
   std::string error;
@@ -154,8 +164,27 @@ uint16_t identify_icc_primaries(const void* icc_data, size_t icc_size,
   return 0;
 }
 
+void read_optional_nclx_signal(const heif_image_handle* primary, ResolvedHeifBaseColor& color) {
+  heif_color_profile_nclx* raw_nclx = nullptr;
+  if (heif_image_handle_get_nclx_color_profile(primary, &raw_nclx).code != heif_error_Ok ||
+      !raw_nclx) {
+    return;
+  }
+  struct NclxGuard {
+    heif_color_profile_nclx* value;
+    ~NclxGuard() { if (value) heif_nclx_color_profile_free(value); }
+  } nclx{raw_nclx};
+  color.native_present = true;
+  color.native_primaries = static_cast<uint16_t>(raw_nclx->color_primaries);
+  color.native_transfer = static_cast<uint16_t>(raw_nclx->transfer_characteristics);
+  color.native_matrix = static_cast<uint16_t>(raw_nclx->matrix_coefficients);
+  color.native_full_range = raw_nclx->full_range_flag != 0;
+  color.native_range_known = true;
+}
+
 ResolvedHeifBaseColor read_heif_base_color_optional(const heif_image_handle* primary) {
   ResolvedHeifBaseColor color;
+  read_optional_nclx_signal(primary, color);
   const size_t icc_size = heif_image_handle_get_raw_color_profile_size(primary);
   if (icc_size > 0) {
     color.icc.resize(icc_size);
@@ -217,6 +246,8 @@ ResolvedHeifBaseColor read_heif_base_color_optional(const heif_image_handle* pri
               "HEIC base ICC CICP linear transfer conflicts with profile colorimetry or TRC";
           return color;
         }
+        color.full_range = true;
+        color.range_known = true;
         color.signal_kind = "HEIF ICC / tmap metadata";
         return color;
       }
@@ -228,28 +259,28 @@ ResolvedHeifBaseColor read_heif_base_color_optional(const heif_image_handle* pri
       color.error = "HEIC SDR base ICC has no RGB transfer curves";
       return color;
     }
-    if (const uint16_t sdr_trc = hdrbridge::icc::identify_sdr_transfer(profile.get())) {
-      color.transfer = sdr_trc;
-    }
-    color.transfer_name = color.transfer == 14 ? "BT.2020 SDR" :
-                          color.transfer == 1 ? "BT.709" : "SDR gamma";
+    const uint16_t sdr_trc = hdrbridge::icc::identify_sdr_transfer(profile.get());
+    color.transfer = sdr_trc;
+    color.full_range = true;
+    color.range_known = true;
+    color.transfer_name = color.transfer == 13 ? "sRGB" :
+                          color.transfer == 14 ? "BT.2020 SDR" :
+                          color.transfer == 1 ? "BT.709" :
+                          "ICC RGB transfer curve";
     color.signal_kind = "HEIF ICC / tmap metadata";
     return color;
   }
 
-  heif_color_profile_nclx* raw_nclx = nullptr;
-  if (heif_image_handle_get_nclx_color_profile(primary, &raw_nclx).code == heif_error_Ok &&
-      raw_nclx) {
-    struct NclxGuard {
-      heif_color_profile_nclx* value;
-      ~NclxGuard() { if (value) heif_nclx_color_profile_free(value); }
-    } nclx{raw_nclx};
-    const uint16_t cp = static_cast<uint16_t>(raw_nclx->color_primaries);
-    const uint16_t tc = static_cast<uint16_t>(raw_nclx->transfer_characteristics);
+  if (color.native_present) {
+    const uint16_t cp = color.native_primaries;
+    const uint16_t tc = color.native_transfer;
     const bool supported_sdr_transfer =
         tc == 1u || tc == 6u || tc == 13u || tc == 14u || tc == 15u;
     color.primaries = cp;
     color.transfer = tc;
+    color.matrix = color.native_matrix;
+    color.full_range = color.native_full_range;
+    color.range_known = color.native_range_known;
     color.transfer_name = tc == 13u ? "sRGB" :
                           tc == 16u ? "PQ / ST 2084" :
                           tc == 18u ? "HLG / BT.2100" :
@@ -271,6 +302,7 @@ ResolvedHeifBaseColor read_heif_base_color_optional(const heif_image_handle* pri
 
   color.description = "Unspecified";
   color.transfer_name = "Unspecified";
+  color.signal_kind = "Absent / Unspecified";
   color.error = "HEIC SDR base color profile is missing";
   return color;
 }
@@ -555,7 +587,7 @@ void load_heif_gainmap_metadata(const heif_context* context,
 
 void populate_heif_gainmap_info(SourceInfo& info,
                                 const std::filesystem::path& path,
-                                const AppleAuxiliaryProbe& probe,
+                                const GainMapAuxiliaryProbe& probe,
                                 const ItemGraph& graph,
                                 const IsoGainMapMetadata& metadata,
                                 const ResolvedHeifBaseColor& base_color,
@@ -584,7 +616,8 @@ void populate_heif_gainmap_info(SourceInfo& info,
   const uint32_t gain_channels = metadata.multichannel ? 3u : 1u;
   info.pixel_format = gain_channels == 3u
       ? "HEVC SDR base + RGB gain map"
-      : "HEVC SDR base + monochrome auxiliary gain map";
+      : (probe.is_apple ? "HEVC SDR base + monochrome auxiliary gain map"
+                        : "HEVC SDR base + monochrome gain map");
   info.bit_depth = static_cast<uint32_t>(std::max(
       heif_image_handle_get_luma_bits_per_pixel(primary), 0));
   info.chroma = gain_channels == 3u
@@ -606,9 +639,9 @@ void populate_heif_gainmap_info(SourceInfo& info,
   info.base_transfer = base_color.transfer_name;
   info.primaries = base_color.primaries;
   info.transfer = base_color.transfer;
-  info.matrix = 0;
-  info.full_range = true;
-  info.range_known = true;
+  info.matrix = base_color.matrix;
+  info.full_range = base_color.full_range;
+  info.range_known = base_color.range_known;
   info.gain_map_width = map_width;
   info.gain_map_height = map_height;
   info.gain_map_channels = gain_channels;
@@ -625,6 +658,28 @@ void populate_heif_gainmap_info(SourceInfo& info,
   info.alternate_offset = metadata.alternate_offset;
   info.gain_map_uses_base_color_space = metadata.use_base_color_space;
   info.icc_present = base_color.icc_present;
+  if (base_color.native_present) {
+    info.native_color_present = true;
+    info.native_color_description = "CICP / NCLX";
+    info.native_primaries = base_color.native_primaries;
+    info.native_transfer = base_color.native_transfer;
+    info.native_matrix = base_color.native_matrix;
+    info.native_full_range = base_color.native_full_range;
+    info.native_range_known = base_color.native_range_known;
+  } else {
+    info.native_color_present = false;
+    info.native_color_description = "Absent / Unspecified";
+    info.native_range_known = false;
+  }
+  if (base_color.icc_present && !base_color.icc.empty()) {
+    hdrbridge::detail::store_icc_signal(info, hdrbridge::detail::parse_icc_signal(
+        base_color.icc.data(), base_color.icc.size()));
+    info.resolved_signaling_source = "ICC";
+  } else if (base_color.native_present) {
+    info.resolved_signaling_source = "Native";
+  } else {
+    info.resolved_signaling_source = "Unknown";
+  }
   if (base_color.icc_present) {
     info.profile = base_color.description + (probe.is_apple
         ? " SDR base + Apple HDR gain map"
@@ -653,8 +708,8 @@ HeifHandlePtr open_gain_map_handle(const heif_context* context,
 
 }  // namespace
 
-AppleAuxiliaryProbe probe_apple_heif(const std::filesystem::path& path) {
-  AppleAuxiliaryProbe probe;
+GainMapAuxiliaryProbe probe_heif_gainmap(const std::filesystem::path& path) {
+  GainMapAuxiliaryProbe probe;
   probe.container = "HEIF/HEIC";
   const auto bytes = read_file(path);
   HeifContextPtr context(heif_context_alloc());
@@ -718,7 +773,7 @@ AppleAuxiliaryProbe probe_apple_heif(const std::filesystem::path& path) {
 }
 
 struct LoadedHeifContainer {
-  AppleAuxiliaryProbe probe;
+  GainMapAuxiliaryProbe probe;
   std::vector<uint8_t> bytes;
   HeifContextPtr context;
   HeifHandlePtr primary;
@@ -737,7 +792,7 @@ LoadedHeifContainer open_heif_gainmap_container(const std::filesystem::path& pat
   if (cancel && cancel->load()) throw std::runtime_error("conversion cancelled");
   const auto parse_start = Clock::now();
   LoadedHeifContainer container;
-  container.probe = probe_apple_heif(path);
+  container.probe = probe_heif_gainmap(path);
   if (!container.probe.detected || container.probe.item_id == 0) {
     throw std::runtime_error("HEIC HDR gain map was not found");
   }
@@ -894,7 +949,7 @@ void decode_heif_gainmap_planes(const heif_image_handle* gain_handle,
   }
 }
 
-GainMapAsset extract_apple_heif_hdr_asset(
+GainMapAsset extract_heif_gainmap_asset(
     const std::filesystem::path& path,
     std::atomic_bool* cancel) {
   auto container = open_heif_gainmap_container(path, cancel);
@@ -958,14 +1013,14 @@ GainMapAsset extract_apple_heif_hdr_asset(
   return asset;
 }
 
-SourceInfo inspect_apple_heif_gainmap(const std::filesystem::path& path) {
+SourceInfo inspect_heif_gainmap(const std::filesystem::path& path) {
   return open_heif_gainmap_container(path, nullptr).info;
 }
 
-ReconstructedHdr reconstruct_apple_heif_gainmap(
+ReconstructedHdr reconstruct_heif_gainmap(
     const std::filesystem::path& path, std::atomic_bool* cancel) {
   const auto decode_start = Clock::now();
-  GainMapAsset asset = extract_apple_heif_hdr_asset(path, cancel);
+  GainMapAsset asset = extract_heif_gainmap_asset(path, cancel);
   ReconstructedHdr output;
   output.info = asset.info;
   output.exif = std::move(asset.exif);
@@ -981,9 +1036,13 @@ ReconstructedHdr reconstruct_apple_heif_gainmap(
   output.gain_map_decode_ms = asset.gain_map_decode_ms;
 
   const auto inverse_trc = build_base_inverse_trc(ResolvedHeifBaseColor{
-      asset.base_primaries, asset.base_transfer, asset.info.base_color_space,
-      asset.info.base_transfer, asset.info.color_signal_kind, !asset.base_icc.empty(),
-      asset.base_icc});
+      .primaries = asset.base_primaries,
+      .transfer = asset.base_transfer,
+      .description = asset.info.base_color_space,
+      .transfer_name = asset.info.base_transfer,
+      .signal_kind = asset.info.color_signal_kind,
+      .icc_present = !asset.base_icc.empty(),
+      .icc = asset.base_icc});
   const auto reconstruction_start = Clock::now();
   const uint32_t width = asset.storage_width;
   const uint32_t height = asset.storage_height;

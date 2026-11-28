@@ -9,7 +9,7 @@ inline constexpr char kAppleHdrGainMapUrn[] =
 inline constexpr char kIsoHdrGainMapUrn[] =
     "urn:iso:std:iso:ts:21496:-1";
 
-struct AppleAuxiliaryProbe {
+struct GainMapAuxiliaryProbe {
   bool detected = false;
   bool is_apple = false;
   std::string container;

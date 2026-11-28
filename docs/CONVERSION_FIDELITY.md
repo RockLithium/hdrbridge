@@ -12,7 +12,7 @@ Accepted HDR inputs become an oriented Rec.2020/PQ RGB16 working image. Linear-l
 
 | Input                            | Path to the working HDR image                                                                     | Characterization                                                                          |
 | -------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Ultra HDR JPEG                   | SDR base plus ISO mono/RGB gain map reconstruction                                                | Preserves HDR intent within JPEG, map resolution and metadata precision; not lossless     |
+| Ultra HDR / Adobe XMP JPEG       | SDR base plus ISO or Adobe hdrgm XMP gain-map reconstruction                                      | Preserves HDR intent within JPEG, map resolution and metadata precision; not lossless     |
 | Apple Adaptive HDR HEIC/JPEG | Apple auxiliary or MPF gain map reconstructed using its color and gain-map metadata | High-precision reconstruction within source encoding limits |
 | ISO gain-map HEIF/HEIC (`tmap`) | ISO gain map reconstructed in its signaled base or alternate gamut | High-precision reconstruction within source encoding limits |
 | Gain-map AVIF                    | `tmap` item graph plus ISO metadata                                                               | High-precision metadata-defined reconstruction; source encoding limits remain             |
@@ -39,5 +39,6 @@ An ordinary SDR file without gain-map, PQ or HLG data is rejected as an HDR sour
 | Gain-map extraction         | Exposes the encoded map rather than reconstructing an HDR image                                                | Original JXL is byte-exact; original JPEG preserves compressed scan data while removing parent metadata; PNG/TIFF preserve decoded samples; JPEG re-encode is lossy |
 | Photo Frame UHDR JPEG | Opaque photograph samples are retained before encoding; the border and rounded edges are newly composed | Not lossless; JPEG quality and gain-map encoding are lossy                                                                                                          |
 | Photo Frame HDR PNG   | Opaque photograph samples remain in the framed RGB16 raster within the selected gamut and transfer     | Deflate is exact for the framed RGB16 buffer                                                                                                                       |
+| Photo Frame HDR AVIF  | Opaque photograph samples remain in the framed RGB16 raster before 10-bit 4:4:4 AV1 encoding           | Not lossless; AV1 compression and 10-bit quantization are lossy                                                                                                    |
 
 Each encoder is followed by a format-appropriate readback check, except for portable jxrlib JPEG XR builds on Web and Android. Verification covers structure, color signaling, dimensions, numerical range and, where applicable, exact equality with the encoder input buffer.

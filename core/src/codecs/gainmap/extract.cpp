@@ -2,7 +2,7 @@
 #include "codecs/gainmap/avif.h"
 #include "codecs/gainmap/tiff.h"
 #include "codecs/gainmap/jxl.h"
-#include "codecs/gainmap/apple_heif.h"
+#include "codecs/gainmap/heif.h"
 #include "codecs/gainmap/jpeg.h"
 #include <algorithm>
 #include <cwctype>
@@ -20,7 +20,7 @@ GainMapRaster extract_gain_map(const std::filesystem::path& path,
   if ((upper == L".TIF" || upper == L".TIFF") && is_adobe_gainmap_tiff(path)) return extract_tiff_gainmap(path, cancel);
   if (upper == L".JXL" && is_iso_gainmap_jxl(path)) return extract_jxl_gainmap(path, cancel, decode_pixels);
   if (upper == L".HEIF" || upper == L".HEIC" || upper == L".HIF") {
-    if (probe_apple_heif(path).detected) return extract_heif_gainmap(path, cancel);
+    if (probe_heif_gainmap(path).detected) return extract_heif_gainmap(path, cancel);
   }
   if (upper == L".JPG" || upper == L".JPEG" || upper == L".JPE") {
     return extract_jpeg_gainmap(path, cancel, decode_pixels);

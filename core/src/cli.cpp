@@ -16,7 +16,7 @@ void usage() {
             << "      [--base-quality=0..100] [--gainmap-quality=0..100] [--gainmap-scale=1|2|4]\n"
             << "      [--single-channel-gainmap|--rgb-gainmap] [--no-icc] [--png-icc-name=<description>] [--png-compression=1..9]\n"
             << "      [--tiff-compression=1..9|--tiff-uncompressed] [--diagnostic-icc-only] [--lossy] [--overwrite]\n"
-            << "      [--mode=photo-frame --frame-format=jpeg|png --frame-font=<path> --frame-caption1=<text> --frame-caption2=<text>]\n"
+            << "      [--mode=photo-frame --frame-format=jpeg|png|avif --frame-font=<path> --frame-caption1=<text> --frame-caption2=<text>]\n"
             << "  hdrbridge-cli verify <output> <mode>\n"
             << "  hdrbridge-cli benchmark-cache <input> <output-a> <mode-a> <output-b> <mode-b>\n";
 }

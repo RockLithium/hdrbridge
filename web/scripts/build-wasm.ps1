@@ -56,7 +56,7 @@ foreach ($overlayCheck in @(
 }
 & $vcpkg install `
   "aom:$triplet" "libheif[core,aom]:$triplet" "libavif[core,aom]:$triplet" `
-  "libpng:$triplet" "tiff[core,jpeg,zip]:$triplet" `
+  "libpng:$triplet" "expat:$triplet" "tiff[core,jpeg,zip]:$triplet" `
   "lcms:$triplet" "liblzma:$triplet" "libjxl:$triplet" `
   "jxrlib:$triplet" "nlohmann-json:$triplet" `
   --classic "--x-install-root=$installRoot" `
@@ -83,5 +83,10 @@ $dest = if ($variant -eq 'threaded') { Join-Path $outputRoot 'threaded' } else {
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item -Force (Join-Path $buildRoot 'dist\*') $dest
 }
+$expatCopyright = Join-Path $prefix "share\expat\copyright"
+if (-not (Test-Path -LiteralPath $expatCopyright -PathType Leaf)) {
+  throw "Expat license text was not found at $expatCopyright"
+}
+Copy-Item -Force $expatCopyright (Join-Path $licenseRoot "expat.txt")
 Copy-Item -Force (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md") $licenseRoot
 Get-ChildItem $outputRoot | Select-Object Name, Length

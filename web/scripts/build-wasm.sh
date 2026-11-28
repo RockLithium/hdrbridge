@@ -49,7 +49,7 @@ done
 for attempt in 1 2 3; do
   if VCPKG_DOWNLOADS="${downloads_root}" "${vcpkg_root}/vcpkg" install \
     "aom:${triplet}" "libheif[core,aom]:${triplet}" "libavif[core,aom]:${triplet}" \
-    "libpng:${triplet}" "tiff[core,jpeg,zip]:${triplet}" \
+    "libpng:${triplet}" "expat:${triplet}" "tiff[core,jpeg,zip]:${triplet}" \
     "lcms:${triplet}" "liblzma:${triplet}" "libjxl:${triplet}" \
     "jxrlib:${triplet}" "nlohmann-json:${triplet}" \
     --classic "--x-install-root=${install_root}" \
@@ -82,5 +82,6 @@ cmake --build "${build_root}" --parallel
   mkdir -p "$dest"
   cp "${build_root}/dist/"* "$dest/"
 done
+cp "${prefix}/share/expat/copyright" "${web_root}/public/licenses/expat.txt"
 cp "${repo_root}/THIRD_PARTY_NOTICES.md" "${web_root}/public/licenses/"
 du -h "${output_root}/hdrbridge-core.wasm"
